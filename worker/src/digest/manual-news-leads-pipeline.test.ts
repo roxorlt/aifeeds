@@ -112,7 +112,7 @@ const officialEvidence: ManualNewsEvidence = {
   title: 'How Claude marks AI-generated content',
   excerpt: 'Only supported models and products are covered.',
   claims_supported: [
-    'Anthropic Claude supported output provenance documentation covers watermark features for supported models and products.',
+    'On 2026-08-10, Anthropic Claude supported output provenance documentation covers watermark features for supported models and products.',
   ],
   reliable: true,
 };

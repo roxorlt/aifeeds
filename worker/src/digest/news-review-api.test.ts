@@ -254,6 +254,41 @@ describe('daily news review API', () => {
     });
   });
 
+  test('manual API publish fails closed when a proof expires after editorial push but before finalize', async () => {
+    const changedBatch = {
+      ...batch,
+      applied_selected_ids: ['news-6', 'news-2'],
+      selection_hash: 'selection-hash-stale-finalize',
+      edit_revision: 1,
+      publish_status: 'pending',
+    };
+    vi.mocked(submitNewsReviewSelection).mockResolvedValue({
+      ok: true, changed: true, retry_publish: true, batch: changedBatch,
+      selected_ids: changedBatch.applied_selected_ids,
+    } as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
+      batch: changedBatch, changed: false, dropped_ids: [],
+    } as never);
+    vi.mocked(getDailyStageState).mockResolvedValue({ stage: 'papers', revision: 3, pushed_at: 123 } as never);
+    vi.mocked(pushDailyStageToCodex)
+      .mockResolvedValueOnce({ ok: true, stage: 'editorial', revision: 7, content_hash: `sha256:${'a'.repeat(64)}` } as never)
+      .mockResolvedValueOnce({ ok: false, stage: 'finalize', error: 'manual_news_finalize_snapshot_stale' } as never);
+
+    const response = await handleDailyNewsReviewApi(request('POST', {
+      selected_ids: changedBatch.applied_selected_ids,
+    }), env(), Date.parse('2026-07-30T08:00:00Z'));
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false, stage: 'finalize', error: 'manual_news_finalize_snapshot_stale',
+    });
+    expect(markNewsReviewPublished).toHaveBeenCalledWith(
+      expect.anything(), '2026-07-30', batch.batch_id, 'selection-hash-stale-finalize',
+      'manual_news_finalize_snapshot_stale',
+    );
+    expect(generateDailyPage).not.toHaveBeenCalled();
+  });
+
   test('revalidates the selected batch immediately before downstream generation', async () => {
     const manualId = 'blog:manual:ml-finalize-stale';
     const changedBatch = {

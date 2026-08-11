@@ -19,6 +19,7 @@ import {
   getActiveNewsReviewBatch,
   getAppliedNewsReviewSelection,
   getNewsReviewBatch,
+  getVerifiedNewsReviewSelectionSnapshot,
   sanitizeCurrentNewsReviewBatch,
   submitNewsReviewSelection,
   type NewsReviewCandidate,
@@ -132,7 +133,7 @@ function candidates(prefix: string): NewsReviewCandidate[] {
 }
 
 async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Promise<void> {
-  const supportingText = `Official release documentation for ${eventKey} describes the product and published scope.`;
+  const supportingText = `On 2026-08-11, official release documentation for ${eventKey} describes the product and published scope.`;
   const rawAssessment = {
     title: 'Official product release documentation',
     summary: 'Official release documentation describes the product and published scope.', event_key: eventKey,
@@ -216,6 +217,28 @@ function activeCount(db: SerialSqliteD1): number {
 }
 
 describe('news review revision CAS', () => {
+  test('verified selection snapshot binds the active revision and fails closed on a soft-deleted selected item', async () => {
+    const current = state();
+    const selected = candidates('snapshot');
+    const frozen = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', selected, selected.map((item) => item.item_id), 100,
+    );
+    const insert = current.db.sqlite.prepare('INSERT INTO items (id, deleted_at) VALUES (?, NULL)');
+    for (const item of selected) insert.run(item.item_id);
+
+    await expect(getVerifiedNewsReviewSelectionSnapshot(current.env, '2026-08-11', 110)).resolves.toMatchObject({
+      batch_id: frozen.batch.batch_id,
+      batch_revision: 1,
+      selected_ids: selected.map((item) => item.item_id),
+      manual_verifications: [],
+    });
+
+    current.db.sqlite.prepare('UPDATE items SET deleted_at = ? WHERE id = ?')
+      .run('2026-08-11T00:00:00.000Z', selected[2].item_id);
+    await expect(getVerifiedNewsReviewSelectionSnapshot(current.env, '2026-08-11', 120))
+      .rejects.toThrow('news_review_verified_selection_stale');
+  });
+
   test('refreshes the current batch into one immutable revision when a manual proof becomes invalid', async () => {
     const current = state();
     const leadId = 'ml-20260811-sanitize0001';
@@ -612,6 +635,30 @@ describe('news review revision CAS', () => {
       current.env, '2026-08-11', activeCandidates, activeCandidates.map((item) => item.item_id), 200,
     );
     expect(retry).toMatchObject({ created: false, batch: { batch_id: active?.batch_id, is_current: true } });
+  });
+
+  test('A to B to A creates a new immutable lineage revision instead of reusing historical A', async () => {
+    const current = state();
+    const firstA = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('a'), candidates('a').map((item) => item.item_id), 100,
+    );
+    const middleB = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('b'), candidates('b').map((item) => item.item_id), 200,
+    );
+    const secondA = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('a'), candidates('a').map((item) => item.item_id), 300,
+    );
+
+    expect(new Set([
+      firstA.batch.batch_id, middleB.batch.batch_id, secondA.batch.batch_id,
+    ])).toHaveLength(3);
+    expect(secondA).toMatchObject({
+      created: true,
+      superseded_batch_id: middleB.batch.batch_id,
+      batch: { batch_revision: 3, is_current: true, candidate_ids: candidates('a').map((item) => item.item_id) },
+    });
+    expect(current.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM daily_news_review_batches
+      WHERE review_date = '2026-08-11'`).get()).toEqual({ count: 3 });
   });
 
   test('competing manual confirmations allow one CAS winner, then the loser retries onto V3', async () => {

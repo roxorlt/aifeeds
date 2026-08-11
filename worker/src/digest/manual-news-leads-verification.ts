@@ -35,6 +35,7 @@ export interface PersistedManualVerificationRow {
   processing_owner: string;
   processing_attempt: number;
   creation_nonce: string;
+  invalidation_nonce?: string | null;
   status: 'active' | 'invalidated';
   reason: string | null;
   created_at: number;
@@ -107,16 +108,17 @@ async function quarantineInvalidManualAssessment(
   const invalidatedAt = now;
   const deletedAt = new Date(now).toISOString();
   const mutationNonce = `verification_quarantine:${crypto.randomUUID()}`;
+  const invalidationNonce = `verification_invalidation:${crypto.randomUUID()}`;
   const snapshotGuard = `verification_id = ? AND lead_id = ? AND status = 'active'
     AND policy_version = ? AND canonical_digest = ? AND hmac_sha256 = ?
     AND verification_json = ? AND creation_nonce = ?`;
   const results = await env.DB.batch([
     env.DB.prepare(
       `/* manual_verification:quarantine */ UPDATE manual_news_assessment_verifications
-       SET status = 'invalidated', reason = ?, invalidated_at = ?
+       SET status = 'invalidated', reason = ?, invalidated_at = ?, invalidation_nonce = ?
        WHERE ${snapshotGuard}`,
     ).bind(
-      reason, invalidatedAt, row.verification_id, row.lead_id, row.policy_version,
+      reason, invalidatedAt, invalidationNonce, row.verification_id, row.lead_id, row.policy_version,
       row.canonical_digest, row.hmac_sha256, row.verification_json, row.creation_nonce,
     ),
     env.DB.prepare(
@@ -124,9 +126,9 @@ async function quarantineInvalidManualAssessment(
        WHERE id = ? AND deleted_at IS NULL AND EXISTS (
          SELECT 1 FROM manual_news_assessment_verifications v
          WHERE v.verification_id = ? AND v.lead_id = ? AND v.status = 'invalidated'
-           AND v.reason = ? AND v.invalidated_at = ?
+           AND v.reason = ? AND v.invalidation_nonce = ?
        )`,
-    ).bind(deletedAt, `blog:manual:${row.lead_id}`, row.verification_id, row.lead_id, reason, invalidatedAt),
+    ).bind(deletedAt, `blog:manual:${row.lead_id}`, row.verification_id, row.lead_id, reason, invalidationNonce),
     env.DB.prepare(
       `/* manual_verification:quarantine_audit */ INSERT INTO manual_news_lead_audit (
          lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
@@ -135,7 +137,7 @@ async function quarantineInvalidManualAssessment(
        FROM manual_news_leads l WHERE l.id = ? AND EXISTS (
          SELECT 1 FROM manual_news_assessment_verifications v
          WHERE v.verification_id = ? AND v.lead_id = l.id AND v.status = 'invalidated'
-           AND v.reason = ? AND v.invalidated_at = ?
+           AND v.reason = ? AND v.invalidation_nonce = ?
        )`,
     ).bind(
       mutationNonce,
@@ -145,7 +147,7 @@ async function quarantineInvalidManualAssessment(
         reason,
         mutation_nonce: mutationNonce,
       }),
-      now, row.lead_id, row.verification_id, reason, invalidatedAt,
+      now, row.lead_id, row.verification_id, reason, invalidationNonce,
     ),
   ]) as Array<{ meta?: { changes?: number } }>;
   const invalidated = Number(results[0]?.meta?.changes || 0);

@@ -3,6 +3,9 @@ import { createHash } from 'node:crypto';
 
 vi.mock('./news-review', () => ({
   getAppliedNewsReviewSelection: vi.fn(async () => null),
+  getPublishedNewsReviewSelection: vi.fn(),
+  getVerifiedNewsReviewSelectionSnapshot: vi.fn(),
+  sanitizeCurrentNewsReviewBatch: vi.fn(),
 }));
 
 import type { Env } from '../index';
@@ -14,6 +17,11 @@ import {
   pushDailyStageToCodex,
 } from './codex-push';
 import { getAppliedNewsReviewSelection } from './news-review';
+import {
+  getPublishedNewsReviewSelection,
+  getVerifiedNewsReviewSelectionSnapshot,
+  sanitizeCurrentNewsReviewBatch,
+} from './news-review';
 
 interface PoolRow {
   item_ids: string;
@@ -51,6 +59,7 @@ function row(id: string, title = id): RenderRow {
 function makeEnv() {
   const pools = new Map<string, PoolRow>();
   const rows = new Map<string, RenderRow>();
+  const deletedIds = new Set<string>();
   let now = 1_000;
 
   const key = (slot: string, source: string, density: string) => `${slot}|${source}|${density}`;
@@ -82,7 +91,10 @@ function makeEnv() {
           if (/FROM items/i.test(sql)) {
             // Deliberately return rows in reverse order:payload order must follow digest_pool item_ids.
             return {
-              results: [...binds].reverse().map((id) => rows.get(String(id))).filter(Boolean) as T[],
+              results: [...binds].reverse()
+                .map((id) => rows.get(String(id)))
+                .filter((value): value is RenderRow => !!value)
+                .filter((value) => !/deleted_at\s+IS\s+NULL/i.test(sql) || !deletedIds.has(value.id)) as T[],
             };
           }
           return { results: [] as T[] };
@@ -111,12 +123,21 @@ function makeEnv() {
     } as unknown as Env,
     pools,
     rows,
+    deletedIds,
     setPool,
   };
 }
 
 beforeEach(() => {
   vi.mocked(getAppliedNewsReviewSelection).mockResolvedValue(null);
+  vi.mocked(getPublishedNewsReviewSelection).mockResolvedValue([]);
+  vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mockResolvedValue(null);
+  vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
+    batch: { candidate_ids: [], candidates: [], default_selected_ids: [], applied_selected_ids: [] },
+    changed: false,
+    dropped_ids: [],
+    manual_verifications: [],
+  } as never);
 });
 
 test('editorial video payload uses the ordered human selection without mutating the default pool', async () => {
@@ -137,6 +158,33 @@ test('editorial video payload uses the ordered human selection without mutating 
   ]);
 });
 
+test('editorial snapshot binds the current review revision, selection, and exact manual proof identity', async () => {
+  const manualId = 'blog:manual:ml-20260811-attested';
+  const { env, setPool } = makeEnv();
+  setPool('2026-07-21', 'news', [manualId, 'news-1']);
+  const snapshot = {
+    batch_id: 'nr-20260721-attested0001',
+    batch_revision: 4,
+    selection_hash: `sha256:${'1'.repeat(64)}`,
+    selected_ids: [manualId, 'news-1'],
+    manual_verifications: [{
+      item_id: manualId,
+      lead_id: 'ml-20260811-attested',
+      verification_id: 'mav-attested',
+      creation_nonce: 'verification-create-attested',
+      canonical_digest: 'a'.repeat(64),
+    }],
+  };
+  vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mockResolvedValue(snapshot);
+
+  const editorial = await buildStagedDailyCodexPayload(env, 'editorial', {
+    date: '2026-07-21', persistRevision: true,
+  });
+
+  expect((editorial.digest.meta as Record<string, unknown>).news_review).toEqual(snapshot);
+  expect(editorial.digest.sections.normal[0].items.map((item) => item.item_id)).toEqual(snapshot.selected_ids);
+});
+
 function seedAll(setPool: (date: string, source: string, ids: string[]) => void, date = '2026-07-21') {
   setPool(date, 'news', ['news:2', 'news:1']);
   setPool(date, 'x', ['x_list:2', 'x_list:1']);
@@ -146,7 +194,18 @@ function seedAll(setPool: (date: string, source: string, ids: string[]) => void,
 }
 
 describe('daily Codex payload v2', () => {
-  beforeEach(() => vi.restoreAllMocks());
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.mocked(getAppliedNewsReviewSelection).mockResolvedValue(null);
+    vi.mocked(getPublishedNewsReviewSelection).mockResolvedValue([]);
+    vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mockResolvedValue(null);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
+      batch: { candidate_ids: [], candidates: [], default_selected_ids: [], applied_selected_ids: [] },
+      changed: false,
+      dropped_ids: [],
+      manual_verifications: [],
+    } as never);
+  });
 
   test('matches the HK canonical JSON contract fixture', () => {
     const fixture = {
@@ -326,6 +385,125 @@ describe('daily Codex payload v2', () => {
     expect(final.digest.sections.normal.find((section) => section.source === 'news')?.items
       .map((item) => item.item_id)).toEqual(['news:2', 'news:1']);
     expect(final.final_manifest?.items.some((item) => item.item_id === 'news:3')).toBe(false);
+  });
+
+  test('direct finalize rejects a locked editorial manual snapshot after its proof becomes stale', async () => {
+    const manualId = 'blog:manual:ml-20260811-finalize01';
+    const { env, setPool } = makeEnv();
+    seedAll(setPool);
+    setPool('2026-07-21', 'news', [manualId, 'news:1']);
+    vi.mocked(getAppliedNewsReviewSelection).mockResolvedValue([manualId, 'news:1']);
+    await buildStagedDailyCodexPayload(env, 'foundation', { date: '2026-07-21', persistRevision: true });
+    await buildStagedDailyCodexPayload(env, 'editorial', { date: '2026-07-21', persistRevision: true });
+    await buildStagedDailyCodexPayload(env, 'papers', { date: '2026-07-21', persistRevision: true });
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
+      batch: {
+        candidate_ids: ['news:1'], candidates: [], default_selected_ids: ['news:1'], applied_selected_ids: ['news:1'],
+      },
+      changed: true,
+      dropped_ids: [manualId],
+      manual_verifications: [],
+    } as never);
+    vi.mocked(getPublishedNewsReviewSelection).mockResolvedValue(['news:1']);
+
+    await expect(buildStagedDailyCodexPayload(env, 'finalize', { date: '2026-07-21' }))
+      .rejects.toThrow('manual_news_finalize_snapshot_stale');
+  });
+
+  test('finalize rejects a changed review revision or manual proof even when selected item ids are unchanged', async () => {
+    const manualId = 'blog:manual:ml-20260811-proof-rotation';
+    const { env, setPool } = makeEnv();
+    seedAll(setPool);
+    setPool('2026-07-21', 'news', [manualId, 'news:1']);
+    const selected = [manualId, 'news:1'];
+    const locked = {
+      batch_id: 'nr-20260721-proofrev0001', batch_revision: 2,
+      selection_hash: `sha256:${'2'.repeat(64)}`, selected_ids: selected,
+      manual_verifications: [{
+        item_id: manualId, lead_id: 'ml-20260811-proof-rotation', verification_id: 'mav-old',
+        creation_nonce: 'verification-create-old', canonical_digest: 'a'.repeat(64),
+      }],
+    };
+    const current = {
+      ...locked,
+      batch_id: 'nr-20260721-proofrev0002', batch_revision: 3,
+      manual_verifications: [{
+        ...locked.manual_verifications[0], verification_id: 'mav-new',
+        creation_nonce: 'verification-create-new', canonical_digest: 'b'.repeat(64),
+      }],
+    };
+    vi.mocked(getVerifiedNewsReviewSelectionSnapshot)
+      .mockResolvedValueOnce(locked)
+      .mockResolvedValue(current);
+    await buildStagedDailyCodexPayload(env, 'foundation', { date: '2026-07-21', persistRevision: true });
+    await buildStagedDailyCodexPayload(env, 'editorial', { date: '2026-07-21', persistRevision: true });
+    await buildStagedDailyCodexPayload(env, 'papers', { date: '2026-07-21', persistRevision: true });
+
+    await expect(buildStagedDailyCodexPayload(env, 'finalize', { date: '2026-07-21' }))
+      .rejects.toThrow('manual_news_finalize_snapshot_stale');
+  });
+
+  test('finalize revalidates manual proofs after payload construction and before network consumption', async () => {
+    const manualId = 'blog:manual:ml-20260811-finalize02';
+    const lockedSnapshot = {
+      batch_id: 'nr-20260721-finalize0001', batch_revision: 2,
+      selection_hash: `sha256:${'3'.repeat(64)}`, selected_ids: [manualId, 'news:1'],
+      manual_verifications: [{
+        item_id: manualId, lead_id: manualId.slice('blog:manual:'.length),
+        verification_id: 'verification-1', creation_nonce: 'nonce', canonical_digest: 'a'.repeat(64),
+      }],
+    };
+    const { env, setPool, pools } = makeEnv();
+    seedAll(setPool);
+    setPool('2026-07-21', 'news', [manualId, 'news:1']);
+    vi.mocked(getAppliedNewsReviewSelection).mockResolvedValue([manualId, 'news:1']);
+    vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mockResolvedValue(lockedSnapshot);
+    for (const stage of ['foundation', 'editorial', 'papers'] as const) {
+      await buildStagedDailyCodexPayload(env, stage, { date: '2026-07-21', persistRevision: true });
+      const key = `2026-07-21-08|_codex_stage_${stage}|meta`;
+      const state = JSON.parse(pools.get(key)!.items_meta!);
+      pools.get(key)!.items_meta = JSON.stringify({ ...state, pushed_at: 123 });
+    }
+    vi.mocked(getVerifiedNewsReviewSelectionSnapshot)
+      .mockResolvedValueOnce(lockedSnapshot)
+      .mockResolvedValue({
+        ...lockedSnapshot,
+        batch_id: 'nr-20260721-finalize0002', batch_revision: 3,
+        selected_ids: ['news:1'], manual_verifications: [],
+      });
+    Object.assign(env as object, {
+      X_CARD_SHARED_TOKEN: 'test-token',
+      DAILY_PUSH_STAGING_ENDPOINT: 'https://staging-render.example.test/aifeeds/api/daily/ingest',
+      API_BASE: 'https://staging-api.ai-feeds.com',
+    });
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 202 }));
+    const verificationCallsBeforeFinalize = vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mock.calls.length;
+
+    const result = await pushDailyStageToCodex(env, 'finalize', '2026-07-21');
+
+    expect(result).toMatchObject({ ok: false, stage: 'finalize', error: expect.stringContaining('manual_news_finalize_snapshot_stale') });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mock.calls.length - verificationCallsBeforeFinalize).toBe(2);
+  });
+
+  test('editorial fails closed when a selected item is soft-deleted after selection verification', async () => {
+    const manualId = 'blog:manual:ml-20260811-softdelete';
+    const { env, setPool, deletedIds } = makeEnv();
+    setPool('2026-07-21', 'news', [manualId]);
+    vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mockImplementation(async () => {
+      deletedIds.add(manualId);
+      return {
+        batch_id: 'nr-20260721-softdelete01', batch_revision: 2,
+        selection_hash: `sha256:${'4'.repeat(64)}`, selected_ids: [manualId],
+        manual_verifications: [{
+          item_id: manualId, lead_id: 'ml-20260811-softdelete', verification_id: 'mav-softdelete',
+          creation_nonce: 'verification-create-softdelete', canonical_digest: 'c'.repeat(64),
+        }],
+      };
+    });
+
+    await expect(buildStagedDailyCodexPayload(env, 'editorial', { date: '2026-07-21' }))
+      .rejects.toThrow('missing_or_deleted_items');
   });
 
   test('keeps the video-only final source order even when the shared X pool is populated', async () => {

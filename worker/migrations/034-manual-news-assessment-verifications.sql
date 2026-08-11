@@ -12,12 +12,13 @@ CREATE TABLE IF NOT EXISTS manual_news_assessment_verifications (
   processing_owner TEXT NOT NULL,
   processing_attempt INTEGER NOT NULL CHECK (processing_attempt > 0),
   creation_nonce TEXT NOT NULL UNIQUE,
+  invalidation_nonce TEXT UNIQUE,
   status TEXT NOT NULL CHECK (status IN ('active', 'invalidated')),
   reason TEXT,
   created_at INTEGER NOT NULL,
   invalidated_at INTEGER,
   CHECK (
-    (status = 'active' AND reason IS NULL AND invalidated_at IS NULL)
+    (status = 'active' AND reason IS NULL AND invalidated_at IS NULL AND invalidation_nonce IS NULL)
     OR (status = 'invalidated' AND reason IS NOT NULL AND invalidated_at IS NOT NULL)
   )
 );

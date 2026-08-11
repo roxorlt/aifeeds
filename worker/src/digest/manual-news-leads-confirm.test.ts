@@ -58,9 +58,9 @@ async function fakeConfirmationEnv() {
   const evidence = {
     evidence_id: 'ev-1', url: row.input_url, source_type: 'official_help', publisher: 'Anthropic',
     published_at: null, retrieved_at: 2, title: 'Documentation',
-    excerpt: 'Anthropic Claude provenance documentation for 2026-08 supports documented outputs only.',
+    excerpt: 'On 2026-08-10, Anthropic Claude provenance documentation supports documented outputs only.',
     claims_supported_json: JSON.stringify([
-      'Anthropic Claude provenance documentation for 2026-08 supports documented outputs only.',
+      'On 2026-08-10, Anthropic Claude provenance documentation supports documented outputs only.',
     ]), reliable: 1,
   };
   const evidenceForMarker = {
@@ -72,7 +72,7 @@ async function fakeConfirmationEnv() {
     retrieved_at: evidence.retrieved_at,
     title: evidence.title,
     excerpt: evidence.excerpt,
-    claims_supported: ['Anthropic Claude provenance documentation for 2026-08 supports documented outputs only.'],
+    claims_supported: ['On 2026-08-10, Anthropic Claude provenance documentation supports documented outputs only.'],
     reliable: true,
     fetch_audit: null,
   };
@@ -230,6 +230,20 @@ describe('manual lead candidate confirmation', () => {
     expect(repeated).toMatchObject({ ok: true, changed: false, rerender_enqueued: false });
     const conflict = await confirmManualNewsLeadCandidate(memory.env, memory.row.id, 7, 1, 'confirm-key-2', 300);
     expect(conflict).toMatchObject({ ok: false, status: 409, error: 'lead_already_confirmed', lead: { version: 8 } });
+  });
+
+  test('idempotent confirmation replay reports that its historical batch is no longer current', async () => {
+    const memory = await fakeConfirmationEnv();
+    const first = await confirmManualNewsLeadCandidate(memory.env, memory.row.id, 7, 1, 'confirm-key-aba', 100);
+    expect(first).toMatchObject({ ok: true, batch: { current: true } });
+    insertedBatch.is_current = false;
+    insertedBatch.superseded_by = 'nr-20260811-currentcurrent';
+
+    const repeated = await confirmManualNewsLeadCandidate(
+      memory.env, memory.row.id, 7, 1, 'confirm-key-aba', 200,
+    );
+
+    expect(repeated).toMatchObject({ ok: true, changed: false, batch: { current: false } });
   });
 
   test('persists a pre-freeze confirmed lead as a candidate item without selecting or rendering it', async () => {

@@ -29,6 +29,9 @@ class SqliteD1 {
   private batchTail: Promise<void> = Promise.resolve();
   private nextBatchGate: { entered: () => void; released: Promise<void> } | null = null;
   private nextFirstGate: { marker: string; entered: () => void; released: Promise<void> } | null = null;
+  private nextFirstBarrier: {
+    marker: string; remaining: number; entered: () => void; released: Promise<void>;
+  } | null = null;
 
   constructor() {
     this.sqlite.exec(`
@@ -65,6 +68,7 @@ class SqliteD1 {
         policy_version TEXT NOT NULL, canonical_digest TEXT NOT NULL, hmac_sha256 TEXT NOT NULL,
         verification_json TEXT NOT NULL, processing_owner TEXT NOT NULL,
         processing_attempt INTEGER NOT NULL, creation_nonce TEXT NOT NULL UNIQUE,
+        invalidation_nonce TEXT UNIQUE,
         status TEXT NOT NULL, reason TEXT,
         created_at INTEGER NOT NULL, invalidated_at INTEGER
       );
@@ -93,6 +97,13 @@ class SqliteD1 {
         return prepared;
       },
       first: async <T>() => {
+        const barrier = this.nextFirstBarrier;
+        if (barrier && sql.includes(barrier.marker)) {
+          barrier.remaining -= 1;
+          if (barrier.remaining === 0) barrier.entered();
+          await barrier.released;
+          if (barrier.remaining === 0) this.nextFirstBarrier = null;
+        }
         const gate = this.nextFirstGate;
         if (gate && sql.includes(gate.marker)) {
           this.nextFirstGate = null;
@@ -157,6 +168,15 @@ class SqliteD1 {
     return { entered, release };
   }
 
+  pauseNextFirstCalls(marker: string, count: number): { entered: Promise<void>; release: () => void } {
+    let markEntered!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    this.nextFirstBarrier = { marker, remaining: count, entered: markEntered, released };
+    return { entered, release };
+  }
+
   close(): void { this.sqlite.close(); }
 }
 
@@ -184,8 +204,8 @@ function fixture(status = 'verifying', version = 4, processingOwner: string | nu
     title, excerpt, claims_supported_json, reliable
   ) VALUES (?, 'ev-official', 'https://support.claude.com/example', 'official_help', 'claude.com',
     '2026-08-10T13:30:00.000Z', 2, 'Official help',
-    'Anthropic Claude provenance documentation covers supported products only.',
-    '["Anthropic Claude provenance documentation covers supported products only."]', 1)`).run(leadId);
+    'On 2026-08-10, Anthropic Claude provenance documentation covers supported products only.',
+    '["On 2026-08-10, Anthropic Claude provenance documentation covers supported products only."]', 1)`).run(leadId);
   return {
     db,
     env: { DB: db as unknown as D1Database, MANUAL_NEWS_VERIFICATION_SECRET: VERIFICATION_SECRET } as Env,
@@ -211,8 +231,8 @@ function processedAssessment() {
   const evidence = [{
     id: 'ev-official', url: 'https://support.claude.com/example', source_type: 'official_help' as const,
     publisher: 'claude.com', published_at: '2026-08-10T13:30:00.000Z', retrieved_at: 2,
-    title: 'Official help', excerpt: 'Anthropic Claude provenance documentation covers supported products only.',
-    claims_supported: ['Anthropic Claude provenance documentation covers supported products only.'],
+    title: 'Official help', excerpt: 'On 2026-08-10, Anthropic Claude provenance documentation covers supported products only.',
+    claims_supported: ['On 2026-08-10, Anthropic Claude provenance documentation covers supported products only.'],
     reliable: true, fetch_audit: null,
   }];
   return {
@@ -225,8 +245,8 @@ function fixtureEvidence(): ManualNewsEvidence[] {
   return [{
     id: 'ev-official', url: 'https://support.claude.com/example', source_type: 'official_help',
     publisher: 'claude.com', published_at: '2026-08-10T13:30:00.000Z', retrieved_at: 2,
-    title: 'Official help', excerpt: 'Anthropic Claude provenance documentation covers supported products only.',
-    claims_supported: ['Anthropic Claude provenance documentation covers supported products only.'],
+    title: 'Official help', excerpt: 'On 2026-08-10, Anthropic Claude provenance documentation covers supported products only.',
+    claims_supported: ['On 2026-08-10, Anthropic Claude provenance documentation covers supported products only.'],
     reliable: true, fetch_audit: null,
   }];
 }
@@ -610,9 +630,10 @@ describe('manual lead D1-backed dedupe', () => {
       WHERE lead_id = ? AND status = 'active'`).run('0'.repeat(64), state.leadId);
 
     expect((await store.getLead(state.leadId))?.assessment).toBeNull();
-    expect(state.db.sqlite.prepare(`SELECT status, reason FROM manual_news_assessment_verifications
+    expect(state.db.sqlite.prepare(`SELECT status, reason, invalidation_nonce FROM manual_news_assessment_verifications
       WHERE lead_id = ?`).get(state.leadId)).toEqual({
       status: 'invalidated', reason: 'verification_integrity_invalid',
+      invalidation_nonce: expect.stringMatching(/^verification_invalidation:/),
     });
     expect(state.db.sqlite.prepare('SELECT deleted_at FROM items WHERE id = ?')
       .get(`blog:manual:${state.leadId}`)).toEqual({ deleted_at: expect.any(String) });
@@ -620,6 +641,27 @@ describe('manual lead D1-backed dedupe', () => {
       WHERE lead_id = ? AND action = 'verification_quarantine'`).get(state.leadId)).toEqual({ count: 1 });
 
     expect((await store.getLead(state.leadId))?.assessment).toBeNull();
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'verification_quarantine'`).get(state.leadId)).toEqual({ count: 1 });
+  });
+
+  test('concurrent quarantine attempts audit only the exact active snapshot invalidation winner', async () => {
+    const state = fixture('verifying', 9);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    await saveFixtureAssessment(store, state.leadId, 9);
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications SET hmac_sha256 = ?
+      WHERE lead_id = ? AND status = 'active'`).run('0'.repeat(64), state.leadId);
+    const now = vi.spyOn(Date, 'now').mockReturnValue(123456789);
+    const gate = state.db.pauseNextFirstCalls('manual_verification:active_assessment', 2);
+
+    const first = store.getLead(state.leadId);
+    const second = store.getLead(state.leadId);
+    await gate.entered;
+    gate.release();
+    const results = await Promise.allSettled([first, second]);
+    now.mockRestore();
+
+    expect(results.every((result) => result.status === 'fulfilled')).toBe(true);
     expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
       WHERE lead_id = ? AND action = 'verification_quarantine'`).get(state.leadId)).toEqual({ count: 1 });
   });

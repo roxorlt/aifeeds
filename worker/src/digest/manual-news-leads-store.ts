@@ -929,7 +929,7 @@ export async function confirmManualNewsLeadCandidate(
     ok: true;
     changed: boolean;
     lead: ManualNewsLeadRecord;
-    batch: { batch_id: string; revision: number; supersedes_revision: number | null; current: true; review_url: string } | null;
+    batch: { batch_id: string; revision: number; supersedes_revision: number | null; current: boolean; review_url: string } | null;
     pending_initial_freeze: boolean;
     rerender_enqueued: false;
   }
@@ -1090,8 +1090,12 @@ export async function confirmManualNewsLeadCandidate(
     }
     throw error;
   }
-  const batchId = await buildNewsReviewBatchId(lead.review_date, merged.candidates);
   const batchRevision = active.batch_revision + 1;
+  const batchId = await buildNewsReviewBatchId(lead.review_date, merged.candidates, {
+    batch_revision: batchRevision,
+    supersedes_batch_id: active.batch_id,
+    lineage_id: lead.review_date,
+  });
   const candidateIds = merged.candidates.map((item) => item.item_id);
   const existingManualVerifications = activeSanitization?.manual_verifications || [];
   const existingManualGuard = existingManualVerifications.length
@@ -1264,7 +1268,7 @@ async function publicConfirmedBatch(env: Env, batch: NewsReviewBatch): Promise<{
   batch_id: string;
   revision: number;
   supersedes_revision: number | null;
-  current: true;
+  current: boolean;
   review_url: string;
 }> {
   const date = batch.review_date;
@@ -1278,7 +1282,7 @@ async function publicConfirmedBatch(env: Env, batch: NewsReviewBatch): Promise<{
     batch_id: batch.batch_id,
     revision: batch.batch_revision,
     supersedes_revision: batch.batch_revision > 1 ? batch.batch_revision - 1 : null,
-    current: true,
+    current: batch.is_current && !batch.superseded_by,
     review_url: url.toString(),
   };
 }

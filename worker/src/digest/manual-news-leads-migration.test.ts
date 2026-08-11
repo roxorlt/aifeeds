@@ -38,7 +38,7 @@ describe('manual news lead migration', () => {
     expect(tableColumns(db, 'manual_news_assessment_verifications')).toEqual(expect.arrayContaining([
       'verification_id', 'lead_id', 'assessment_version', 'policy_version', 'canonical_digest',
       'hmac_sha256', 'verification_json', 'processing_owner', 'processing_attempt',
-      'creation_nonce', 'status', 'reason', 'created_at', 'invalidated_at',
+      'creation_nonce', 'invalidation_nonce', 'status', 'reason', 'created_at', 'invalidated_at',
     ]));
     expect(tableColumns(db, 'manual_news_lead_audit')).toEqual(expect.arrayContaining([
       'metadata_json', 'resulting_version', 'mutation_nonce',
@@ -68,7 +68,8 @@ describe('manual news lead migration', () => {
       'verification-2', 5, 'c'.repeat(64), 'd'.repeat(64), 'nonce-2', 'active', null, null,
     )).toThrow(/UNIQUE constraint failed/);
     db.prepare(`UPDATE manual_news_assessment_verifications
-      SET status = 'invalidated', reason = 'evidence_replaced', invalidated_at = 2
+      SET status = 'invalidated', reason = 'evidence_replaced', invalidated_at = 2,
+          invalidation_nonce = 'invalidation-1'
       WHERE verification_id = 'verification-1'`).run();
     insert.run('verification-2', 5, 'c'.repeat(64), 'd'.repeat(64), 'nonce-2', 'active', null, null);
 
@@ -81,10 +82,25 @@ describe('manual news lead migration', () => {
       'e'.repeat(64), 'f'.repeat(64),
     )).toThrow(/UNIQUE constraint failed/);
 
-    expect(db.prepare(`SELECT verification_id, status, reason, invalidated_at
+    expect(() => db.prepare(`INSERT INTO manual_news_assessment_verifications (
+      verification_id, lead_id, assessment_version, policy_version, canonical_digest,
+      hmac_sha256, verification_json, processing_owner, processing_attempt,
+      creation_nonce, invalidation_nonce, status, reason, created_at, invalidated_at
+    ) VALUES ('verification-4', 'lead-3', 1, 'fact-evidence-hmac-v4', ?, ?, '{}',
+      'owner-3', 1, 'nonce-4', 'invalidation-1', 'invalidated', 'quarantine', 2, 2)`).run(
+      'e'.repeat(64), 'f'.repeat(64),
+    )).toThrow(/UNIQUE constraint failed/);
+
+    expect(db.prepare(`SELECT verification_id, status, reason, invalidation_nonce, invalidated_at
       FROM manual_news_assessment_verifications ORDER BY verification_id`).all()).toEqual([
-      { verification_id: 'verification-1', status: 'invalidated', reason: 'evidence_replaced', invalidated_at: 2 },
-      { verification_id: 'verification-2', status: 'active', reason: null, invalidated_at: null },
+      {
+        verification_id: 'verification-1', status: 'invalidated', reason: 'evidence_replaced',
+        invalidation_nonce: 'invalidation-1', invalidated_at: 2,
+      },
+      {
+        verification_id: 'verification-2', status: 'active', reason: null,
+        invalidation_nonce: null, invalidated_at: null,
+      },
     ]);
   });
 

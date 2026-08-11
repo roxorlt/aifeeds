@@ -30,7 +30,7 @@ const officialAnthropic: ManualNewsEvidence = {
   claims_supported: [
     'Supported text can include an invisible watermark.',
     'Supported files can include C2PA provenance.',
-    'Anthropic documentation says supported Claude text can include an invisible watermark and supported files can include C2PA provenance.',
+    'On 2026-08-10, Anthropic documentation says supported Claude text can include an invisible watermark and supported files can include C2PA provenance.',
   ],
   reliable: true,
 };
@@ -297,7 +297,7 @@ describe('manual news lead domain', () => {
     });
 
     expect(validateManualLeadFactVerification(
-      result('Anthropic documentation says supported Claude text can include an invisible watermark and\n supported files can include C2PA provenance.'),
+      result('On 2026-08-10, Anthropic documentation says supported Claude text can include an invisible watermark and\n supported files can include C2PA provenance.'),
       candidate, [officialAnthropic],
     ).overall_verdict).toBe('supported');
     expect(() => validateManualLeadFactVerification(result('Text absent from every source.'), candidate, [officialAnthropic]))
@@ -538,6 +538,101 @@ describe('manual news lead domain', () => {
       fact_results: facts.map((fact) => supportedFactResult(fact.fact_id, evidence[0].id, quote)),
     };
     expect(() => validateManualLeadFactVerification(raw, candidate, evidence)).toThrow(error);
+  });
+
+  test('requires occurred_at to be supported by the exact event date in the source quote', () => {
+    const factText = 'OpenAI于2026年8月11日完成收购Acme并扩大欧洲业务。';
+    const quote = 'OpenAI于2026年8月10日完成收购Acme并扩大欧洲业务。';
+    const evidence = [{ ...officialAnthropic, excerpt: quote, claims_supported: [quote] }];
+    const candidate = validateManualLeadAssessment(assessment({
+      title: factText,
+      summary: factText,
+      event_key: 'openai-acquires-acme-2026-08-11',
+      occurred_at: '2026-08-11',
+      claims: [{ text: factText, evidence_ids: [evidence[0].id] }],
+    }), evidence);
+    const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: candidate, evidence,
+    }).user) as { facts: Array<{ fact_id: string }> }).facts;
+    const raw = {
+      overall_verdict: 'supported',
+      fact_results: facts.map((fact) => supportedFactResult(fact.fact_id, evidence[0].id, quote)),
+    };
+
+    expect(() => validateManualLeadFactVerification(raw, candidate, evidence))
+      .toThrow(/fact_verification_date_mismatch/);
+  });
+
+  test.each([
+    '据称OpenAI计划收购Acme并扩大欧洲业务，但交易尚未得到证实。',
+    'OpenAI reportedly plans to acquire Acme and expand in Europe, but the transaction is unconfirmed.',
+    '尚无证据表明OpenAI已经完成收购Acme并扩大欧洲业务。',
+  ])('does not let planned, alleged, or unverified language support a completed event: %s', (quote) => {
+    const factText = 'OpenAI已正式完成收购Acme并扩大欧洲业务。';
+    const evidence = [{ ...officialAnthropic, excerpt: quote, claims_supported: [quote] }];
+    const candidate = validateManualLeadAssessment(assessment({
+      title: factText,
+      summary: factText,
+      event_key: 'openai-completes-acme-acquisition-2026-08',
+      occurred_at: null,
+      claims: [{ text: factText, evidence_ids: [evidence[0].id] }],
+    }), evidence);
+    const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: candidate, evidence,
+    }).user) as { facts: Array<{ fact_id: string }> }).facts;
+    const raw = {
+      overall_verdict: 'supported',
+      fact_results: facts.map((fact) => supportedFactResult(fact.fact_id, evidence[0].id, quote)),
+    };
+
+    expect(() => validateManualLeadFactVerification(raw, candidate, evidence))
+      .toThrow(/fact_verification_(?:polarity|modality)_mismatch/);
+  });
+
+  test('requires every asserted action slot instead of accepting one overlapping action', () => {
+    const factText = 'OpenAI收购Acme并退出欧洲市场。';
+    const quote = 'OpenAI收购Acme并扩大欧洲市场。';
+    const evidence = [{ ...officialAnthropic, excerpt: quote, claims_supported: [quote] }];
+    const candidate = validateManualLeadAssessment(assessment({
+      title: factText,
+      summary: factText,
+      event_key: 'openai-acquires-acme-exits-europe-2026-08',
+      occurred_at: null,
+      claims: [{ text: factText, evidence_ids: [evidence[0].id] }],
+    }), evidence);
+    const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: candidate, evidence,
+    }).user) as { facts: Array<{ fact_id: string }> }).facts;
+    const raw = {
+      overall_verdict: 'supported',
+      fact_results: facts.map((fact) => supportedFactResult(fact.fact_id, evidence[0].id, quote)),
+    };
+
+    expect(() => validateManualLeadFactVerification(raw, candidate, evidence))
+      .toThrow(/fact_verification_action_mismatch/);
+  });
+
+  test('requires each named subject, object, and region slot in the same source quote', () => {
+    const factText = 'OpenAI acquired Acme and expanded enterprise services across Europe for regulated customers.';
+    const quote = 'OpenAI acquired Beta and expanded enterprise services across Asia for regulated customers.';
+    const evidence = [{ ...officialAnthropic, excerpt: quote, claims_supported: [quote] }];
+    const candidate = validateManualLeadAssessment(assessment({
+      title: factText,
+      summary: factText,
+      event_key: 'openai-acquires-acme-expands-europe-2026-08',
+      occurred_at: null,
+      claims: [{ text: factText, evidence_ids: [evidence[0].id] }],
+    }), evidence);
+    const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: candidate, evidence,
+    }).user) as { facts: Array<{ fact_id: string }> }).facts;
+    const raw = {
+      overall_verdict: 'supported',
+      fact_results: facts.map((fact) => supportedFactResult(fact.fact_id, evidence[0].id, quote)),
+    };
+
+    expect(() => validateManualLeadFactVerification(raw, candidate, evidence))
+      .toThrow(/fact_verification_entity_slot_missing/);
   });
 
   test('validates material updates against an exact verified prior context and persists that context', () => {
