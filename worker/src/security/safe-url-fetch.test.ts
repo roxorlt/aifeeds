@@ -155,6 +155,26 @@ describe('trusted manual-news research boundary', () => {
     });
   });
 
+  test('keeps the Worker global fetch receiver when no gateway fetcher is injected', async () => {
+    const receiverAwareFetch = vi.fn(function (this: unknown) {
+      if (this !== globalThis) {
+        throw new TypeError('Illegal invocation: function called with incorrect this reference');
+      }
+      return Promise.resolve(new Response(JSON.stringify({ results: [] }), {
+        headers: { 'Content-Type': 'application/json' },
+      }));
+    });
+    vi.stubGlobal('fetch', receiverAwareFetch);
+    try {
+      await expect(searchPublicWeb({ text: 'Anthropic watermark', date: '2026-08-11' }, {
+        service: { origin: 'https://research-gateway.example', token: 'test-token' },
+      })).resolves.toEqual([]);
+      expect(receiverAwareFetch).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   test('rejects fetch-time peer mismatch, private peers, and unvalidated redirect hops', async () => {
     for (const hops of [
       [{ ...publicHop(), connected_ip: '93.184.216.35' }],
