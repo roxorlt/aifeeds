@@ -692,6 +692,63 @@ describe('manual news lead domain', () => {
     ).overall_verdict).toBe('supported');
   });
 
+  test('binds subject, pause polarity, and each model object within the same fact unit', () => {
+    const crossed = supportedTextVerification(
+      'Anthropic已暂停Claude训练；Anthropic未暂停Gemini训练；OpenAI已暂停GPT训练。',
+      'Anthropic已暂停Claude训练；Anthropic已暂停Gemini训练；OpenAI未暂停GPT训练。',
+      { event_key: 'anthropic-openai-model-status-2026-08-11' },
+    );
+    expect(() => validateManualLeadFactVerification(
+      crossed.raw, crossed.candidate, crossed.evidence,
+    )).toThrow(/fact_verification_polarity_mismatch/);
+
+    const matching = supportedTextVerification(
+      'Anthropic已暂停Claude训练；Anthropic未暂停Gemini训练；OpenAI已暂停GPT训练。',
+      'Anthropic已暂停Claude训练；Anthropic未暂停Gemini训练；OpenAI已暂停GPT训练。',
+      { event_key: 'anthropic-openai-model-status-2026-08-11' },
+    );
+    expect(validateManualLeadFactVerification(
+      matching.raw, matching.candidate, matching.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    {
+      candidate: 'OpenAI正式扩大加拿大企业人工智能服务业务。',
+      quote: 'OpenAI正式扩大澳大利亚企业人工智能服务业务。',
+    },
+    {
+      candidate: 'OpenAI宣布GPT-6加拿大市场上线企业服务。',
+      quote: 'OpenAI宣布GPT-6澳大利亚市场上线企业服务。',
+    },
+  ])('binds a non-prepositional region or market slot to its action unit: $candidate', ({ candidate, quote }) => {
+    const fixture = supportedTextVerification(candidate, quote);
+    expect(() => validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    )).toThrow(/fact_verification_entity_slot_missing/);
+  });
+
+  test('does not hide a non-prepositional region mismatch inside otherwise matching copy', () => {
+    const fixture = supportedTextVerification(
+      'OpenAI扩大加拿大业务覆盖全球客户并提供人工智能工具。',
+      'OpenAI扩大澳大利亚业务覆盖全球客户并提供人工智能工具。',
+    );
+    expect(() => validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    )).toThrow(/fact_verification_entity_slot_missing/);
+  });
+
+  test.each([
+    'OpenAI正式扩大加拿大企业人工智能服务业务。',
+    'OpenAI宣布GPT-6加拿大市场上线企业服务。',
+    'OpenAI宣布GPT-6巴西市场上线企业服务。',
+  ])('accepts the same generic non-prepositional region in the supporting unit: %s', (factText) => {
+    const fixture = supportedTextVerification(factText, factText);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
   test('requires Chinese subject, model, ordinal-version, and region slots independently', () => {
     const candidateText = '百度在加拿大正式发布第五版文心模型，并宣布该模型已完成训练并向开发者开放。';
     const mismatches = [
@@ -792,6 +849,33 @@ describe('manual news lead domain', () => {
     )).toThrow(/fact_verification_action_mismatch/);
   });
 
+  test.each([
+    'OpenAI整合Acme并重构核心平台。',
+    'OpenAI已整合Acme，随后重构核心平台。',
+    'OpenAI整合Acme，继而重构核心平台。',
+    'OpenAI整合Acme，然后重构核心平台。',
+    'OpenAI整合Acme，后又重构核心平台。',
+    'OpenAI整合Acme，重构核心平台。',
+  ])('fails closed for an unclassified compound action across common sequencing forms: %s', (factText) => {
+    const fixture = supportedTextVerification(factText, factText, {
+      event_type: 'industry_event',
+    });
+    expect(() => validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    )).toThrow(/fact_verification_action_mismatch/);
+  });
+
+  test('does not reject a single otherwise well-supported unknown predicate as a compound', () => {
+    const fixture = supportedTextVerification(
+      'OpenAI整合Acme。',
+      'OpenAI整合Acme。',
+      { event_type: 'industry_event' },
+    );
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
   test('requires full occurred_at instant precision and normalizes timezone-equivalent evidence', () => {
     const dateOnly = supportedTextVerification(
       'OpenAI于2026-08-11发布模型。',
@@ -828,6 +912,46 @@ describe('manual news lead domain', () => {
     expect(validateManualLeadFactVerification(
       datePrecision.raw, datePrecision.candidate, datePrecision.evidence,
     ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    'OpenAI于2026年8月11日北京时间8时正式发布人工智能模型。',
+    'OpenAI released the artificial intelligence model on August 11, 2026 at 08:00 GMT+8.',
+    'OpenAI released the artificial intelligence model on August 11, 2026 at 08:00 Beijing Time.',
+    'OpenAI released the artificial intelligence model at 2026-08-11 08:00 +08:00.',
+    'OpenAI于2026年8月11日16时UTC+8正式发布人工智能模型。',
+  ])('normalizes common natural-language exact timestamps: %s', (quote) => {
+    const expectedInstant = quote.includes('16时')
+      ? '2026-08-11T08:00:00Z'
+      : '2026-08-11T00:00:00Z';
+    const fixture = supportedTextVerification(
+      'OpenAI正式发布人工智能模型。',
+      quote,
+      { occurred_at: expectedInstant },
+    );
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test('rejects a different natural-language instant and date-only support for an instant', () => {
+    const wrongTime = supportedTextVerification(
+      'OpenAI正式发布人工智能模型。',
+      'OpenAI于2026年8月11日北京时间9时正式发布人工智能模型。',
+      { occurred_at: '2026-08-11T00:00:00Z' },
+    );
+    expect(() => validateManualLeadFactVerification(
+      wrongTime.raw, wrongTime.candidate, wrongTime.evidence,
+    )).toThrow(/fact_verification_instant_mismatch/);
+
+    const dateOnly = supportedTextVerification(
+      'OpenAI正式发布人工智能模型。',
+      'OpenAI于2026年8月11日正式发布人工智能模型。',
+      { occurred_at: '2026-08-11T00:00:00Z' },
+    );
+    expect(() => validateManualLeadFactVerification(
+      dateOnly.raw, dateOnly.candidate, dateOnly.evidence,
+    )).toThrow(/fact_verification_instant_precision_mismatch/);
   });
 
   test('validates material updates against an exact verified prior context and persists that context', () => {

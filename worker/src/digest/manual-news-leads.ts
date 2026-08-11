@@ -631,7 +631,7 @@ function actionLocalPrefix(value: string, index: number): string {
 
 function actionIsNegated(value: string, index: number): boolean {
   const prefix = actionLocalPrefix(value, index);
-  return /(?:并?未|未|并非|非|绝非|没有|从未|尚未|未能|未曾|不曾|不再|不会|并不|尚无证据|拒绝|否认|停止|暂停|无法)(?:[^，。；;!?]{0,16})$/u.test(prefix)
+  return /(?:并?未|未|不|并非|非|绝非|没有|从未|尚未|未能|未曾|不曾|不再|不会|并不|尚无证据|拒绝|否认|无法)(?:[^，。；;!?]{0,16})$/u.test(prefix)
     || /\b(?:never|not|no|without|has(?:n't|\s+not)|have(?:n't|\s+not)|had(?:n't|\s+not)|did(?:n't|\s+not)|does(?:n't|\s+not)|is(?:n't|\s+not)|are(?:n't|\s+not)|was(?:n't|\s+not)|were(?:n't|\s+not)|failed\s+to|unable\s+to|refus(?:e|es|ed)\s+to|den(?:y|ies|ied)\s+|stop(?:s|ped)?\s+|paus(?:e|es|ed)\s+)(?:\W+\w+){0,5}\W*$/iu.test(prefix);
 }
 
@@ -665,6 +665,13 @@ function factActionOccurrences(value: string): FactActionOccurrence[] {
   }
   const sorted = occurrences.sort((left, right) => left.index - right.index || right.end - left.end);
   return sorted.filter((occurrence) => {
+    if (occurrence.action === 'support' && /^support$/iu.test(occurrence.surface)) {
+      const prefix = value.slice(Math.max(0, occurrence.index - 24), occurrence.index);
+      if (/(?:provenance|watermark|technical|customer|enterprise)\s+$/iu.test(prefix)
+        || sorted.some((parent) => parent.action === 'support'
+          && parent.index < occurrence.index
+          && occurrence.index - parent.end <= 24)) return false;
+    }
     if (occurrence.action !== 'train') return true;
     return !sorted.some((parent) => parent.index < occurrence.index
       && ['pause', 'ban', 'mandate', 'order', 'regulatory_require'].includes(parent.action)
@@ -682,20 +689,21 @@ function actionModalityCompatible(
 }
 
 function hasUnclassifiedCompoundAction(value: string): boolean {
-  const clauses = value.split(/(?:并且|并|同时|以及|而且|且)|\b(?:and|as\s+well\s+as)\b/iu)
+  const clauses = value.split(/(?:并且|并|同时|以及|而且|且|随后|继而|然后|后又)|[，,、]|\b(?:and|as\s+well\s+as|then|subsequently|afterwards?)\b/iu)
     .map((clause) => clause.trim())
     .filter(Boolean);
   if (clauses.length < 2) return false;
-  const assertionInherited = /(?:已经|已|将|正式|正在|计划|宣布|完成)|\b(?:has|have|had|will|officially|plans?\s+to)\b/iu.test(value);
-  return clauses.some((clause) => {
-    if (factActionOccurrences(clause).length) return false;
-    const asserted = assertionInherited
-      || /(?:已经|已|将|正式|正在|计划|宣布|完成)|\b(?:has|have|had|will|officially|plans?\s+to)\b/iu.test(clause);
-    if (!asserted) return false;
-    const chineseActionShape = /(?:已经|已|将|正式|正在|计划)?[\p{Script=Han}]{2,8}(?:(?:[A-Za-z][A-Za-z0-9._+-]*)|[\p{Script=Han}]{0,10}(?:模型|平台|系统|业务|协议|公司|服务|代码|权重|产品|市场))/u.test(clause);
-    const englishActionShape = /\b(?:has|have|had|will|officially|plans?\s+to)\s+[a-z][a-z-]+\b/iu.test(clause);
-    return chineseActionShape || englishActionShape;
+  const predicateKinds = clauses.map((clause): 'known' | 'unknown' | 'none' => {
+    if (factActionOccurrences(clause).length) return 'known';
+    const withoutSubject = clause
+      .replace(/^(?:[A-Za-z][A-Za-z0-9._+-]*|该公司|公司|监管机构|法院|政府|团队|机构)\s*/u, '')
+      .replace(/^(?:已经|已|将|正式|正在|计划|宣布|完成|拟|可能)+/u, '');
+    const chineseActionShape = /^[\p{Script=Han}]{2}(?=(?:[A-Z][A-Za-z0-9._+-]*)|[\p{Script=Han}]{2,}(?:模型|平台|系统|业务|协议|公司|服务|代码|权重|产品|市场))/u.test(withoutSubject);
+    const englishActionShape = /^(?:has|have|had|will|officially|plans?\s+to\s+)?[a-z][a-z-]+\s+(?:[A-Z][A-Za-z0-9._+-]*|(?:the|a|an)\s+[a-z])/iu.test(withoutSubject);
+    return chineseActionShape || englishActionShape ? 'unknown' : 'none';
   });
+  const predicates = predicateKinds.filter((kind) => kind !== 'none');
+  return predicates.length >= 2 && predicates.includes('unknown');
 }
 
 function structuredActionVerificationError(candidate: string, quote: string): string | null {
@@ -737,7 +745,7 @@ const LATIN_ENTITY_STOPWORDS = new Set([
   'company', 'technology', 'documentation', 'document', 'release',
 ]);
 
-type StructuredFactSlotKind = 'subject' | 'object' | 'version' | 'region' | 'named';
+type StructuredFactSlotKind = 'object' | 'version' | 'region';
 
 interface StructuredFactSlot {
   kind: StructuredFactSlotKind;
@@ -759,28 +767,9 @@ function addStructuredSlot(
   slots.set(`${kind}:${normalized}`, { kind, value: compactValue });
 }
 
-function actionSubject(value: string, firstAction: FactActionOccurrence | undefined): string | null {
-  if (!firstAction) return null;
-  let prefix = actionLocalPrefix(value, firstAction.index)
-    .replace(/(?:20\d{2}[-年]\d{1,2}(?:[-月]\d{1,2}日?)?(?:T[^\s，,]+)?)/gu, '')
-    .replace(/^(?:据称|传闻|报道称|消息称|官方|公司方面)\s*/u, '')
-    .replace(/(?:已经|正式|仍在|正在|计划|可能|宣布|将|已)+$/u, '');
-  const locationIndex = prefix.search(/(?:在|于|面向|覆盖)[\p{Script=Han}A-Za-z]/u);
-  if (locationIndex > 0) prefix = prefix.slice(0, locationIndex);
-  const latin = prefix.match(/([A-Za-z][A-Za-z0-9._+-]*(?:\s+[A-Za-z][A-Za-z0-9._+-]*){0,3})\s*$/u)?.[1];
-  if (latin) {
-    const words = latin.split(/\s+/).filter((word) => !LATIN_ENTITY_STOPWORDS.has(word.toLowerCase()));
-    if (words.length) return words[0];
-  }
-  const han = prefix.match(/([\p{Script=Han}]{2,16})\s*$/u)?.[1]
-    ?.replace(/^(?:该|这家|一家)/u, '');
-  if (!han || /^(?:官方|帮助|帮助中心|官方帮助|官方文档|文档|公告|声明|报道|部分|相关|目前|其中|消息|内容|范围|能力|产品|模型)$/u.test(han)) return null;
-  return han;
-}
-
 function actionObjectSegment(value: string, occurrence: FactActionOccurrence, all: FactActionOccurrence[]): string {
   const nextAction = all.find((item) => item.index >= occurrence.end);
-  const punctuation = value.slice(occurrence.end).search(/[，,。；;！？!?]/u);
+  const punctuation = value.slice(occurrence.end).search(/[，,、。；;！？!?]/u);
   const punctuationEnd = punctuation < 0 ? value.length : occurrence.end + punctuation;
   const nextEnd = nextAction ? nextAction.index : value.length;
   return value.slice(occurrence.end, Math.min(punctuationEnd, nextEnd))
@@ -793,90 +782,228 @@ const GENERIC_CHINESE_MODEL_NAMES = new Set([
   '人工智能', '大语言', '语言', '基础', '生成式', '多模态', '新', '该', '相关',
 ]);
 
-function structuredFactSlots(value: string): StructuredFactSlot[] {
+interface StructuredFactUnit {
+  action: FactAction;
+  subject: string | null;
+  slots: StructuredFactSlot[];
+  negated: boolean;
+  modality: FactActionOccurrence['modality'];
+}
+
+const FACT_UNIT_BOUNDARY = /[。；;！？!?，,、\n]|(?:并且|并(?!未|不|非)|但|同时|以及|而且|随后|继而|然后|后又)|\b(?:and|but|then|subsequently|afterwards?)\b/giu;
+const GENERIC_REGION_VALUES = new Set([
+  '人工智能', '企业', '技术', '本地', '核心', '线上', '海外', '全球', '相关', '部分',
+  '模型', '产品', '服务', '业务', '市场', '地区', '客户', '开发者',
+]);
+
+function factUnitStart(value: string, index: number): number {
+  let start = 0;
+  for (const match of value.slice(0, index).matchAll(FACT_UNIT_BOUNDARY)) {
+    if (match.index !== undefined) start = match.index + match[0].length;
+  }
+  return start;
+}
+
+function factUnitEnd(value: string, occurrence: FactActionOccurrence, all: FactActionOccurrence[]): number {
+  const nextAction = all.find((item) => item.index >= occurrence.end);
+  let boundaryEnd = value.length;
+  const boundary = value.slice(occurrence.end).search(FACT_UNIT_BOUNDARY);
+  if (boundary >= 0) boundaryEnd = occurrence.end + boundary;
+  return Math.min(boundaryEnd, nextAction?.index ?? value.length);
+}
+
+function stripFactTemporalText(value: string): string {
+  return value
+    .replace(/20\d{2}年\d{1,2}月\d{1,2}日(?:\s*(?:北京时间|中国标准时间|UTC|GMT|[+-]\d{2}:?\d{2})?\s*\d{1,2}(?:时|点)(?:\d{1,2}分?)?(?:\d{1,2}秒?)?(?:\s*(?:北京时间|中国标准时间|UTC|GMT)(?:\s*[+-]\d{1,2}(?::?\d{2})?)?)?)?/giu, ' ')
+    .replace(/20\d{2}-\d{1,2}-\d{1,2}(?:T|\s+)\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*(?:Z|UTC|GMT|[+-]\d{1,2}:?\d{2})?/giu, ' ')
+    .replace(/\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s*20\d{2}(?:\s+(?:at\s+)?\d{1,2}:\d{2}(?::\d{2})?\s*(?:Z|UTC|GMT|Beijing\s+Time|China\s+Standard\s+Time|[+-]\d{1,2}:?\d{2}|(?:UTC|GMT)\s*[+-]\d{1,2}(?::?\d{2})?))?/giu, ' ');
+}
+
+function leadingFactUnitSubject(value: string, occurrence: FactActionOccurrence): string | null {
+  let prefix = stripFactTemporalText(value.slice(factUnitStart(value, occurrence.index), occurrence.index))
+    .replace(/^(?:据称|传闻|报道称|消息称|官方|公司方面|随后|继而|然后|后又)\s*/u, '')
+    .replace(/(?:已经|已|未|并未|正式|仍在|正在|正|继续|计划|可能|宣布|将|没有|从未|尚未|未能|不再|不会|并不)+$/u, '')
+    .replace(/(?:在|于|对|向|为)\s*$/u, '')
+    .trim();
+  if (!prefix) return null;
+  if (/^(?:将|已|未|并未|正式|仍在|正在|正|继续|计划|可能|没有|从未|尚未|未能|不再|不会|并不)/u.test(prefix)) {
+    return null;
+  }
+  const latin = prefix.match(/\b([A-Z][A-Za-z0-9._+-]*)\b/u)?.[1];
+  if (latin && !LATIN_ENTITY_STOPWORDS.has(latin.toLowerCase())) return latin;
+  const han = prefix.match(/^([\p{Script=Han}]{2,16}?)(?=(?:在|于|对|向|为|已经|已|未|并未|正式|仍在|正在|正|继续|计划|可能|宣布|将|没有|从未|尚未|未能|不再|不会|并不|$))/u)?.[1]
+    ?.replace(/^(?:该|这家|一家)(?=公司|机构|团队)/u, '');
+  if (!han || GENERIC_REGION_VALUES.has(han)
+    || /^(?:官方|帮助|帮助中心|官方帮助|官方文档|文档|公告|声明|报道|部分|相关|目前|其中|消息|内容|范围|能力|产品|模型)/u.test(han)) return null;
+  return han;
+}
+
+function normalizedChineseRegion(value: string): string | null {
+  let region = value
+    .replace(/^(?:在|于|面向|覆盖|进入|退出|扩大|扩展|拓展)+/u, '')
+    .replace(/(?:企业|人工智能|技术|本地|核心|线上|海外|服务)+$/u, '')
+    .trim();
+  while (/(?:企业|人工智能|技术|本地|核心|线上|海外|服务)$/u.test(region)) {
+    region = region.replace(/(?:企业|人工智能|技术|本地|核心|线上|海外|服务)$/u, '');
+  }
+  if (region.length < 2 || region.length > 10 || GENERIC_REGION_VALUES.has(region)
+    || /(?:的|受支持|支持|范围|能力|限定|产品)/u.test(region)) return null;
+  return region;
+}
+
+function factUnitRegionSlots(
+  value: string,
+  directObject: string,
+  action: FactAction,
+): StructuredFactSlot[] {
   const slots = new Map<string, StructuredFactSlot>();
-  const actions = factActionOccurrences(value);
-  const subject = actionSubject(value, actions[0]);
-  if (subject) addStructuredSlot(slots, 'subject', subject);
-
-  for (const token of value.match(/[A-Za-z][A-Za-z0-9]*(?:[._+-][A-Za-z0-9]+)*/g) || []) {
-    const named = /^[A-Z][A-Za-z0-9]*(?:[._+-][A-Za-z0-9]+)*$/.test(token)
-      || /[a-z][A-Z]|[A-Za-z]\d|\d[A-Za-z]/.test(token)
-      || /^[A-Z]{2,}$/.test(token);
-    if (!named || LATIN_ENTITY_STOPWORDS.has(token.toLowerCase())) continue;
-    addStructuredSlot(slots, 'named', token);
+  const addRegion = (raw: string) => {
+    const region = normalizedChineseRegion(raw);
+    if (region) addStructuredSlot(slots, 'region', region);
+  };
+  for (const match of value.matchAll(/(?<!正)(?:在|于|面向|覆盖|进入|退出)([\p{Script=Han}]{2,12}?)(?=(?:正式|已经|已|将|计划|发布|推出|上线|开源|开放|训练|投资|融资|签署|起诉|禁止|合作|裁员|扩大|扩展|市场|地区|，|。|；|$))/gu)) {
+    addRegion(match[1]);
   }
-
-  for (const match of value.matchAll(/第([零〇一二三四五六七八九十百两\d]+)(版|代|期|阶段)/gu)) {
-    addStructuredSlot(slots, 'version', match[0]);
+  for (const match of value.matchAll(/([\p{Script=Han}]{2,12}?)(?=(?:(?:企业|人工智能|技术|本地|核心|线上|海外|服务)*)(?:市场|地区))/gu)) {
+    addRegion(match[1]);
   }
-  for (const match of value.matchAll(/(?<![\d-])(?:v(?:ersion)?\s*)?\d+(?:\.\d+)+(?:[-_][a-z0-9]+)?(?![\d.])/giu)) {
-    addStructuredSlot(slots, 'version', match[0]);
+  if (['expand', 'exit', 'release', 'open_access', 'open_source'].includes(action)) {
+    for (const match of directObject.matchAll(/([\p{Script=Han}]{2,12}?)(?=(?:(?:企业|人工智能|技术|本地|核心|线上|海外|服务)*)(?:市场|地区|业务))/gu)) {
+      addRegion(match[1]);
+    }
   }
-
-  const chineseRegionPattern = /(?:在|于|面向|覆盖|进入|退出)([\p{Script=Han}]{2,12}?)(?=(?:正式|已经|已|将|计划|发布|推出|上线|开源|开放|训练|投资|融资|签署|起诉|禁止|合作|裁员|扩大|扩展|市场|地区|业务|服务|模型|，|。|；|$))/gu;
-  for (const match of value.matchAll(chineseRegionPattern)) {
-    if (/(?:的|受支持|支持|范围|能力|限定|部分|产品)/u.test(match[1])) continue;
+  for (const match of value.matchAll(/\b(?:in|across|throughout|within|into)\s+([A-Za-z][A-Za-z -]{1,30}?)(?=\s+(?:market|region|while|and|for|to|by|business)|[,.;]|$)/giu)) {
     addStructuredSlot(slots, 'region', match[1]);
   }
-  for (const match of value.matchAll(/\b(?:in|across|throughout|within)\s+([A-Za-z][A-Za-z -]{1,30}?)(?=\s+(?:market|region|while|and|for|to|by)|[,.;]|$)/giu)) {
-    addStructuredSlot(slots, 'region', match[1]);
-  }
-
-  for (const occurrence of actions) {
-    const object = actionObjectSegment(value, occurrence, actions);
-    if (!object) continue;
-    for (const token of object.match(/[A-Za-z][A-Za-z0-9]*(?:[._+-][A-Za-z0-9]+)*/g) || []) {
-      if (LATIN_ENTITY_STOPWORDS.has(token.toLowerCase())) continue;
-      addStructuredSlot(slots, 'named', token);
-    }
-    const withoutVersion = object.replace(/第[零〇一二三四五六七八九十百两\d]+(?:版|代|期|阶段)/gu, '');
-    for (const match of withoutVersion.matchAll(/([\p{Script=Han}]{2,12}?)(模型|系统|平台|芯片|产品|服务|协议|法案|法规|工具|代理|权重|数据集)/gu)) {
-      const name = match[1].replace(/^(?:新的?|首个|最新|一款|一项)/u, '');
-      if (GENERIC_CHINESE_MODEL_NAMES.has(name)
-        || /^(?:(?:人工智能|大语言|语言|基础|生成式|多模态|新|该|相关|受支持|支持|部分|模型|产品|服务|系统|平台|和|及|与))+$/u.test(name)) continue;
-      addStructuredSlot(slots, 'object', `${name}${match[2]}`);
-    }
+  for (const match of value.matchAll(/\b([A-Z][A-Za-z-]{1,30}?)(?=\s+(?:market|region|business))\b/gu)) {
+    if (!LATIN_ENTITY_STOPWORDS.has(match[1].toLowerCase())) addStructuredSlot(slots, 'region', match[1]);
   }
   return [...slots.values()];
 }
 
-function semanticSlotPolarity(value: string, slot: StructuredFactSlot): Set<'positive' | 'negative'> {
-  const normalizedValue = normalizedSemanticSlot(value);
-  const normalizedSlot = normalizedSemanticSlot(slot.value);
-  const states = new Set<'positive' | 'negative'>();
-  let index = normalizedValue.indexOf(normalizedSlot);
-  while (index >= 0) {
-    const prefix = normalizedValue.slice(Math.max(0, index - 28), index);
-    const negative = /(?:并?未|没有|从未|尚未|不含|不包含|不支持|未覆盖|排除|拒绝|否认|停止|暂停)(?:[^，。；;!?]{0,12})$/u.test(prefix)
-      || /\b(?:never|not|no|without|exclude(?:s|ed|ing)?|den(?:y|ies|ied)|refus(?:e|es|ed))(?:\W+\w+){0,4}\W*$/iu.test(prefix);
-    states.add(negative ? 'negative' : 'positive');
-    index = normalizedValue.indexOf(normalizedSlot, index + normalizedSlot.length);
+function structuredFactUnitSlots(
+  value: string,
+  occurrence: FactActionOccurrence,
+  all: FactActionOccurrence[],
+  subject: string | null,
+): StructuredFactSlot[] {
+  const slots = new Map<string, StructuredFactSlot>();
+  const start = factUnitStart(value, occurrence.index);
+  const end = factUnitEnd(value, occurrence, all);
+  const directObject = actionObjectSegment(value, occurrence, all);
+  const prefix = stripFactTemporalText(value.slice(start, occurrence.index));
+  const context = `${prefix} ${directObject}`.replace(subject || /$^/u, ' ');
+
+  for (const token of context.match(/[A-Za-z][A-Za-z0-9]*(?:[._+-][A-Za-z0-9]+)*/g) || []) {
+    const normalized = token.toLowerCase();
+    if (LATIN_ENTITY_STOPWORDS.has(normalized) || /^(?:utc|gmt)(?:[+-]\d+)?$/i.test(token)) continue;
+    const named = /^[A-Z][A-Za-z0-9]*(?:[._+-][A-Za-z0-9]+)*$/.test(token)
+      || /[a-z][A-Z]|[A-Za-z]\d|\d[A-Za-z]/.test(token)
+      || /^[A-Z]{2,}$/.test(token);
+    if (named) addStructuredSlot(slots, 'object', token);
   }
-  return states;
+  for (const match of context.matchAll(/第([零〇一二三四五六七八九十百两\d]+)(版|代|期|阶段)/gu)) {
+    addStructuredSlot(slots, 'version', match[0]);
+  }
+  for (const match of context.matchAll(/(?<![\d-])(?:v(?:ersion)?\s*)?\d+(?:\.\d+)+(?:[-_][a-z0-9]+)?(?![\d.])/giu)) {
+    addStructuredSlot(slots, 'version', match[0]);
+  }
+  const withoutVersion = context.replace(/第[零〇一二三四五六七八九十百两\d]+(?:版|代|期|阶段)/gu, '');
+  for (const match of withoutVersion.matchAll(/([\p{Script=Han}]{2,12}?)(模型|系统|平台|芯片|产品|服务|协议|法案|法规|工具|代理|权重|数据集)/gu)) {
+    const name = match[1]
+      .replace(/^(?:(?:已经|已|仍在|正在|计划|可能|正式|完成|讨论|考虑|宣布|实施|开展|继续|对|向|为|其|该|一个|一项|一轮|新一轮|的)+)/u, '')
+      .replace(/^(?:新的?|首个|最新|一款|一项)/u, '');
+    if (GENERIC_CHINESE_MODEL_NAMES.has(name)
+      || /^(?:(?:人工智能|大语言|语言|基础|生成式|多模态|新|该|相关|受支持|支持|部分|模型|产品|服务|系统|平台|和|及|与))+$/u.test(name)) continue;
+    addStructuredSlot(slots, 'object', `${name}${match[2]}`);
+  }
+  for (const slot of factUnitRegionSlots(value.slice(start, end), directObject, occurrence.action)) {
+    addStructuredSlot(slots, slot.kind, slot.value);
+  }
+  return [...slots.values()];
 }
 
-function structuredSlotVerificationError(candidate: string, quote: string): string | null {
-  const expected = structuredFactSlots(candidate);
-  const actual = structuredFactSlots(quote);
-  const actualByKind = new Map<StructuredFactSlotKind, StructuredFactSlot[]>();
-  for (const slot of actual) actualByKind.set(slot.kind, [...(actualByKind.get(slot.kind) || []), slot]);
-  let missing = false;
-  for (const slot of expected) {
-    const matching = (actualByKind.get(slot.kind) || [])
-      .filter((item) => normalizedSemanticSlot(item.value) === normalizedSemanticSlot(slot.value));
-    if (!matching.length) {
-      missing = true;
-      continue;
-    }
-    const expectedPolarity = semanticSlotPolarity(candidate, slot);
-    const quotePolarity = semanticSlotPolarity(quote, matching[0]);
-    if (expectedPolarity.size && quotePolarity.size
-      && ![...expectedPolarity].some((item) => quotePolarity.has(item))) {
-      return 'fact_verification_polarity_mismatch';
+function factUnitNegated(
+  value: string,
+  occurrence: FactActionOccurrence,
+  all: FactActionOccurrence[],
+): boolean {
+  if (occurrence.negated) return true;
+  const start = factUnitStart(value, occurrence.index);
+  const controllingAction = all.some((item) => item.index >= start
+    && item.index < occurrence.index
+    && ['pause', 'deny', 'reject'].includes(item.action));
+  if (controllingAction) return true;
+  const tail = value.slice(occurrence.end, factUnitEnd(value, occurrence, all));
+  return /(?:不含|不包含|不支持|排除|没有)|\b(?:without|excluding|but\s+not)\b/iu.test(tail);
+}
+
+function structuredFactUnits(value: string): StructuredFactUnit[] {
+  const actions = factActionOccurrences(value);
+  const units: StructuredFactUnit[] = [];
+  let inheritedSubject: string | null = null;
+  for (const occurrence of actions) {
+    const unitStart = factUnitStart(value, occurrence.index);
+    const hasPriorActionInUnit = actions.some((item) => item.index >= unitStart && item.index < occurrence.index);
+    const explicitSubject = hasPriorActionInUnit ? null : leadingFactUnitSubject(value, occurrence);
+    if (explicitSubject) inheritedSubject = explicitSubject;
+    units.push({
+      action: occurrence.action,
+      subject: explicitSubject || inheritedSubject,
+      slots: structuredFactUnitSlots(value, occurrence, actions, explicitSubject || inheritedSubject),
+      negated: factUnitNegated(value, occurrence, actions),
+      modality: occurrence.modality,
+    });
+  }
+  return units;
+}
+
+function sameFactUnitIdentity(expected: StructuredFactUnit, actual: StructuredFactUnit): boolean {
+  if (expected.action !== actual.action) return false;
+  if (expected.subject && normalizedSemanticSlot(expected.subject) !== normalizedSemanticSlot(actual.subject || '')) {
+    return false;
+  }
+  return expected.slots.every((slot) => actual.slots.some((item) =>
+    item.kind === slot.kind
+    && normalizedSemanticSlot(item.value) === normalizedSemanticSlot(slot.value)));
+}
+
+function structuredFactUnitVerificationError(candidate: string, quote: string): string | null {
+  if (hasUnclassifiedCompoundAction(candidate)) return 'fact_verification_action_mismatch';
+  const expected = structuredFactUnits(candidate);
+  const actual = structuredFactUnits(quote);
+  if (!expected.length) return null;
+  for (const unit of expected) {
+    const sameAction = actual.filter((item) => item.action === unit.action);
+    const sameIdentity = sameAction.filter((item) => sameFactUnitIdentity(unit, item));
+    const samePolarity = sameIdentity.filter((item) => item.negated === unit.negated);
+    if (sameIdentity.length && !samePolarity.length) return 'fact_verification_polarity_mismatch';
+  }
+  for (const unit of expected) {
+    const sameIdentity = actual.filter((item) => sameFactUnitIdentity(unit, item));
+    const samePolarity = sameIdentity.filter((item) => item.negated === unit.negated);
+    if (!samePolarity.some((item) => actionModalityCompatible(unit.modality, item.modality))) {
+      if (samePolarity.length) return 'fact_verification_modality_mismatch';
     }
   }
-  return missing ? 'fact_verification_entity_slot_missing' : null;
+  const expectedActions = new Set(expected.map((unit) => unit.action));
+  const actualActions = new Set(actual.map((unit) => unit.action));
+  const expectedWeakForce = expectedActions.has('request');
+  const expectedStrongForce = [...expectedActions].some((action) => ['regulatory_require', 'mandate', 'order'].includes(action));
+  const actualWeakForce = actualActions.has('request');
+  const actualStrongForce = [...actualActions].some((action) => ['regulatory_require', 'mandate', 'order'].includes(action));
+  if ((expectedWeakForce && actualStrongForce) || (expectedStrongForce && actualWeakForce)) {
+    return 'fact_verification_modality_mismatch';
+  }
+  for (const unit of expected) {
+    const sameAction = actual.filter((item) => item.action === unit.action);
+    if (!sameAction.length) return 'fact_verification_action_mismatch';
+    if (!sameAction.some((item) => sameFactUnitIdentity(unit, item))) {
+      return 'fact_verification_entity_slot_missing';
+    }
+  }
+  if (hasOpposingFactActions(candidate, quote)) return 'fact_verification_action_mismatch';
+  return null;
 }
 
 function normalizedFactDates(value: string): string[] {
@@ -903,6 +1030,74 @@ function normalizedFactInstants(value: string): string[] {
   for (const match of value.matchAll(pattern)) {
     const parsed = Date.parse(match[0]);
     if (Number.isFinite(parsed)) instants.add(new Date(parsed).toISOString());
+  }
+
+  const timezoneOffsetMinutes = (raw: string | undefined): number | null => {
+    if (!raw) return null;
+    const normalized = raw.replace(/\s+/g, '').toUpperCase();
+    if (normalized === '北京时间' || normalized === '中国标准时间'
+      || normalized === 'BEIJINGTIME' || normalized === 'CHINASTANDARDTIME') return 8 * 60;
+    if (normalized === 'Z' || normalized === 'UTC' || normalized === 'GMT') return 0;
+    const offset = normalized.replace(/^(?:UTC|GMT)/, '').match(/^([+-])(\d{1,2})(?::?(\d{2}))?$/);
+    if (!offset) return null;
+    const hours = Number(offset[2]);
+    const minutes = Number(offset[3] || '0');
+    if (hours > 14 || minutes > 59 || (hours === 14 && minutes !== 0)) return null;
+    return (offset[1] === '-' ? -1 : 1) * (hours * 60 + minutes);
+  };
+  const addInstant = (
+    yearText: string,
+    monthText: string,
+    dayText: string,
+    hourText: string,
+    minuteText: string | undefined,
+    secondText: string | undefined,
+    timezoneText: string | undefined,
+  ) => {
+    const year = Number(yearText);
+    const month = Number(monthText);
+    const day = Number(dayText);
+    const hour = Number(hourText);
+    const minute = Number(minuteText || '0');
+    const second = Number(secondText || '0');
+    const offset = timezoneOffsetMinutes(timezoneText);
+    if (offset === null || month < 1 || month > 12 || day < 1 || day > 31
+      || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) return;
+    const calendarCheck = new Date(Date.UTC(year, month - 1, day));
+    if (calendarCheck.getUTCFullYear() !== year
+      || calendarCheck.getUTCMonth() !== month - 1
+      || calendarCheck.getUTCDate() !== day) return;
+    const milliseconds = Date.UTC(year, month - 1, day, hour, minute, second) - offset * 60_000;
+    instants.add(new Date(milliseconds).toISOString());
+  };
+
+  const timezonePattern = '(北京时间|中国标准时间|Beijing\\s+Time|China\\s+Standard\\s+Time|(?:UTC|GMT)\\s*[+-]\\s*\\d{1,2}(?::?\\d{2})?|UTC|GMT|[+-]\\d{1,2}:?\\d{2})';
+  const chinesePattern = new RegExp(
+    `(20\\d{2})年(\\d{1,2})月(\\d{1,2})日\\s*(?:${timezonePattern}\\s*)?(\\d{1,2})(?:时|点)(?:(\\d{1,2})分?)?(?:(\\d{1,2})秒?)?\\s*(?:${timezonePattern})?`,
+    'giu',
+  );
+  for (const match of value.matchAll(chinesePattern)) {
+    addInstant(match[1], match[2], match[3], match[5], match[6], match[7], match[4] || match[8]);
+  }
+
+  const monthNumbers: Record<string, string> = {
+    january: '01', february: '02', march: '03', april: '04', may: '05', june: '06',
+    july: '07', august: '08', september: '09', october: '10', november: '11', december: '12',
+  };
+  const englishPattern = new RegExp(
+    `\\b(January|February|March|April|May|June|July|August|September|October|November|December)\\s+(\\d{1,2}),\\s*(20\\d{2})\\s+(?:at\\s+)?(\\d{1,2}):(\\d{2})(?::(\\d{2}))?\\s*${timezonePattern}`,
+    'giu',
+  );
+  for (const match of value.matchAll(englishPattern)) {
+    addInstant(match[3], monthNumbers[match[1].toLowerCase()], match[2], match[4], match[5], match[6], match[7]);
+  }
+
+  const numericPattern = new RegExp(
+    `\\b(20\\d{2})-(\\d{1,2})-(\\d{1,2})(?:T|\\s+)(\\d{1,2}):(\\d{2})(?::(\\d{2})(?:\\.\\d+)?)?\\s*${timezonePattern}`,
+    'giu',
+  );
+  for (const match of value.matchAll(numericPattern)) {
+    addInstant(match[1], match[2], match[3], match[4], match[5], match[6], match[7]);
   }
   return [...instants];
 }
@@ -1021,23 +1216,21 @@ function quoteSupportsStructuredFact(fact: ManualLeadVerificationFact, quote: st
   }
   let actionError: string | null = null;
   if (fact.field !== 'event_type') {
-    actionError = structuredActionVerificationError(candidate, quote);
-  }
-  let slotError: string | null = null;
-  if (['title', 'summary', 'claim'].includes(fact.field)) {
-    slotError = structuredSlotVerificationError(candidate, quote);
-    if (slotError === 'fact_verification_polarity_mismatch') return slotError;
+    actionError = ['title', 'summary', 'claim'].includes(fact.field)
+      ? structuredFactUnitVerificationError(candidate, quote)
+      : structuredActionVerificationError(candidate, quote);
   }
   if (actionError === 'fact_verification_polarity_mismatch'
     || actionError === 'fact_verification_modality_mismatch') return actionError;
   if (actionError === 'fact_verification_action_mismatch'
     && hasOpposingFactActions(candidate, quote)) return actionError;
+  if (actionError === 'fact_verification_action_mismatch'
+    && factActionOccurrences(candidate).length > 1) return actionError;
   if (['title', 'summary', 'claim'].includes(fact.field)
     && !hasDistinctiveSameLanguageFactSignal(candidate, quote)) {
     return 'fact_verification_fact_signal_missing';
   }
   if (actionError) return actionError;
-  if (slotError) return slotError;
   return null;
 }
 
