@@ -129,15 +129,44 @@ export interface ManualNewsLeadAssessment {
   generated_claim_contract?: typeof MANUAL_LEAD_GENERATED_CLAIM_CONTRACT;
   source_fact_contract?: typeof MANUAL_LEAD_SOURCE_FACT_CONTRACT;
   editorial_projection_contract?: typeof MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT;
+  evidence_disposition_contract?: typeof MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT;
   source_facts?: ManualSourceAtomicFact[];
   editorial_projection?: ManualEditorialProjection;
+  evidence_dispositions?: ManualEvidenceDisposition[];
+  evidence_completeness?: ManualEvidenceCompletenessResult[];
 }
 
 export const MANUAL_LEAD_GENERATED_CLAIM_CONTRACT = 'structured_atomic_fact_v1' as const;
 export const MANUAL_LEAD_SOURCE_FACT_CONTRACT = 'source_atomic_facts_v2' as const;
 export const MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT = 'zh_editorial_projection_v2' as const;
+export const MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT = 'all_evidence_dispositions_v1' as const;
 
-export const MANUAL_LEAD_VERIFICATION_POLICY_VERSION = 'fact-evidence-projection-hmac-v8' as const;
+export const MANUAL_LEAD_VERIFICATION_POLICY_VERSION = 'fact-evidence-projection-hmac-v9' as const;
+
+export type ManualEvidenceDispositionKind =
+  | 'supports_core'
+  | 'contradicts_core'
+  | 'material_update'
+  | 'background'
+  | 'irrelevant';
+
+export type ManualEvidenceDispositionReason =
+  | 'unrelated_event'
+  | 'context_only'
+  | 'duplicate_context'
+  | 'insufficient_overlap';
+
+export interface ManualEvidenceDisposition {
+  evidence_id: string;
+  disposition: ManualEvidenceDispositionKind;
+  source_fact_ids: string[];
+  reason_code: ManualEvidenceDispositionReason | null;
+}
+
+export interface ManualEvidenceCompletenessResult {
+  evidence_id: string;
+  relation: 'supports' | 'conflicts' | 'updates' | 'uncertain' | 'unrelated';
+}
 
 export interface ManualNewsProcessedAssessment extends ManualNewsLeadAssessment {
   evidence_tier: 'official_primary' | 'original_plus_independent' | 'multi_source' | 'insufficient';
@@ -198,7 +227,7 @@ export interface ManualLeadPrimaryFactIdentity {
 }
 
 export interface ManualLeadFactVerification {
-  overall_verdict: 'supported' | 'unsupported';
+  overall_verdict: 'supported' | 'conflicted' | 'unsupported';
   primary_fact: ManualLeadPrimaryFactIdentity;
   fact_results: Array<{
     fact_id: string;
@@ -219,6 +248,14 @@ export interface ManualLeadFactVerification {
     supported: boolean;
     issue_code: 'none' | 'translation_mismatch' | 'fact_expansion' | 'fact_omission';
   }>;
+  disposition_results?: Array<{
+    evidence_id: string;
+    disposition: ManualEvidenceDispositionKind;
+    supported: boolean;
+    issue_code: 'none' | 'misclassified' | 'conflict_ignored' | 'update_ignored' | 'not_found';
+    source_quotes: Array<{ evidence_id: string; quote: string }>;
+  }>;
+  completeness_results?: ManualEvidenceCompletenessResult[];
   prior_context: ManualLeadVerifiedPriorContext[];
 }
 
@@ -1550,6 +1587,182 @@ function validatedProjectionSentence(
   };
 }
 
+type DeterministicEvidenceRelation = 'supports' | 'conflicts' | 'updates' | 'uncertain' | 'unrelated';
+
+function normalizedEvidenceDispositionText(evidence: ManualNewsEvidence): string {
+  return [evidence.publisher, evidence.title, evidence.excerpt, ...evidence.claims_supported]
+    .join(' ')
+    .normalize('NFKC')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+function deterministicEvidenceRelation(
+  evidence: ManualNewsEvidence,
+  sourceFacts: readonly ManualSourceAtomicFact[],
+  evidenceById: ReadonlyMap<string, ManualNewsEvidence>,
+): DeterministicEvidenceRelation {
+  const text = normalizedEvidenceDispositionText(evidence);
+  const normalizedText = text.toLowerCase();
+  const sourceText = sourceFacts.map((fact) => fact.text).join(' ');
+  const sourceSubjects = sourceFacts.flatMap((fact) => [
+    fact.atomic_fact.subject.toLowerCase(),
+    ...registeredEntityIdentities(fact.atomic_fact.subject),
+  ]).filter((value) => value.length >= 2);
+  const sourceAnchors = sourceFacts.flatMap((fact) => highConfidenceLeadAnchors(
+    `${fact.atomic_fact.subject} ${fact.atomic_fact.object}`,
+  ));
+  const subjectShared = sourceSubjects.some((subject) => normalizedText.includes(subject.toLowerCase()));
+  const anchorShared = sourceAnchors.some((anchor) => exactStructuredAnchorPresent(anchor, text));
+  const sourceOccurrences = factActionOccurrences(sourceText);
+  const evidenceOccurrences = factActionOccurrences(text);
+  const actionShared = sourceOccurrences.some((source) => evidenceOccurrences.some((candidate) =>
+    candidate.action === source.action));
+  const opposite = hasOpposingFactActions(sourceText, text);
+  const polarityConflict = sourceOccurrences.some((source) => evidenceOccurrences.some((candidate) =>
+    candidate.action === source.action && candidate.negated !== source.negated));
+  const explicitDenial = evidenceOccurrences.some((candidate) => candidate.action === 'deny')
+    || /(?:否认|并未|并不|从未|不再|更正)|\b(?:den(?:y|ies|ied)|retract(?:s|ed)?|rescind(?:s|ed)?|not|never|no longer)\b/iu.test(text);
+  const scopeChange = /(?:仅限|只适用|仅适用|部分适用|范围缩小|限于)|\b(?:only applies|limited to|restricted to|scope was narrowed)\b/iu.test(text);
+  const statusChange = /(?:恢复|取消|撤回|收回|改为|随后更新|后来更新|状态变化)|\b(?:reversed|updated|resumed|withdrawn|withdrew|withdraws?|cancelled|canceled|subsequently changed)\b/iu.test(text);
+  const related = (subjectShared || anchorShared)
+    && (actionShared || opposite || explicitDenial || scopeChange || statusChange);
+  if (!related) return subjectShared || anchorShared ? 'uncertain' : 'unrelated';
+  if (opposite || polarityConflict || explicitDenial || scopeChange) return 'conflicts';
+  if (actionShared) return 'supports';
+  if (statusChange) {
+    const citedTimes = sourceFacts.flatMap((fact) => fact.evidence_ids)
+      .map((id) => evidenceById.get(id)?.published_at || '')
+      .map((value) => Date.parse(value))
+      .filter(Number.isFinite);
+    const currentTime = Date.parse(evidence.published_at || '');
+    if (Number.isFinite(currentTime) && (!citedTimes.length || currentTime > Math.max(...citedTimes))) {
+      return 'updates';
+    }
+    return 'uncertain';
+  }
+  return 'uncertain';
+}
+
+function validateGeneratedEvidenceDispositions(
+  raw: unknown,
+  evidence: readonly ManualNewsEvidence[],
+  sourceByRef: ReadonlyMap<string, ManualSourceAtomicFact>,
+  sourceFacts: readonly ManualSourceAtomicFact[],
+  recommendation: unknown,
+  uncertainties: unknown,
+): {
+  dispositions: ManualEvidenceDisposition[];
+  completeness: ManualEvidenceCompletenessResult[];
+} {
+  if (!Array.isArray(raw)) {
+    throw new Error('invalid_evidence_dispositions');
+  }
+  if (raw.length !== evidence.length) throw new Error('invalid_evidence_disposition_coverage');
+  const allowedEvidenceIds = new Set(evidence.map((item) => item.id));
+  const seenEvidenceIds = new Set<string>();
+  const allowedKinds = new Set<ManualEvidenceDispositionKind>([
+    'supports_core', 'contradicts_core', 'material_update', 'background', 'irrelevant',
+  ]);
+  const allowedReasons = new Set<ManualEvidenceDispositionReason>([
+    'unrelated_event', 'context_only', 'duplicate_context', 'insufficient_overlap',
+  ]);
+  const parsed = raw.map((item) => {
+    if (!isPlainObject(item)) throw new Error('invalid_evidence_disposition');
+    try {
+      strictKeys(item, ['evidence_id', 'disposition', 'source_fact_refs', 'reason_code']);
+    } catch {
+      throw new Error('invalid_evidence_disposition');
+    }
+    if (typeof item.evidence_id !== 'string' || !allowedEvidenceIds.has(item.evidence_id)
+      || seenEvidenceIds.has(item.evidence_id)
+      || typeof item.disposition !== 'string'
+      || !allowedKinds.has(item.disposition as ManualEvidenceDispositionKind)
+      || !Array.isArray(item.source_fact_refs)
+      || item.source_fact_refs.some((ref) => typeof ref !== 'string' || !sourceByRef.has(ref))
+      || new Set(item.source_fact_refs).size !== item.source_fact_refs.length) {
+      throw new Error('invalid_evidence_disposition_coverage');
+    }
+    seenEvidenceIds.add(item.evidence_id);
+    const disposition = item.disposition as ManualEvidenceDispositionKind;
+    const factIds = (item.source_fact_refs as string[]).map((ref) => sourceByRef.get(ref)!.fact_id);
+    const reasonCode = item.reason_code;
+    if (['supports_core', 'contradicts_core', 'material_update'].includes(disposition)) {
+      if (!factIds.length || reasonCode !== null) throw new Error('invalid_evidence_disposition');
+    } else if (factIds.length || typeof reasonCode !== 'string'
+      || !allowedReasons.has(reasonCode as ManualEvidenceDispositionReason)) {
+      throw new Error('invalid_evidence_disposition');
+    }
+    return {
+      evidence_id: item.evidence_id,
+      disposition,
+      source_fact_ids: factIds,
+      reason_code: reasonCode as ManualEvidenceDispositionReason | null,
+    };
+  });
+  if (seenEvidenceIds.size !== evidence.length) throw new Error('invalid_evidence_disposition_coverage');
+  const byEvidenceId = new Map(evidence.map((item) => [item.id, item]));
+  const parsedById = new Map(parsed.map((item) => [item.evidence_id, item]));
+  const completeness: ManualEvidenceCompletenessResult[] = [];
+  let hasConflict = false;
+  for (const evidenceItem of evidence) {
+    const disposition = parsedById.get(evidenceItem.id)!;
+    const relation = deterministicEvidenceRelation(evidenceItem, sourceFacts, byEvidenceId);
+    completeness.push({ evidence_id: evidenceItem.id, relation });
+    const referencedFacts = sourceFacts.filter((fact) => disposition.source_fact_ids.includes(fact.fact_id));
+    const referencedRelation = referencedFacts.length
+      ? deterministicEvidenceRelation(evidenceItem, referencedFacts, byEvidenceId)
+      : null;
+    if (relation === 'supports' && disposition.disposition !== 'supports_core') {
+      throw new Error('evidence_disposition_related_uncovered');
+    }
+    if (relation === 'conflicts' && disposition.disposition !== 'contradicts_core') {
+      throw new Error('evidence_disposition_conflict_uncovered');
+    }
+    if (relation === 'updates' && disposition.disposition !== 'material_update') {
+      throw new Error('evidence_disposition_update_uncovered');
+    }
+    if (relation === 'uncertain' && recommendation === 'recommended') {
+      throw new Error('evidence_disposition_classification_uncertain');
+    }
+    if (relation === 'uncertain' && disposition.disposition !== 'background') {
+      throw new Error('evidence_disposition_classification_uncertain');
+    }
+    if (relation === 'unrelated' && !['background', 'irrelevant'].includes(disposition.disposition)) {
+      throw new Error('evidence_disposition_unrelated_misclassified');
+    }
+    const expectedReferencedRelation = disposition.disposition === 'supports_core'
+      ? 'supports'
+      : disposition.disposition === 'contradicts_core'
+        ? 'conflicts'
+        : disposition.disposition === 'material_update'
+          ? 'updates'
+          : null;
+    if (expectedReferencedRelation && referencedRelation !== expectedReferencedRelation) {
+      throw new Error('evidence_disposition_fact_reference_mismatch');
+    }
+    if (['conflicts', 'updates'].includes(relation)) hasConflict = true;
+  }
+  if (hasConflict && (recommendation !== 'needs_review'
+    || !Array.isArray(uncertainties) || !uncertainties.some((item) => typeof item === 'string' && item.trim()))) {
+    throw new Error('evidence_disposition_conflict_requires_review');
+  }
+  for (const fact of sourceFacts) {
+    if (fact.evidence_ids.some((id) => {
+      const disposition = parsedById.get(id);
+      return disposition?.disposition !== 'supports_core'
+        || !disposition.source_fact_ids.includes(fact.fact_id);
+    })) {
+      throw new Error('evidence_disposition_claim_mismatch');
+    }
+  }
+  const order = new Map(evidence.map((item, index) => [item.id, index]));
+  return {
+    dispositions: parsed.sort((left, right) => order.get(left.evidence_id)! - order.get(right.evidence_id)!),
+    completeness,
+  };
+}
+
 /**
  * Validates the model-only assessment envelope and deterministically converts
  * its structured atomic fact rows into the persisted assessment schema. The
@@ -1651,8 +1864,14 @@ export function validateManualLeadGeneratedAssessment(
   const claims = sourceFacts.map((fact) => ({ text: fact.text, evidence_ids: fact.evidence_ids }));
   const {
     source_facts: _sourceFacts, editorial_projection: _editorialProjection,
+    evidence_dispositions: rawEvidenceDispositions,
     ...identity
   } = raw;
+  const { dispositions: evidenceDispositions, completeness: evidenceCompleteness }
+    = validateGeneratedEvidenceDispositions(
+    rawEvidenceDispositions, evidence, sourceByRef, sourceFacts,
+    identity.recommendation, identity.uncertainties,
+  );
   const assessment = validateManualLeadAssessment({
     ...identity,
     title: titleProjection.text_zh,
@@ -1664,8 +1883,11 @@ export function validateManualLeadGeneratedAssessment(
     generated_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
     source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
     editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+    evidence_disposition_contract: MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
     source_facts: sourceFacts,
     editorial_projection: { title: titleProjection, summary: summaryProjection },
+    evidence_dispositions: evidenceDispositions,
+    evidence_completeness: evidenceCompleteness,
   };
 }
 
@@ -1759,6 +1981,8 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
       '评分按事件重要性35、行业影响25、证据权威20、新鲜度20综合为0到100；证据不足不能靠高分变成 recommended。',
       'recommendation：证据充分且值得进入候选池为 recommended；事实可能成立但证据/范围仍缺为 needs_review；同事件无重要更新为 duplicate；已证伪、非新闻或与AI无关为 rejected。',
       '若证据相互冲突，在 uncertainties 逐项说明，并优先采用时间更晚且权威层级更高的原始来源，不得静默拼成确定结论。',
+      'evidence_dispositions 必须覆盖 allowed_evidence_ids 中每个 ID 恰好一次，不得遗漏或重复。supports_core、contradicts_core、material_update 必须引用相关 source_fact_refs 且 reason_code=null；background、irrelevant 不得引用 fact，只能使用 schema 给出的有界 reason_code。',
+      '任何共享核心主体/产品/动作/时间锚点的否认、撤回、反向事实、范围限制、状态变化或更晚更新都不得标为 background/irrelevant。冲突或更新必须显式分类、写入 uncertainties，并令 recommendation=needs_review；最小核心事实不能作为删除不利证据的理由。',
     ].join('\n'),
     user: JSON.stringify({
       task: '生成源语言原子事实、逐句映射的严肃中文编辑投影、事件身份与评分建议',
@@ -1780,6 +2004,12 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
             object: 'exactly one object with necessary version/region/scope; no second subject or predicate',
           },
           evidence_ids: ['one or more IDs copied character-for-character from allowed_evidence_ids'],
+        }],
+        evidence_dispositions: [{
+          evidence_id: 'each allowed_evidence_id exactly once',
+          disposition: 'supports_core|contradicts_core|material_update|background|irrelevant',
+          source_fact_refs: ['required for supports/contradicts/update; otherwise empty'],
+          reason_code: 'null for supports/contradicts/update; otherwise unrelated_event|context_only|duplicate_context|insufficient_overlap',
         }],
         editorial_projection: {
           title: {
@@ -1892,8 +2122,11 @@ export function manualLeadAssessmentCore(
       generated_claim_contract: assessment.generated_claim_contract,
       source_fact_contract: assessment.source_fact_contract,
       editorial_projection_contract: assessment.editorial_projection_contract,
+      evidence_disposition_contract: assessment.evidence_disposition_contract,
       source_facts: assessment.source_facts,
       editorial_projection: assessment.editorial_projection,
+      evidence_dispositions: assessment.evidence_dispositions,
+      evidence_completeness: assessment.evidence_completeness,
     } : {}),
   };
 }
@@ -1901,10 +2134,14 @@ export function manualLeadAssessmentCore(
 function validatePersistedAssessmentContracts(
   raw: ManualNewsLeadAssessment,
   evidence: readonly ManualNewsEvidence[],
-): Pick<ManualNewsLeadAssessment, 'generated_claim_contract' | 'source_fact_contract' | 'editorial_projection_contract' | 'source_facts' | 'editorial_projection'> {
+): Pick<ManualNewsLeadAssessment,
+  'generated_claim_contract' | 'source_fact_contract' | 'editorial_projection_contract'
+  | 'evidence_disposition_contract' | 'source_facts' | 'editorial_projection'
+  | 'evidence_dispositions' | 'evidence_completeness'> {
   if (raw.generated_claim_contract !== MANUAL_LEAD_GENERATED_CLAIM_CONTRACT
     || raw.source_fact_contract !== MANUAL_LEAD_SOURCE_FACT_CONTRACT
     || raw.editorial_projection_contract !== MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT
+    || raw.evidence_disposition_contract !== MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT
     || !Array.isArray(raw.source_facts) || !raw.source_facts.length
     || !raw.editorial_projection) throw new Error('invalid_processed_assessment_contract');
   const evidenceIds = new Set(evidence.map((item) => item.id));
@@ -1984,12 +2221,39 @@ function validatePersistedAssessmentContracts(
     || canonicalJson(raw.claims) !== canonicalJson(sourceFacts.map((fact) => ({
       text: fact.text, evidence_ids: fact.evidence_ids,
     })))) throw new Error('invalid_processed_assessment_contract');
+  const sourceRefById = new Map(sourceFacts.map((fact, index) => [
+    fact.fact_id, `fact-${String(index + 1).padStart(2, '0')}`,
+  ]));
+  if (!Array.isArray(raw.evidence_dispositions)) throw new Error('invalid_processed_assessment_contract');
+  const persistedDispositionInput = raw.evidence_dispositions.map((item) => ({
+    evidence_id: item.evidence_id,
+    disposition: item.disposition,
+    source_fact_refs: item.source_fact_ids.map((id) => sourceRefById.get(id) || ''),
+    reason_code: item.reason_code,
+  }));
+  const sourceByRef = new Map(sourceFacts.map((fact, index) => [
+    `fact-${String(index + 1).padStart(2, '0')}`, fact,
+  ]));
+  const { dispositions: evidenceDispositions, completeness: evidenceCompleteness }
+    = validateGeneratedEvidenceDispositions(
+    persistedDispositionInput, evidence, sourceByRef, sourceFacts,
+    raw.recommendation, raw.uncertainties,
+  );
+  if (canonicalJson(evidenceDispositions) !== canonicalJson(raw.evidence_dispositions)) {
+    throw new Error('invalid_processed_assessment_contract');
+  }
+  if (canonicalJson(evidenceCompleteness) !== canonicalJson(raw.evidence_completeness)) {
+    throw new Error('invalid_processed_assessment_contract');
+  }
   return {
     generated_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
     source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
     editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+    evidence_disposition_contract: MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
     source_facts: sourceFacts,
     editorial_projection: { title, summary },
+    evidence_dispositions: evidenceDispositions,
+    evidence_completeness: evidenceCompleteness,
   };
 }
 
@@ -2004,7 +2268,8 @@ export function validateManualNewsProcessedAssessment(
       'title', 'summary', 'event_key', 'event_type', 'material_update', 'score',
       'recommendation', 'occurred_at', 'uncertainties', 'claims', 'matched_event_key',
       'generated_claim_contract', 'source_fact_contract', 'editorial_projection_contract',
-      'source_facts', 'editorial_projection',
+      'evidence_disposition_contract', 'source_facts', 'editorial_projection', 'evidence_dispositions',
+      'evidence_completeness',
       'evidence_tier', 'duplicate_scope', 'matched_lead_id',
     ]);
   } catch {
@@ -2062,6 +2327,9 @@ function manualLeadVerificationFacts(assessment: ManualNewsLeadAssessment): Manu
   const contracted = assessment.generated_claim_contract === MANUAL_LEAD_GENERATED_CLAIM_CONTRACT
     && assessment.source_fact_contract === MANUAL_LEAD_SOURCE_FACT_CONTRACT
     && assessment.editorial_projection_contract === MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT
+    && assessment.evidence_disposition_contract === MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT
+    && !!assessment.evidence_dispositions?.length
+    && !!assessment.evidence_completeness?.length
     && !!assessment.source_facts?.length && !!assessment.editorial_projection;
   const addTextField = (field: 'title' | 'summary', value: string) => {
     const atomic = splitAtomicFactClauses(value);
@@ -2115,6 +2383,9 @@ function manualLeadProjectionDefinitions(assessment: ManualNewsLeadAssessment) {
   if (assessment.generated_claim_contract !== MANUAL_LEAD_GENERATED_CLAIM_CONTRACT
     || assessment.source_fact_contract !== MANUAL_LEAD_SOURCE_FACT_CONTRACT
     || assessment.editorial_projection_contract !== MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT
+    || assessment.evidence_disposition_contract !== MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT
+    || !assessment.evidence_dispositions?.length
+    || !assessment.evidence_completeness?.length
     || !assessment.source_facts?.length || !assessment.editorial_projection) return [];
   const sourceById = new Map(assessment.source_facts.map((fact) => [fact.fact_id, fact]));
   return [assessment.editorial_projection.title, ...assessment.editorial_projection.summary].map((projection) => ({
@@ -2164,8 +2435,8 @@ export function buildManualLeadFactVerificationPrompt(input: {
   const compactEvidence = promptEvidenceDocuments(input.evidence);
   const priorEvents = verifiedPriorContexts(input.prior_events || []);
   const factDefinitions = manualLeadVerificationFacts(input.assessment);
-  const citedEvidenceIds = new Set(factDefinitions.flatMap((fact) => fact.allowed_evidence_ids));
   const projectionDefinitions = manualLeadProjectionDefinitions(input.assessment);
+  const dispositionDefinitions = input.assessment.evidence_dispositions || [];
   const primaryFact = primaryFactIdentity(factDefinitions);
   const promptPrimaryFact = {
     fact_id: primaryFact.fact_id,
@@ -2213,7 +2484,8 @@ export function buildManualLeadFactVerificationPrompt(input: {
       'occurred_at 只能绑定系统给出的 primary_fact（中文 title 映射的首个源事实）；禁止用 summary 的次要源事实或另一个事件的时间替代主事件时间。',
       '先逐字核验 source fact 与来源 quote；随后独立核验 projections。每个中文投影只能使用其 source_fact_ids 映射且已经 supported 的源事实，必须在主体角色、主体、动作数量、对象、版本、时间、地区、否定、情态和完成状态上语义等价。',
       '中文投影新增事实用 fact_expansion，遗漏源事实槽位用 fact_omission，翻译改变语义用 translation_mismatch。不得把中文投影自身当证据，也不得用未映射 source fact 补齐。',
-      '只有所有 fact 都 supported=true 且 issue_code=none 时 overall_verdict 才能为 supported。',
+      'disposition_results 必须覆盖顶层每个 evidence disposition 恰好一次，并用该 evidence 自身的一段连续原文核验其 supports_core、contradicts_core、material_update、background 或 irrelevant 分类。不得只核验支持证据而忽略官方否认、撤回、范围限制或更晚更新。',
+      '只有所有 fact、projection 与 disposition 都 supported=true 且 issue_code=none 时才能形成有效结论；若存在已正确覆盖的 contradicts_core/material_update，overall_verdict 必须为 conflicted 且 assessment recommendation 必须为 needs_review，否则 overall_verdict 为 supported；任一未支持项则为 unsupported。',
     ].join('\n'),
     user: JSON.stringify({
       task: '独立核验每个事实字段，并返回可由程序逐字定位的来源引文',
@@ -2224,9 +2496,9 @@ export function buildManualLeadFactVerificationPrompt(input: {
           input.assessment.event_type === 'political_regulatory',
       },
       primary_fact: promptPrimaryFact,
-      untrusted_evidence: compactEvidence.filter((item) => citedEvidenceIds.has(item.id)),
+      untrusted_evidence: compactEvidence,
       output_schema: {
-        overall_verdict: 'supported|unsupported',
+        overall_verdict: 'supported|conflicted|unsupported',
         fact_results: [{
           fact_id: 'exact input fact_id, exactly once',
           supported: 'boolean',
@@ -2255,9 +2527,25 @@ export function buildManualLeadFactVerificationPrompt(input: {
           supported: 'boolean',
           issue_code: 'none|translation_mismatch|fact_expansion|fact_omission',
         }],
+        disposition_results: [{
+          evidence_id: 'exact disposition evidence_id, every evidence exactly once',
+          disposition: 'exact input disposition, unchanged',
+          supported: 'boolean',
+          issue_code: 'none|misclassified|conflict_ignored|update_ignored|not_found',
+          source_quotes: [{
+            evidence_id: 'must equal this disposition evidence_id',
+            quote: 'continuous quote from that evidence, 12..300 Unicode chars',
+          }],
+        }],
       },
       facts,
       projections: projectionDefinitions,
+      evidence_dispositions: dispositionDefinitions.map((item) => ({
+        evidence_id: item.evidence_id,
+        disposition: item.disposition,
+        source_fact_ids: [...item.source_fact_ids],
+        reason_code: item.reason_code,
+      })),
     }),
   };
 }
@@ -2284,6 +2572,11 @@ const FACT_VERIFICATION_ERROR_CODES = new Set([
   'invalid_projection_verification_result',
   'invalid_projection_verification_semantics',
   'invalid_projection_verification_source',
+  'invalid_disposition_verification_results',
+  'invalid_disposition_verification_coverage',
+  'invalid_disposition_verification_result',
+  'invalid_disposition_verification_quote',
+  'invalid_disposition_verification_semantics',
   'political_source_verification_missing',
   'unknown_fact_verification_evidence_id',
   'multiple_fact_quote_evidence',
@@ -4054,16 +4347,20 @@ export function validateManualLeadFactVerification(
   if (!isPlainObject(raw)) throw new Error('invalid_fact_verification');
   const projectionDefinitions = manualLeadProjectionDefinitions(assessment);
   const contracted = projectionDefinitions.length > 0;
+  const dispositionDefinitions = contracted ? (assessment.evidence_dispositions || []) : [];
   try {
     strictKeys(raw, options.persisted
-      ? ['overall_verdict', 'primary_fact', 'fact_results', ...(contracted ? ['projection_results'] : []), 'prior_context']
-      : ['overall_verdict', 'fact_results', ...(contracted ? ['projection_results'] : [])]);
+      ? ['overall_verdict', 'primary_fact', 'fact_results',
+        ...(contracted ? ['projection_results', 'disposition_results', 'completeness_results'] : []), 'prior_context']
+      : ['overall_verdict', 'fact_results',
+        ...(contracted ? ['projection_results', 'disposition_results'] : [])]);
   } catch {
     throw new Error('invalid_fact_verification_fields');
   }
-  if (raw.overall_verdict !== 'supported' && raw.overall_verdict !== 'unsupported') {
+  if (!['supported', 'conflicted', 'unsupported'].includes(String(raw.overall_verdict))) {
     throw new Error('invalid_fact_verification_verdict');
   }
+  const overallVerdict = raw.overall_verdict as ManualLeadFactVerification['overall_verdict'];
   if (!Array.isArray(raw.fact_results)) throw new Error('invalid_fact_verification_results');
   const byEvidenceId = new Map(evidence.map((item) => [item.id, item]));
   const facts = manualLeadVerificationFacts(assessment);
@@ -4354,12 +4651,105 @@ export function validateManualLeadFactVerification(
     projectionResults.sort((left, right) => projectionDefinitions.findIndex((item) => item.projection_id === left.projection_id)
       - projectionDefinitions.findIndex((item) => item.projection_id === right.projection_id));
   }
+  let dispositionResults: NonNullable<ManualLeadFactVerification['disposition_results']> | undefined;
+  if (contracted) {
+    if (!Array.isArray(raw.disposition_results)) throw new Error('invalid_disposition_verification_results');
+    const definitionsById = new Map(dispositionDefinitions.map((item) => [item.evidence_id, item]));
+    const seenEvidenceIds = new Set<string>();
+    const issueCodes = new Set(['none', 'misclassified', 'conflict_ignored', 'update_ignored', 'not_found']);
+    const sourceFacts = assessment.source_facts || [];
+    const parsedDispositionResults: NonNullable<ManualLeadFactVerification['disposition_results']>
+      = raw.disposition_results.map((item) => {
+      if (!isPlainObject(item)) throw new Error('invalid_disposition_verification_results');
+      try {
+        strictKeys(item, ['evidence_id', 'disposition', 'supported', 'issue_code', 'source_quotes']);
+      } catch {
+        throw new Error('invalid_disposition_verification_results');
+      }
+      if (typeof item.evidence_id !== 'string' || seenEvidenceIds.has(item.evidence_id)) {
+        throw new Error('invalid_disposition_verification_coverage');
+      }
+      const evidenceId = item.evidence_id;
+      const definition = definitionsById.get(evidenceId);
+      if (!definition || item.disposition !== definition.disposition
+        || typeof item.supported !== 'boolean'
+        || typeof item.issue_code !== 'string' || !issueCodes.has(item.issue_code)
+        || (item.supported && item.issue_code !== 'none')
+        || (!item.supported && item.issue_code === 'none')
+        || !Array.isArray(item.source_quotes) || !item.source_quotes.length) {
+        throw new Error('invalid_disposition_verification_result');
+      }
+      const source = byEvidenceId.get(evidenceId);
+      if (!source) throw new Error('invalid_disposition_verification_result');
+      const sourceSegments = [source.title, source.excerpt, ...source.claims_supported]
+        .map(normalizedSourceText);
+      const sourceQuotes = item.source_quotes.map((quote) => {
+        if (!isPlainObject(quote) || quote.evidence_id !== evidenceId
+          || typeof quote.quote !== 'string') throw new Error('invalid_disposition_verification_quote');
+        const normalizedQuote = normalizedSourceText(quote.quote);
+        if (Array.from(normalizedQuote).length < 12 || Array.from(normalizedQuote).length > 300
+          || !sourceSegments.some((segment) => segment.includes(normalizedQuote))) {
+          throw new Error('invalid_disposition_verification_quote');
+        }
+        return { evidence_id: evidenceId, quote: normalizedQuote };
+      });
+      if (factTokens(sourceQuotes.map((quote) => quote.quote).join(' ')).size < 2) {
+        throw new Error('invalid_disposition_verification_quote');
+      }
+      if (item.supported) {
+        const relation = deterministicEvidenceRelation(source, sourceFacts, byEvidenceId);
+        const referencedFacts = sourceFacts.filter((fact) => definition.source_fact_ids.includes(fact.fact_id));
+        const referencedRelation = referencedFacts.length
+          ? deterministicEvidenceRelation(source, referencedFacts, byEvidenceId)
+          : null;
+        const locallyConsistent = (relation === 'supports'
+          ? definition.disposition === 'supports_core'
+          : relation === 'conflicts'
+            ? definition.disposition === 'contradicts_core'
+            : relation === 'updates'
+              ? definition.disposition === 'material_update'
+              : relation === 'unrelated'
+                ? ['background', 'irrelevant'].includes(definition.disposition)
+                : definition.disposition === 'background' && assessment.recommendation === 'needs_review')
+          && (definition.disposition === 'supports_core'
+            ? referencedRelation === 'supports'
+            : definition.disposition === 'contradicts_core'
+              ? referencedRelation === 'conflicts'
+              : definition.disposition === 'material_update'
+                ? referencedRelation === 'updates'
+                : true);
+        if (!locallyConsistent) throw new Error('invalid_disposition_verification_semantics');
+      }
+      seenEvidenceIds.add(evidenceId);
+      return {
+        evidence_id: evidenceId,
+        disposition: definition.disposition,
+        supported: item.supported,
+        issue_code: item.issue_code as NonNullable<ManualLeadFactVerification['disposition_results']>[number]['issue_code'],
+        source_quotes: sourceQuotes,
+      };
+    });
+    if (parsedDispositionResults.length !== dispositionDefinitions.length
+      || seenEvidenceIds.size !== dispositionDefinitions.length) {
+      throw new Error('invalid_disposition_verification_coverage');
+    }
+    parsedDispositionResults.sort((left, right) => dispositionDefinitions.findIndex((item) => item.evidence_id === left.evidence_id)
+      - dispositionDefinitions.findIndex((item) => item.evidence_id === right.evidence_id));
+    dispositionResults = parsedDispositionResults;
+  }
   const allSupported = results.every((item) => item.supported)
-    && (!projectionResults || projectionResults.every((item) => item.supported));
-  if ((raw.overall_verdict === 'supported') !== allSupported) {
+    && (!projectionResults || projectionResults.every((item) => item.supported))
+    && (!dispositionResults || dispositionResults.every((item) => item.supported));
+  const hasCoveredConflict = dispositionDefinitions.some((item) =>
+    item.disposition === 'contradicts_core' || item.disposition === 'material_update');
+  const expectedVerdict = !allSupported ? 'unsupported' : hasCoveredConflict ? 'conflicted' : 'supported';
+  if (overallVerdict !== expectedVerdict) {
     throw new Error('fact_verification_verdict_mismatch');
   }
   const priorContext = availablePriorContexts.filter((context) => referencedPriorKeys.has(context.event_key));
+  const completenessResults = contracted
+    ? (assessment.evidence_completeness || []).map((item) => ({ ...item }))
+    : undefined;
   if (options.persisted) {
     if (!Array.isArray(raw.prior_context)) throw new Error('invalid_material_comparison_context');
     const persistedContext = verifiedPriorContexts(raw.prior_context as ManualLeadPriorEvent[]);
@@ -4367,12 +4757,17 @@ export function validateManualLeadFactVerification(
       || canonicalJson(persistedContext) !== canonicalJson(priorContext)) {
       throw new Error('invalid_material_comparison_context');
     }
+    if (contracted && canonicalJson(raw.completeness_results) !== canonicalJson(completenessResults)) {
+      throw new Error('invalid_disposition_verification_semantics');
+    }
   }
   return {
-    overall_verdict: raw.overall_verdict,
+    overall_verdict: overallVerdict,
     primary_fact: primaryFact,
     fact_results: results,
     ...(projectionResults ? { projection_results: projectionResults } : {}),
+    ...(dispositionResults ? { disposition_results: dispositionResults } : {}),
+    ...(completenessResults ? { completeness_results: completenessResults } : {}),
     prior_context: priorContext,
   };
 }
@@ -4393,6 +4788,9 @@ function canonicalJson(value: unknown): string {
 function bilingualSemanticProofContract(assessment: ManualNewsLeadAssessment) {
   if (assessment.source_fact_contract !== MANUAL_LEAD_SOURCE_FACT_CONTRACT
     || assessment.editorial_projection_contract !== MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT
+    || assessment.evidence_disposition_contract !== MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT
+    || !assessment.evidence_dispositions?.length
+    || !assessment.evidence_completeness?.length
     || !assessment.source_facts?.length || !assessment.editorial_projection) {
     throw new Error('manual_news_verification_contract_invalid');
   }
@@ -4432,8 +4830,16 @@ function bilingualSemanticProofContract(assessment: ManualNewsLeadAssessment) {
   return {
     source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
     editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+    evidence_disposition_contract: MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
     source_facts: sourceFacts,
     projections,
+    evidence_dispositions: assessment.evidence_dispositions.map((item) => ({
+      evidence_id: item.evidence_id,
+      disposition: item.disposition,
+      source_fact_ids: [...item.source_fact_ids],
+      reason_code: item.reason_code,
+    })),
+    evidence_completeness: assessment.evidence_completeness.map((item) => ({ ...item })),
   };
 }
 
@@ -4464,6 +4870,7 @@ function canonicalVerificationPayload(
       generated_claim_contract: assessment.generated_claim_contract ?? null,
       source_fact_contract: assessment.source_fact_contract ?? null,
       editorial_projection_contract: assessment.editorial_projection_contract ?? null,
+      evidence_disposition_contract: assessment.evidence_disposition_contract ?? null,
       source_facts: assessment.source_facts?.map((fact) => ({
         fact_id: fact.fact_id,
         source_language: fact.source_language,
@@ -4472,6 +4879,13 @@ function canonicalVerificationPayload(
         evidence_ids: [...fact.evidence_ids].sort(),
       })) ?? null,
       editorial_projection: assessment.editorial_projection ?? null,
+      evidence_dispositions: assessment.evidence_dispositions?.map((item) => ({
+        evidence_id: item.evidence_id,
+        disposition: item.disposition,
+        source_fact_ids: [...item.source_fact_ids],
+        reason_code: item.reason_code,
+      })) ?? null,
+      evidence_completeness: assessment.evidence_completeness?.map((item) => ({ ...item })) ?? null,
       bilingual_semantic_contract: bilingualSemanticProofContract(assessment),
     },
     evidence: canonicalEvidence(evidence),
@@ -4506,6 +4920,17 @@ function canonicalVerificationPayload(
         supported: projection.supported,
         issue_code: projection.issue_code,
       })) ?? null,
+      disposition_results: verification.disposition_results?.map((item) => ({
+        evidence_id: item.evidence_id,
+        disposition: item.disposition,
+        supported: item.supported,
+        issue_code: item.issue_code,
+        source_quotes: item.source_quotes.map((quote) => ({
+          evidence_id: quote.evidence_id,
+          quote: quote.quote,
+        })),
+      })) ?? null,
+      completeness_results: verification.completeness_results?.map((item) => ({ ...item })) ?? null,
       prior_context: verification.prior_context,
     },
   });
@@ -4573,8 +4998,13 @@ export async function createManualLeadVerificationProof(
   if (input.assessment.generated_claim_contract !== MANUAL_LEAD_GENERATED_CLAIM_CONTRACT
     || input.assessment.source_fact_contract !== MANUAL_LEAD_SOURCE_FACT_CONTRACT
     || input.assessment.editorial_projection_contract !== MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT
+    || input.assessment.evidence_disposition_contract !== MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT
     || !input.assessment.source_facts?.length || !input.assessment.editorial_projection
-    || !input.verification.projection_results?.length) {
+    || !input.assessment.evidence_dispositions?.length
+    || !input.assessment.evidence_completeness?.length
+    || !input.verification.projection_results?.length
+    || !input.verification.disposition_results?.length
+    || !input.verification.completeness_results?.length) {
     throw new Error('manual_news_verification_contract_invalid');
   }
   const canonicalDigest = await sha256Hex(canonicalVerificationPayload(
@@ -4676,6 +5106,17 @@ const ASSESSMENT_VALIDATION_ERROR_CODES = new Set([
   'invalid_matched_event_key',
   'unknown_matched_event_key',
   'matched_event_key_mismatch',
+  'invalid_evidence_dispositions',
+  'invalid_evidence_disposition',
+  'invalid_evidence_disposition_coverage',
+  'evidence_disposition_related_uncovered',
+  'evidence_disposition_conflict_uncovered',
+  'evidence_disposition_update_uncovered',
+  'evidence_disposition_classification_uncertain',
+  'evidence_disposition_unrelated_misclassified',
+  'evidence_disposition_fact_reference_mismatch',
+  'evidence_disposition_conflict_requires_review',
+  'evidence_disposition_claim_mismatch',
 ]);
 
 const REGENERATABLE_ASSESSMENT_VALIDATION_CODES = new Set([
@@ -4726,6 +5167,17 @@ const REGENERATABLE_ASSESSMENT_VALIDATION_CODES = new Set([
   'invalid_matched_event_key',
   'unknown_matched_event_key',
   'matched_event_key_mismatch',
+  'invalid_evidence_dispositions',
+  'invalid_evidence_disposition',
+  'invalid_evidence_disposition_coverage',
+  'evidence_disposition_related_uncovered',
+  'evidence_disposition_conflict_uncovered',
+  'evidence_disposition_update_uncovered',
+  'evidence_disposition_classification_uncertain',
+  'evidence_disposition_unrelated_misclassified',
+  'evidence_disposition_fact_reference_mismatch',
+  'evidence_disposition_conflict_requires_review',
+  'evidence_disposition_claim_mismatch',
 ]);
 
 export function isRegeneratableManualLeadAssessmentValidationCode(code: string): boolean {

@@ -46,6 +46,7 @@ class SerialSqliteD1 {
     this.sqlite.exec(fs.readFileSync(path.join(migrations, '032-daily-news-review.sql'), 'utf8'));
     this.sqlite.exec(fs.readFileSync(path.join(migrations, '033-manual-news-leads.sql'), 'utf8'));
     this.sqlite.exec(fs.readFileSync(path.join(migrations, '034-manual-news-assessment-verifications.sql'), 'utf8'));
+    this.sqlite.exec(fs.readFileSync(path.join(migrations, '035-manual-news-assessment-generation-cycles.sql'), 'utf8'));
   }
 
   prepare(sql: string) {
@@ -145,6 +146,10 @@ async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Pro
       },
       evidence_ids: [`ev-${id}`],
     }],
+    evidence_dispositions: [{
+      evidence_id: `ev-${id}`, disposition: 'supports_core',
+      source_fact_refs: ['fact-01'], reason_code: null,
+    }],
     editorial_projection: {
       title: {
         projection_ref: 'title-01', source_fact_refs: ['fact-01'],
@@ -186,6 +191,7 @@ async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Pro
   }).user) as {
     facts: Array<{ fact_id: string }>;
     projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+    evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
   };
   const facts = promptBody.facts;
   const verification = validateManualLeadFactVerification({
@@ -205,6 +211,11 @@ async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Pro
     projection_results: promptBody.projections.map((projection) => ({
       projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
       supported: true, issue_code: 'none',
+    })),
+    disposition_results: promptBody.evidence_dispositions.map((disposition) => ({
+      evidence_id: disposition.evidence_id, disposition: disposition.disposition,
+      supported: true, issue_code: 'none',
+      source_quotes: [{ evidence_id: evidence.id, quote: supportingText }],
     })),
   }, assessment, [evidence]);
   const proof = await createManualLeadVerificationProof({

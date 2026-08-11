@@ -79,6 +79,9 @@ function fakeEnv() {
             });
             return { success: true, meta: { changes: 1 } };
           }
+          if (sql.includes('manual_generation:retry_supersede')) {
+            return { success: true, meta: { changes: 0 } };
+          }
           return { success: true, meta: { changes: 1 } };
         },
       };

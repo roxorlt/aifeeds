@@ -10,6 +10,7 @@ import {
   applyManualLeadEvidencePolicy,
   validateManualLeadGeneratedAssessment,
   MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+  MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
   MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
   MANUAL_LEAD_SOURCE_FACT_CONTRACT,
   MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
@@ -85,6 +86,7 @@ function memoryStore(initial = lead()) {
   const transitions: string[] = [];
   let invalidateCalls = 0;
   let saveCalls = 0;
+  let generationCycle: any = null;
   const transitionPatches: Array<Record<string, unknown>> = [];
   const priorEvents: ManualLeadPriorEvent[] = [];
   const store: ManualLeadProcessingStore = {
@@ -113,6 +115,47 @@ function memoryStore(initial = lead()) {
       expect(current.version).toBe(expectedVersion);
       invalidateCalls += 1;
       current.assessment = null;
+    },
+    async beginAssessmentGenerationCycle(_id, expectedVersion) {
+      expect(current.version).toBe(expectedVersion);
+      if (!generationCycle) {
+        generationCycle = {
+          cycle_id: `memory-cycle-${expectedVersion}`, base_version: expectedVersion,
+          generation_revision: 1, call_state: 'initial_started', acquired_call: true,
+          regeneration_consumed: false,
+        };
+        return structuredClone(generationCycle);
+      }
+      return { ...structuredClone(generationCycle), acquired_call: false };
+    },
+    async recordAssessmentGenerationValidation(_id, expectedVersion, result) {
+      expect(current.version).toBe(expectedVersion);
+      generationCycle = {
+        ...generationCycle,
+        generation_revision: result.generation_revision,
+        call_state: result.validation_code === 'valid'
+          ? 'validated'
+          : (result.generation_revision === 1 && result.regeneratable ? 'regeneration_ready' : 'terminal'),
+        first_validation_code: generationCycle.first_validation_code || result.validation_code,
+        first_validation_path: generationCycle.first_validation_path || result.validation_path,
+        last_validation_code: result.validation_code,
+        last_validation_path: result.validation_path,
+        ...(result.validated_assessment ? { validated_assessment: structuredClone(result.validated_assessment) } : {}),
+        ...(result.provider_failure ? { provider_failure: structuredClone(result.provider_failure) } : {}),
+        acquired_call: false,
+      };
+      return structuredClone(generationCycle);
+    },
+    async consumeAssessmentRegeneration(_id, expectedVersion) {
+      expect(current.version).toBe(expectedVersion);
+      if (generationCycle.call_state !== 'regeneration_ready') {
+        return { ...structuredClone(generationCycle), acquired_call: false };
+      }
+      generationCycle = {
+        ...generationCycle, generation_revision: 2, call_state: 'regeneration_started',
+        regeneration_consumed: true, acquired_call: true,
+      };
+      return structuredClone(generationCycle);
     },
   };
   return {
@@ -181,6 +224,7 @@ function assessed(overrides: Record<string, unknown> = {}) {
       object: '2026年8月10日的Claude水印来源信息',
     };
   const { claims: _claims, title: _title, summary: _summary, ...rest } = overrides;
+  const dispositionIds = [...new Set(sourceFacts.flatMap((fact) => fact.evidence_ids || []))];
   return {
     event_key: 'anthropic-output-provenance-2026-08',
     event_type: 'product_documentation',
@@ -190,6 +234,14 @@ function assessed(overrides: Record<string, unknown> = {}) {
     occurred_at: '2026-08-10',
     uncertainties: ['并非所有Claude输出均适用。'],
     source_facts: sourceFacts,
+    evidence_dispositions: dispositionIds.map((evidenceId) => ({
+      evidence_id: evidenceId,
+      disposition: 'supports_core',
+      source_fact_refs: sourceFacts
+        .filter((fact) => (fact.evidence_ids || []).includes(evidenceId))
+        .map((fact) => fact.fact_ref),
+      reason_code: null,
+    })),
     editorial_projection: {
       title: { projection_ref: 'title-01', source_fact_refs: ['fact-01'], atomic_fact: defaultProjection },
       summary: [{ projection_ref: 'summary-01', source_fact_refs: ['fact-01'], atomic_fact: defaultProjection }],
@@ -215,6 +267,10 @@ function alibabaCoreAssessment(overrides: Record<string, unknown> = {}) {
         predicate: 'reportedly bans', object: 'employees from using Claude Code',
       },
       evidence_ids: [techCrunchAlibabaEvidence.id],
+    }],
+    evidence_dispositions: [{
+      evidence_id: techCrunchAlibabaEvidence.id, disposition: 'supports_core',
+      source_fact_refs: ['fact-01'], reason_code: null,
     }],
     editorial_projection: {
       title: {
@@ -259,10 +315,13 @@ function verifiedFromPrompt(prompt: { user: string }) {
       allowed_evidence_ids: string[];
     }>;
     projections?: Array<{ projection_id: string; source_fact_ids: string[] }>;
+    evidence_dispositions?: Array<{ evidence_id: string; disposition: string }>;
   };
   const evidenceById = new Map(body.untrusted_evidence.map((item) => [item.id, item]));
+  const hasConflict = body.evidence_dispositions?.some((item) =>
+    item.disposition === 'contradicts_core' || item.disposition === 'material_update') || false;
   return {
-    overall_verdict: 'supported',
+    overall_verdict: hasConflict ? 'conflicted' : 'supported',
     fact_results: body.facts.map((fact) => {
       const evidence = evidenceById.get(fact.allowed_evidence_ids[0])!;
       const quote = evidence.claims_supported[0] || evidence.excerpt || evidence.title;
@@ -295,6 +354,19 @@ function verifiedFromPrompt(prompt: { user: string }) {
         supported: true,
         issue_code: 'none',
       })),
+    } : {}),
+    ...(body.evidence_dispositions?.length ? {
+      disposition_results: body.evidence_dispositions.map((disposition) => {
+        const evidence = evidenceById.get(disposition.evidence_id)!;
+        const quote = evidence.claims_supported[0] || evidence.excerpt || evidence.title;
+        return {
+          evidence_id: disposition.evidence_id,
+          disposition: disposition.disposition,
+          supported: true,
+          issue_code: 'none',
+          source_quotes: [{ evidence_id: disposition.evidence_id, quote }],
+        };
+      }),
     } : {}),
   };
 }
@@ -389,6 +461,10 @@ describe('manual lead processing pipeline', () => {
               object: 'employees from using Claude Code',
             },
             evidence_ids: [techCrunchAlibabaEvidence.id],
+          }],
+          evidence_dispositions: [{
+            evidence_id: techCrunchAlibabaEvidence.id, disposition: 'supports_core',
+            source_fact_refs: ['fact-01'], reason_code: null,
           }],
           editorial_projection: {
             title: {
@@ -636,6 +712,7 @@ describe('manual lead processing pipeline', () => {
         assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
         assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
         assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+        assessment_evidence_disposition_contract: MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
         assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
       }),
     }));
@@ -876,7 +953,7 @@ describe('manual lead processing pipeline', () => {
     });
   });
 
-  test('a Workflow retry regenerates from scratch and never accepts raw output from the failed run', async () => {
+  test('a consumed regeneration is never repeated after a transient provider failure', async () => {
     const memory = memoryStore();
     let assessCalls = 0;
     let verifyCalls = 0;
@@ -903,16 +980,50 @@ describe('manual lead processing pipeline', () => {
       },
     };
 
-    await expect(processManualNewsLead(memory.current().id, memory.store, adapters))
-      .rejects.toThrow(/trusted_gateway_http_503/);
-    expect(memory.current()).toMatchObject({ status: 'verifying', assessment: null });
-    expect(memory.saveCalls()).toBe(0);
-
     await processManualNewsLead(memory.current().id, memory.store, adapters);
-    expect(assessCalls).toBe(3);
-    expect(verifyCalls).toBe(1);
-    expect(memory.saveCalls()).toBe(1);
-    expect(memory.current()).toMatchObject({ status: 'recommended', assessment: { score: 82 } });
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review', assessment: null, error_code: 'assessment_validation_failed',
+    });
+    expect(memory.saveCalls()).toBe(0);
+    expect(assessCalls).toBe(2);
+    expect(verifyCalls).toBe(0);
+  });
+
+  test('fails closed on Workflow recovery after regeneration was consumed before its call completed', async () => {
+    const memory = memoryStore();
+    const originalConsume = memory.store.consumeAssessmentRegeneration.bind(memory.store);
+    let injectCrash = true;
+    memory.store.consumeAssessmentRegeneration = async (...args) => {
+      const state = await originalConsume(...args);
+      if (injectCrash) {
+        injectCrash = false;
+        const error = new Error('simulated crash after durable consume');
+        error.name = 'TypeError';
+        throw error;
+      }
+      return state;
+    };
+    let calls = 0;
+    const adapters = {
+      search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: async () => {
+        calls += 1;
+        return assessed({ claims: [{
+          atomic_fact: { subject: 'Anthropic', predicate: 'documented', object: 'Claude provenance' },
+          evidence_ids: ['ev-missing'],
+        }] });
+      },
+      verify: async (prompt: { system: string; user: string }) => verifiedFromPrompt(prompt),
+    };
+
+    await expect(processManualNewsLead(memory.current().id, memory.store, adapters))
+      .rejects.toThrow(/simulated crash/);
+    await processManualNewsLead(memory.current().id, memory.store, adapters);
+    expect(calls).toBe(1);
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review', error_code: 'assessment_validation_failed',
+    });
   });
 
   test('recovers after save-before-transition crash with the persisted bilingual contract audit intact', async () => {
@@ -960,6 +1071,7 @@ describe('manual lead processing pipeline', () => {
         assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
         assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
         assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+        assessment_evidence_disposition_contract: MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
         assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
         assessment_recovery: 'persisted_verified',
       },
@@ -1020,8 +1132,8 @@ describe('manual lead processing pipeline', () => {
     const evidence = {
       ...officialEvidence,
       title: evidenceText,
-      excerpt: evidenceText,
-      claims_supported: [evidenceText],
+      excerpt: supportedAssessmentFact,
+      claims_supported: [supportedAssessmentFact, evidenceText],
     };
     const memory = memoryStore(lead({
       status: 'verifying', input_type: 'text', input_text: inputText, input_url: '', note, evidence: [evidence],
@@ -1056,8 +1168,8 @@ describe('manual lead processing pipeline', () => {
     const evidence = {
       ...officialEvidence,
       title: evidenceText,
-      excerpt: evidenceText,
-      claims_supported: [evidenceText],
+      excerpt: supportedAssessmentFact,
+      claims_supported: [supportedAssessmentFact, evidenceText],
     };
     const memory = memoryStore(lead({
       status: 'verifying', input_type: 'text', input_text: inputText, input_url: '', note, evidence: [evidence],
@@ -1072,7 +1184,7 @@ describe('manual lead processing pipeline', () => {
       verify: async (prompt) => { verifyCalls += 1; return verifiedFromPrompt(prompt); },
     });
 
-    expect(assessCalls).toBe(1);
+    expect(assessCalls, JSON.stringify(memory.current())).toBe(1);
     expect(verifyCalls).toBe(1);
     expect(memory.current().error_code).not.toBe('evidence_relevance_unverified');
   });
@@ -1363,10 +1475,16 @@ describe('manual lead processing pipeline', () => {
       memory.current().input_text = 'Anthropic 水印';
       memory.current().input_url = '';
     }
-    await expect(processManualNewsLead(memory.current().id, memory.store, adapters))
-      .rejects.toThrow(/gateway_timeout|trusted_gateway_http_503/);
-    expect(memory.current().status).not.toBe('failed');
-    expect(['researching', 'verifying']).toContain(memory.current().status);
+    if (_label === 'search timeout') {
+      await expect(processManualNewsLead(memory.current().id, memory.store, adapters))
+        .rejects.toThrow(/gateway_timeout/);
+      expect(memory.current().status).toBe('researching');
+    } else {
+      await processManualNewsLead(memory.current().id, memory.store, adapters);
+      expect(memory.current()).toMatchObject({
+        status: 'needs_review', error_code: 'assessment_validation_failed',
+      });
+    }
   });
 
   test.each([
@@ -1392,7 +1510,7 @@ describe('manual lead processing pipeline', () => {
         attempt: 4,
       },
     });
-    await expect(processManualNewsLead(memory.current().id, memory.store, {
+    const processing = processManualNewsLead(memory.current().id, memory.store, {
       search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
       extract: async () => officialEvidence,
       assess: async () => {
@@ -1403,15 +1521,22 @@ describe('manual lead processing pipeline', () => {
         if (stage === 'verification') throw failure;
         return verifiedFromPrompt(prompt);
       },
-    })).rejects.toMatchObject({
-      message: expect.stringMatching(
-        new RegExp(`^manual_news_provider_error:${stage}:${providerErrorCode}:`),
-      ),
-      provider_error_code: providerErrorCode,
-      stage,
     });
+    if (stage === 'verification') {
+      await expect(processing).rejects.toMatchObject({
+        message: expect.stringMatching(
+          new RegExp(`^manual_news_provider_error:${stage}:${providerErrorCode}:`),
+        ),
+        provider_error_code: providerErrorCode,
+        stage,
+      });
+    } else {
+      await processing;
+    }
     expect(isTransientManualLeadError(failure)).toBe(true);
-    expect(memory.current()).toMatchObject({ status: 'verifying', assessment: null });
+    expect(memory.current()).toMatchObject(stage === 'assessment'
+      ? { status: 'needs_review', assessment: null, error_code: 'assessment_validation_failed' }
+      : { status: 'verifying', assessment: null });
   });
 
   test.each(['assessment', 'verification'] as const)(
@@ -1486,15 +1611,17 @@ describe('manual lead processing pipeline', () => {
     }));
     const memory = memoryStore();
 
-    await expect(processManualNewsLead(memory.current().id, memory.store, {
+    await processManualNewsLead(memory.current().id, memory.store, {
       search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
       extract: async () => officialEvidence,
       assess: assessThroughRealDeepSeekJson,
       verify: async () => { throw new Error('unexpected_verify'); },
-    })).rejects.toThrow(new RegExp(expectedError.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    });
 
     expect(isTransientManualLeadError(new Error(expectedError))).toBe(true);
-    expect(memory.current()).toMatchObject({ status: 'verifying', assessment: null });
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review', assessment: null, error_code: 'assessment_validation_failed',
+    });
     expect(memory.transitions).not.toContain('verifying->failed');
   });
 
