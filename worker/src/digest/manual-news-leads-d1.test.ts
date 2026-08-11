@@ -423,6 +423,46 @@ describe('manual lead D1-backed dedupe', () => {
     });
   });
 
+  test('retry replay remains idempotent after workflow transitions overwrite the current mutation marker', async () => {
+    const state = fixture('failed', 7);
+    const key = 'retry-survives-workflow';
+    const owner = `manual-news-${state.leadId}-v8`;
+
+    const first = await retryManualNewsLead(state.env, state.leadId, 7, key, 100);
+    expect(first).toMatchObject({ ok: true, changed: true, lead: { version: 8 } });
+    await new D1ManualLeadProcessingStore(state.env, owner).transition(
+      state.leadId, 'validating', 'researching',
+    );
+
+    const replay = await retryManualNewsLead(state.env, state.leadId, 7, key, 200);
+    expect(replay).toMatchObject({
+      ok: true,
+      changed: false,
+      lead: { status: 'researching', version: 9, processing_owner: owner },
+    });
+    expect(state.db.sqlite.prepare(
+      `SELECT action, idempotency_key AS key, resulting_version AS version
+       FROM manual_news_lead_audit WHERE lead_id = ? AND action = 'retry'`,
+    ).all(state.leadId)).toEqual([{ action: 'retry', key, version: 8 }]);
+  });
+
+  test('concurrent same-key retries converge to one changed result and one immutable audit', async () => {
+    const state = fixture('failed', 7);
+    const key = 'retry-concurrent-same-key';
+
+    const results = await Promise.all([
+      retryManualNewsLead(state.env, state.leadId, 7, key, 100),
+      retryManualNewsLead(state.env, state.leadId, 7, key, 100),
+    ]);
+
+    expect(results.every((result) => result.ok)).toBe(true);
+    expect(results.map((result) => result.ok && result.changed).sort()).toEqual([false, true]);
+    expect(state.db.sqlite.prepare(
+      `SELECT COUNT(*) AS count FROM manual_news_lead_audit
+       WHERE lead_id = ? AND action = 'retry' AND idempotency_key = ? AND resulting_version = 8`,
+    ).get(state.leadId, key)).toEqual({ count: 1 });
+  });
+
   test('a deferred old enqueue failure cannot mutate or audit a newer recovered owner', async () => {
     const state = fixture('failed', 7);
     const retry = await retryManualNewsLead(state.env, state.leadId, 7, 'retry-v8', 100);

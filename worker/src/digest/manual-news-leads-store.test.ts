@@ -6,6 +6,7 @@ type LeadRow = Record<string, unknown>;
 
 function fakeEnv() {
   const leads = new Map<string, LeadRow>();
+  const audits: Array<{ lead_id: string; action: string; idempotency_key: string | null; resulting_version: number }> = [];
   const statements: Array<{ sql: string; binds: unknown[] }> = [];
   const db = {
     prepare(sql: string) {
@@ -13,6 +14,10 @@ function fakeEnv() {
       const stmt = {
         bind(...values: unknown[]) { binds = values; return stmt; },
         async first<T>() {
+          if (sql.includes('manual_audit:retry_idempotency')) {
+            return audits.find((audit) => audit.lead_id === binds[0]
+              && audit.action === 'retry' && audit.idempotency_key === binds[1]) as T | undefined;
+          }
           if (sql.includes('manual_lead:by_submit_key')) {
             return [...leads.values()].find((row) => row.review_date === binds[0] && row.submit_idempotency_key === binds[1]) as T | undefined;
           }
@@ -57,6 +62,23 @@ function fakeEnv() {
             });
             return { success: true, meta: { changes: 1 } };
           }
+          if (sql.includes('manual_audit:mutation')) {
+            const row = leads.get(String(binds[8]));
+            const matchesMutation = row
+              && row.version === binds[9]
+              && row.status === binds[10]
+              && row.last_mutation_kind === binds[11]
+              && row.last_mutation_idempotency_key === binds[12]
+              && row.last_mutation_nonce === binds[13];
+            if (!matchesMutation) return { success: true, meta: { changes: 0 } };
+            audits.push({
+              lead_id: String(binds[0]),
+              action: String(binds[1]),
+              idempotency_key: binds[4] === null ? null : String(binds[4]),
+              resulting_version: Number(binds[9]),
+            });
+            return { success: true, meta: { changes: 1 } };
+          }
           return { success: true, meta: { changes: 1 } };
         },
       };
@@ -68,7 +90,7 @@ function fakeEnv() {
       return results;
     },
   };
-  return { env: { DB: db } as never, leads, statements };
+  return { env: { DB: db } as never, leads, audits, statements };
 }
 
 describe('manual lead D1 store', () => {

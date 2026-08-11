@@ -279,6 +279,19 @@ export type ManualLeadMutationResult =
   | { ok: true; changed: boolean; lead: ManualNewsLeadRecord }
   | { ok: false; status: 404 | 409; error: string; lead?: ManualNewsLeadRecord };
 
+async function hasCompletedRetryAudit(
+  env: Env,
+  id: string,
+  expectedVersion: number,
+  idempotencyKey: string,
+): Promise<boolean> {
+  const audit = await env.DB.prepare(
+    `/* manual_audit:retry_idempotency */ SELECT resulting_version FROM manual_news_lead_audit
+     WHERE lead_id = ? AND action = 'retry' AND idempotency_key = ? LIMIT 1`,
+  ).bind(id, idempotencyKey).first<{ resulting_version: number }>();
+  return Number(audit?.resulting_version) === expectedVersion + 1;
+}
+
 export async function retryManualNewsLead(
   env: Env,
   id: string,
@@ -288,10 +301,7 @@ export async function retryManualNewsLead(
 ): Promise<ManualLeadMutationResult> {
   const lead = await getManualNewsLead(env, id);
   if (!lead) return { ok: false, status: 404, error: 'manual_news_lead_not_found' };
-  const row = await env.DB.prepare(
-    `/* manual_lead:by_id */ SELECT * FROM manual_news_leads WHERE id = ?`,
-  ).bind(id).first<ManualLeadRow>();
-  if (row?.last_mutation_kind === 'retry' && row.last_mutation_idempotency_key === idempotencyKey) {
+  if (await hasCompletedRetryAudit(env, id, expectedVersion, idempotencyKey)) {
     return { ok: true, changed: false, lead };
   }
   if (lead.confirmed_at) return { ok: false, status: 409, error: 'lead_already_confirmed', lead };
@@ -317,6 +327,9 @@ export async function retryManualNewsLead(
   }));
   if (!changed) {
     const conflicted = await getManualNewsLead(env, id);
+    if (conflicted && await hasCompletedRetryAudit(env, id, expectedVersion, idempotencyKey)) {
+      return { ok: true, changed: false, lead: conflicted };
+    }
     return { ok: false, status: 409, error: 'lead_version_conflict', ...(conflicted ? { lead: conflicted } : {}) };
   }
   const updated = await getManualNewsLead(env, id);

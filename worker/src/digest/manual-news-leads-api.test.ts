@@ -216,6 +216,58 @@ describe('manual daily news leads API', () => {
     expect(queued).toHaveLength(1);
   });
 
+  test('retry replay after later workflow transitions returns 200 without scheduling again', async () => {
+    vi.mocked(retryManualNewsLead).mockResolvedValueOnce({
+      ok: true,
+      changed: false,
+      lead: {
+        ...record,
+        status: 'researching',
+        version: 9,
+        processing_owner: `manual-news-${record.id}-v8`,
+      },
+    } as never);
+    const queued: Promise<unknown>[] = [];
+
+    const response = await handleManualNewsLeadsApi(request(`/api/digest/daily-news-leads/${record.id}/retry`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': 'retry-original-v7' },
+      body: JSON.stringify({ expected_version: 7 }),
+    }), env(), { waitUntil(promise: Promise<unknown>) { queued.push(promise); } } as never);
+
+    expect(response.status).toBe(200);
+    await expect(response.clone().json()).resolves.toMatchObject({ ok: true, changed: false, lead: { version: 9 } });
+    expect(workflowCreate).not.toHaveBeenCalled();
+    expect(queued).toHaveLength(0);
+  });
+
+  test('concurrent same-key retry responses enqueue only the changed winner', async () => {
+    const winner = {
+      ...record,
+      status: 'validating',
+      version: 8,
+      processing_owner: `manual-news-${record.id}-v8`,
+    };
+    vi.mocked(retryManualNewsLead)
+      .mockResolvedValueOnce({ ok: true, changed: true, lead: winner } as never)
+      .mockResolvedValueOnce({ ok: true, changed: false, lead: winner } as never);
+    const queued: Promise<unknown>[] = [];
+    const makeRequest = () => handleManualNewsLeadsApi(request(
+      `/api/digest/daily-news-leads/${record.id}/retry`,
+      {
+        method: 'POST',
+        headers: { 'Idempotency-Key': 'retry-concurrent-v7' },
+        body: JSON.stringify({ expected_version: 7 }),
+      },
+    ), env(), { waitUntil(promise: Promise<unknown>) { queued.push(promise); } } as never);
+
+    const responses = await Promise.all([makeRequest(), makeRequest()]);
+
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 202]);
+    expect(workflowCreate).toHaveBeenCalledTimes(1);
+    expect(queued).toHaveLength(1);
+  });
+
   test('confirm creates only a superseding candidate revision and never starts downstream rendering', async () => {
     const response = await handleManualNewsLeadsApi(request(`/api/digest/daily-news-leads/${record.id}/confirm-candidate`, {
       method: 'POST',
