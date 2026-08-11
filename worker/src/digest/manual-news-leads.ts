@@ -385,6 +385,7 @@ interface ManualLeadVerificationFact {
   field: 'title' | 'summary' | 'event_key' | 'event_type' | 'occurred_at' | 'material_update' | 'claim';
   candidate_value: string | boolean;
   allowed_evidence_ids: string[];
+  supporting_action_values?: string[];
 }
 
 function manualLeadVerificationFacts(assessment: ManualNewsLeadAssessment): ManualLeadVerificationFact[] {
@@ -407,9 +408,16 @@ function manualLeadVerificationFacts(assessment: ManualNewsLeadAssessment): Manu
     { fact_id: 'field:event_type', field: 'event_type', candidate_value: assessment.event_type, allowed_evidence_ids: allCited },
   );
   if (assessment.occurred_at !== null) {
+    const supportingActionValues = [...new Set([
+      assessment.title,
+      assessment.summary,
+      ...assessment.claims.map((claim) => claim.text),
+    ].flatMap((value) => splitAtomicFactClauses(value).clauses)
+      .filter((value) => factActionOccurrences(value).length > 0))];
     facts.push({
       fact_id: 'field:occurred_at', field: 'occurred_at',
       candidate_value: assessment.occurred_at, allowed_evidence_ids: allCited,
+      supporting_action_values: supportingActionValues,
     });
   }
   facts.push({
@@ -474,6 +482,9 @@ export function buildManualLeadFactVerificationPrompt(input: {
     fact_id: fact.fact_id,
     field: fact.field,
     untrusted_candidate_value: fact.candidate_value,
+    ...(fact.supporting_action_values?.length
+      ? { untrusted_supporting_action_values: fact.supporting_action_values }
+      : {}),
     allowed_evidence: fact.allowed_evidence_ids
       .map((id) => byId.get(id))
       .filter((item): item is ManualNewsEvidence => !!item)
@@ -504,6 +515,7 @@ export function buildManualLeadFactVerificationPrompt(input: {
       '计划、可能、据称、传闻或未证实的信息不得支持“已经完成、正式发布或已经生效”的事实。',
       '逐动作核验投资、融资、签署、起诉、禁止、开源、训练、合作、裁员、法规要求、决定、下令、获批等语义；“讨论、计划、申请”不得支持相应动作已完成。暂停和停止本身是动作，不是整句否定；否定词必须绑定到它实际修饰的动作。',
       '完整时间戳必须由同一引文中的完整时间戳支持，并按时区换算为同一时刻；只有日期的引文不得支持带时分秒的 occurred_at。',
+      '精确时刻必须和它支持的主体、动作、对象及完成状态位于同一个 atomic source clause；禁止从一个子句取时间、另一个子句取动作。',
       '只有所有 fact 都 supported=true 且 issue_code=none 时 overall_verdict 才能为 supported。',
     ].join('\n'),
     user: JSON.stringify({
@@ -668,14 +680,11 @@ function hasOpposingFactActions(candidate: string, quote: string): boolean {
 
 function actionLocalPrefix(value: string, index: number): string {
   const before = value.slice(0, index);
-  const boundary = Math.max(
-    before.lastIndexOf('。'), before.lastIndexOf('；'), before.lastIndexOf(';'),
-    before.lastIndexOf('！'), before.lastIndexOf('!'), before.lastIndexOf('？'), before.lastIndexOf('?'),
-    before.lastIndexOf('，'), before.lastIndexOf(','), before.lastIndexOf('但'), before.lastIndexOf('却'),
-    before.lastIndexOf('并'), before.lastIndexOf('且'), before.lastIndexOf('同时'), before.lastIndexOf('以及'),
-    before.toLowerCase().lastIndexOf(' and '), before.toLowerCase().lastIndexOf(' but '),
-  );
-  return before.slice(boundary + 1).slice(-48);
+  let boundaryEnd = 0;
+  for (const match of before.matchAll(FACT_UNIT_BOUNDARY)) {
+    if (match.index !== undefined) boundaryEnd = match.index + match[0].length;
+  }
+  return before.slice(boundaryEnd).slice(-48);
 }
 
 function actionIsNegated(value: string, index: number): boolean {
@@ -714,6 +723,7 @@ function factActionOccurrences(value: string): FactActionOccurrence[] {
   }
   const sorted = occurrences.sort((left, right) => left.index - right.index || right.end - left.end);
   return sorted.filter((occurrence) => {
+    if (actionLooksLikeNominalModifier(value, occurrence, sorted)) return false;
     if (occurrence.action === 'disclose' && /^(?:文档|documentation)$/iu.test(occurrence.surface)) {
       const next = sorted.find((item) => item.action === 'disclose' && item.index >= occurrence.end);
       if (next && next.index - occurrence.end <= 12) return false;
@@ -774,9 +784,43 @@ interface AtomicClauseParse {
   has_unknown_compound: boolean;
 }
 
-const ATOMIC_SOFT_BOUNDARY = /[，,、]|(?:并且|并(?!购|未|不|非)|后又|随后|继而|然后|又|同时|以及|且)|\b(?:and|but|then|subsequently|afterwards?|while|whereas|alongside|plus|as\s+well\s+as)\b/giu;
-const ATOMIC_HARD_BOUNDARY = /[。！？!?；;/／\n]+|\s*[—–]{1,2}\s*/gu;
-const ATOMIC_SEQUENCING_BOUNDARY = /(?:后又|随后|继而|然后|又|同时|以及|且)|\b(?:then|subsequently|afterwards?|while|whereas|alongside|plus|as\s+well\s+as)\b/iu;
+const ATOMIC_COORDINATION_SOURCE = '(?:并且|并(?!购|未|不|非)|后又|随后|继而|然后|又|同时|以及|而且|且|兼)|\\b(?:and|but|then|subsequently|afterwards?|while|whereas|alongside|plus|as\\s+well\\s+as)\\b';
+const ATOMIC_HARD_PUNCTUATION_SOURCE = '(?:(?:(?![.．])\\p{Sentence_Terminal})|(?<![ap]\\.m)[.．](?=\\s*[A-Z\\p{Script=Han}])|[；;|｜/／\\n]+|(?<!\\d)[:：]|[:：](?!\\d)|[—–―]+|\\s+-\\s+)';
+const ATOMIC_SOFT_BOUNDARY = new RegExp(`(?:[，,、]|${ATOMIC_COORDINATION_SOURCE})`, 'giu');
+const ATOMIC_HARD_BOUNDARY = new RegExp(ATOMIC_HARD_PUNCTUATION_SOURCE, 'gu');
+const ATOMIC_SEQUENCING_BOUNDARY = new RegExp(ATOMIC_COORDINATION_SOURCE, 'iu');
+
+const ACTION_OBJECT_NOUN_HEAD = /^(?:\s*(?:人工智能|AI|模型|核心|技术|投资|融资|合作)?\s*)?(?:工具|模型|平台|计划|服务|系统|分析|能力|框架|套件|方案|功能|模块|报告|数据集|引擎|应用|产品)|^\s*(?:[a-z][a-z0-9-]*\s+){0,3}(?:tools?|models?|platforms?|plans?|services?|systems?|analysis|analytics|capabilit(?:y|ies)|frameworks?|kits?|solutions?|features?|modules?|reports?|datasets?|engines?|applications?|products?)\b/iu;
+
+function hasAtomicBoundary(value: string): boolean {
+  return new RegExp(FACT_UNIT_BOUNDARY.source, 'iu').test(value);
+}
+
+function actionLooksLikeNominalModifier(
+  value: string,
+  occurrence: FactActionOccurrence,
+  all: readonly FactActionOccurrence[],
+): boolean {
+  const parent = [...all].reverse().find((item) => item.end <= occurrence.index);
+  if (!parent || occurrence.index - parent.end > 28) return false;
+  const between = value.slice(parent.end, occurrence.index);
+  if (hasAtomicBoundary(between)
+    || /(?:已经|已|将|正在|正式|计划|可能|据称|宣布|完成)\s*$/u.test(between)
+    || /\b(?:has|have|had|will|would|may|might|reportedly|officially|formally)\s*$/iu.test(between)) {
+    return false;
+  }
+  const compactBetween = between
+    .replace(/(?:一个|一项|一款|新的?|该|模型|产品|人工智能|AI)/giu, '')
+    .replace(/\b(?:a|an|the|new|model|product|ai)\b/giu, '')
+    .replace(/\s+/gu, '');
+  if (compactBetween) return false;
+
+  const tail = value.slice(occurrence.end, occurrence.end + 32);
+  if (!ACTION_OBJECT_NOUN_HEAD.test(tail)) return false;
+  if (/^[A-Za-z]/u.test(occurrence.surface)
+    && !/(?:ing|ment|tion|sourc(?:e|ing))$/iu.test(occurrence.surface)) return false;
+  return true;
+}
 
 function normalizedAtomicClause(value: string): string {
   return value.normalize('NFKC')
@@ -832,12 +876,27 @@ function actionIsGovernedComplement(
   value: string,
   parent: FactActionOccurrence,
   child: FactActionOccurrence,
+  all: readonly FactActionOccurrence[],
 ): boolean {
   if (child.index <= parent.index || !GOVERNED_ACTION_COMPLEMENTS[parent.action].includes(child.action)) return false;
   const between = value.slice(parent.end, child.index);
-  if (Array.from(between).length > 36
-    || /[，,、。；;！？!?/／—–]|(?:并且|并|同时|以及|且|随后|继而|然后|后又)|\b(?:and|but|alongside|plus|as\s+well\s+as|then|while|whereas)\b/iu.test(between)) {
+  if (Array.from(between).length > 36 || hasAtomicBoundary(between)) {
     return false;
+  }
+  const trailingLatinSubject = between.match(/([A-Z][A-Za-z0-9._+-]{1,})\s*$/u);
+  if (trailingLatinSubject) {
+    const beforeSubject = between.slice(0, trailingLatinSubject.index).trim();
+    if (beforeSubject && !/^(?:the|a|an|to|for|that|其|该|对|向|为)$/iu.test(beforeSubject)) return false;
+  }
+  const intermediate = [...all]
+    .filter((item) => item.index > parent.index && item.end <= child.index)
+    .sort((left, right) => left.index - right.index);
+  if (intermediate.length) {
+    const trailing = value.slice(intermediate[intermediate.length - 1].end, child.index).trim();
+    if (/(?:^|\s)[A-Z][A-Za-z0-9._+-]{1,}\s*$/u.test(trailing)
+      || /(?:模型|权重|服务|系统|平台|工具|计划|项目|产品|训练)([\p{Script=Han}·]{2,16})\s*$/u.test(trailing)) {
+      return false;
+    }
   }
   return true;
 }
@@ -847,7 +906,7 @@ function independentFactActionUnits(value: string): FactActionOccurrence[] {
   const roots: FactActionOccurrence[] = [];
   for (const action of actions) {
     const governed = actions.some((parent) => parent.index < action.index
-      && actionIsGovernedComplement(value, parent, action));
+      && actionIsGovernedComplement(value, parent, action, actions));
     if (!governed) roots.push(action);
   }
   return roots;
@@ -899,12 +958,18 @@ function inheritAtomicClauseSubject(clause: string, subject: string | null): str
 function splitAtomicFactClauses(value: string): AtomicClauseParse {
   const source = normalizedAtomicClause(value);
   if (!source) return { clauses: [], reliable: false, has_unknown_compound: false };
-  const protectedSource = source.replace(
-    /\b((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}),\s*(20\d{2})\b/giu,
-    '$1\uE000$2',
-  );
-  const restoreProtectedPunctuation = (part: string) => normalizedAtomicClause(part.replace(/\uE000/gu, ', '));
-  const hardParts = protectedSource.split(ATOMIC_HARD_BOUNDARY).map(restoreProtectedPunctuation).filter(Boolean);
+  const protectedSource = source
+    .replace(
+      /\b((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}),\s*(20\d{2})\b/giu,
+      '$1\uE000$2',
+    )
+    .replace(/((?:\bOn\s+)?20\d{2}-\d{1,2}-\d{1,2}(?:T\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{1,2}:?\d{2}))?)[,，]\s*/giu, '$1\uE001')
+    .replace(/(20\d{2}年\d{1,2}月\d{1,2}日(?:\s*(?:北京时间|中国标准时间))?(?:\s*(?:上午|下午|中午|凌晨|晚上|傍晚|晚间)?\s*[零〇一二三四五六七八九十两\d]{1,3}(?:时|点)(?:[零〇一二三四五六七八九十两\d]{1,3}分?)?)?)[,，]\s*/giu, '$1\uE001');
+  const restoreDateComma = (part: string) => normalizedAtomicClause(part.replace(/\uE000/gu, ', '));
+  const restoreProtectedPunctuation = (part: string) => normalizedAtomicClause(part
+    .replace(/\uE000/gu, ', ')
+    .replace(/\uE001/gu, ', '));
+  const hardParts = protectedSource.split(ATOMIC_HARD_BOUNDARY).map(restoreDateComma).filter(Boolean);
   const clauses: string[] = [];
   let unknownCompound = false;
   let reliable = true;
@@ -938,11 +1003,12 @@ function splitAtomicFactClauses(value: string): AtomicClauseParse {
         reliable = false;
       }
     }
-    if (unknownCompoundShape(hardPart)) {
+    const restoredHardPart = restoreProtectedPunctuation(hardPart);
+    if (unknownCompoundShape(restoredHardPart)) {
       unknownCompound = true;
       reliable = false;
     }
-    const inherited = inheritAtomicClauseSubject(hardPart, inheritedSubject);
+    const inherited = inheritAtomicClauseSubject(restoredHardPart, inheritedSubject);
     inheritedSubject = atomicClauseSubject(inherited) || inheritedSubject;
     clauses.push(inherited);
   }
@@ -1034,7 +1100,10 @@ interface StructuredFactUnit {
   modality: FactActionOccurrence['modality'];
 }
 
-const FACT_UNIT_BOUNDARY = /[。；;/／！？!?，,、\n]|(?:并且|并(?!购|未|不|非)|但|同时|以及|而且|后又|随后|继而|然后|又)|\b(?:and|but|then|subsequently|afterwards?|while|whereas)\b|\s*[—–]{1,2}\s*/giu;
+const FACT_UNIT_BOUNDARY = new RegExp(
+  `(?:${ATOMIC_HARD_PUNCTUATION_SOURCE}|[，,、]|${ATOMIC_COORDINATION_SOURCE})`,
+  'giu',
+);
 const GENERIC_REGION_VALUES = new Set([
   '人工智能', '企业', '技术', '本地', '核心', '线上', '海外', '全球', '相关', '部分',
   '模型', '产品', '服务', '业务', '市场', '地区', '客户', '开发者',
@@ -1121,7 +1190,10 @@ function stripFactTemporalText(value: string): string {
   return value
     .replace(/20\d{2}年\d{1,2}月\d{1,2}日(?:\s*[（(]?\s*(?:北京时间|中国标准时间|UTC|GMT|[+-]\d{1,2}:?\d{2})\s*[)）]?)?(?:\s*(?:上午|下午|中午|凌晨|晚上|傍晚|晚间)?\s*[零〇一二三四五六七八九十两\d]{1,3}(?:时|点)(?:[零〇一二三四五六七八九十两\d]{1,3}分?)?(?:[零〇一二三四五六七八九十两\d]{1,3}秒?)?(?:\s*[（(]?\s*(?:北京时间|中国标准时间|(?:UTC|GMT)\s*[+-]?\s*\d{0,2}(?::?\d{2})?|[+-]\d{1,2}:?\d{2})\s*[)）]?)?)?/giu, ' ')
     .replace(/20\d{2}-\d{1,2}-\d{1,2}(?:T|\s+)\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*(?:[AP]\.?\s*M\.?)?\s*(?:Z|(?:UTC|GMT)\s*[+-]?\s*\d{0,2}(?::?\d{2})?|[+-]\d{1,2}:?\d{2})?/giu, ' ')
-    .replace(/\b(?:(?:January|February|March|April|May|June|July|August|September|October|November|December)[\s-]+\d{1,2}(?:st|nd|rd|th)?,?[\s-]+20\d{2}|\d{1,2}(?:st|nd|rd|th)?[\s-]+(?:January|February|March|April|May|June|July|August|September|October|November|December)[\s-]+20\d{2})(?:\s+(?:at\s+)?\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:[AP]\.?\s*M\.?)?\s*(?:(?:UTC|GMT)\s*[+-]?\s*\d{0,2}(?::?\d{2})?|Beijing\s+Time|China\s+Standard\s+Time|[+-]\d{1,2}:?\d{2}|Z|UTC|GMT))?/giu, ' ');
+    .replace(/\b20\d{2}-\d{1,2}-\d{1,2}\b/gu, ' ')
+    .replace(/\b(?:(?:January|February|March|April|May|June|July|August|September|October|November|December)[\s-]+\d{1,2}(?:st|nd|rd|th)?,?[\s-]+20\d{2}|\d{1,2}(?:st|nd|rd|th)?[\s-]+(?:January|February|March|April|May|June|July|August|September|October|November|December)[\s-]+20\d{2})(?:\s+(?:at\s+)?\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:[AP]\.?\s*M\.?)?\s*(?:(?:UTC|GMT)\s*[+-]?\s*\d{0,2}(?::?\d{2})?|Beijing\s+Time|China\s+Standard\s+Time|[+-]\d{1,2}:?\d{2}|Z|UTC|GMT))?/giu, ' ')
+    .replace(/\b(?:on|at)\b\s*[,，]?\s*(?=[A-Z\p{Script=Han}])/giu, ' ')
+    .replace(/^[\s,，]+/gu, ' ');
 }
 
 function leadingFactUnitSubject(value: string, occurrence: FactActionOccurrence): string | null {
@@ -1237,6 +1309,10 @@ function canonicalSemanticResidue(value: string, subject: string | null): string
   }
   for (const [pattern, replacement] of SEMANTIC_RESIDUE_LEXEMES) source = source.replace(pattern, replacement);
   if (/\bzz_region_[a-z0-9_]+\b/u.test(source)) source = source.replace(/\bzz_market\b/gu, ' ');
+  source = source.replace(
+    /\b(zz_(?:operations|service))\s+(?:(?:in|for|across|within|throughout|into)\s+)?(zz_region_[a-z0-9_]+)\b/giu,
+    '$2 $1',
+  );
   source = source
     .replace(/(?:尚无证据表明|没有证据表明|未经证实|尚未证实|未获证实|中国标准时间|北京时间)/gu, ' ')
     .replace(/(?:已经|并未|并非|绝非|从未|尚未|未能|未曾|不曾|不再|不会|并不|没有|正式|仍在|正在|继续|计划|可能|考虑|寻求|提议|预计|据称|传闻|报道称|消息称|宣布|完成|将|已|未|不|无|在|于|对|向|为|其|该|一个|一项|一轮|的|了)/gu, ' ')
@@ -1250,7 +1326,7 @@ function canonicalSemanticResidue(value: string, subject: string | null): string
     const han = part.match(/\p{Script=Han}/gu) || [];
     tokens.push(...latin, ...han);
   }
-  return tokens.sort();
+  return tokens;
 }
 
 function structuredFactUnitSlots(
@@ -1421,9 +1497,17 @@ function structuredFactUnitVerificationError(candidate: string, quote: string): 
   const usableSourceClauses = actualClauses.clauses.filter((clause) =>
     atomicActionChainReliable(clause) && !unknownCompoundShape(clause));
   if (!usableSourceClauses.length) return 'fact_verification_action_mismatch';
-  const errors = usableSourceClauses.map((clause) => compareAtomicKnownFact(candidateClause, clause));
+  const errors = usableSourceClauses.map((clause) =>
+    occurredAtVerificationError(candidateClause, clause)
+      || compareAtomicKnownFact(
+        stripFactTemporalText(candidateClause),
+        stripFactTemporalText(clause),
+      ));
   if (errors.some((error) => error === null)) return null;
   for (const error of [
+    'fact_verification_instant_precision_mismatch',
+    'fact_verification_instant_mismatch',
+    'fact_verification_date_mismatch',
     'fact_verification_polarity_mismatch',
     'fact_verification_modality_mismatch',
     'fact_verification_entity_slot_missing',
@@ -1586,6 +1670,40 @@ function occurredAtVerificationError(candidate: string, quote: string): string |
     : null;
 }
 
+function occurredAtActionVerificationError(
+  fact: ManualLeadVerificationFact,
+  quote: string,
+): string | null {
+  if (typeof fact.candidate_value !== 'string') return 'fact_verification_instant_precision_mismatch';
+  const globalTimeError = occurredAtVerificationError(fact.candidate_value, quote);
+  const actionContexts = fact.supporting_action_values || [];
+  if (!actionContexts.length) return globalTimeError || 'fact_verification_action_mismatch';
+  const parsed = splitAtomicFactClauses(quote);
+  const clauses = parsed.clauses.filter((clause) =>
+    atomicActionChainReliable(clause) && !unknownCompoundShape(clause));
+  const exactTimeClauses = clauses.filter((clause) =>
+    occurredAtVerificationError(fact.candidate_value as string, clause) === null);
+  if (!exactTimeClauses.length && globalTimeError) return globalTimeError;
+  const actionOnlyContexts = actionContexts.map(stripFactTemporalText).filter(Boolean);
+  for (const clause of exactTimeClauses) {
+    if (actionOnlyContexts.some((context) => structuredFactUnitVerificationError(context, clause) === null)) {
+      return null;
+    }
+  }
+  const actionMatchesElsewhere = clauses.some((clause) =>
+    actionOnlyContexts.some((context) => structuredFactUnitVerificationError(context, clause) === null));
+  if (actionMatchesElsewhere) return 'fact_verification_instant_mismatch';
+  const localErrors = exactTimeClauses.flatMap((clause) => actionOnlyContexts.map((context) =>
+    structuredFactUnitVerificationError(context, clause)));
+  if (localErrors.includes('fact_verification_polarity_mismatch')) {
+    return 'fact_verification_polarity_mismatch';
+  }
+  if (localErrors.includes('fact_verification_modality_mismatch')) {
+    return 'fact_verification_modality_mismatch';
+  }
+  return globalTimeError || 'fact_verification_action_mismatch';
+}
+
 type FactScope = 'universal' | 'limited';
 
 function dominantFactScope(value: string): FactScope | null {
@@ -1614,8 +1732,8 @@ function expectedEventTypeActions(fact: ManualLeadVerificationFact): Set<FactAct
 function quoteSupportsStructuredFact(fact: ManualLeadVerificationFact, quote: string): string | null {
   if (typeof fact.candidate_value !== 'string') return null;
   const candidate = fact.candidate_value;
-  if (fact.field === 'occurred_at') return occurredAtVerificationError(candidate, quote);
-  if (fact.field !== 'event_key') {
+  if (fact.field === 'occurred_at') return occurredAtActionVerificationError(fact, quote);
+  if (fact.field !== 'event_key' && !['title', 'summary', 'claim'].includes(fact.field)) {
     const temporalError = occurredAtVerificationError(candidate, quote);
     if (temporalError) return temporalError;
   }
