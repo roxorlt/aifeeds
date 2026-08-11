@@ -250,6 +250,63 @@ function fixtureEvidence(): ManualNewsEvidence[] {
   }];
 }
 
+function replacementEvidence(count: number): ManualNewsEvidence[] {
+  return Array.from({ length: count }, (_, index) => ({
+    ...fixtureEvidence()[0],
+    id: `ev-replacement-${index + 1}`,
+    url: `https://support.claude.com/replacement-${index + 1}`,
+    title: `Replacement evidence ${index + 1}`,
+  }));
+}
+
+function setExistingEvidenceCount(state: ReturnType<typeof fixture>, count: number): void {
+  state.db.sqlite.prepare('DELETE FROM manual_news_evidence WHERE lead_id = ?').run(state.leadId);
+  for (let index = 0; index < count; index += 1) {
+    state.db.sqlite.prepare(`INSERT INTO manual_news_evidence (
+      lead_id, evidence_id, url, source_type, publisher, published_at, retrieved_at,
+      title, excerpt, claims_supported_json, fetch_audit_json, reliable
+    ) VALUES (?, ?, ?, 'official_help', 'claude.com', NULL, 2, ?, ?, ?, 'null', 1)`).run(
+      state.leadId, `ev-existing-${index + 1}`, `https://support.claude.com/existing-${index + 1}`,
+      `Existing evidence ${index + 1}`, fixtureFact, JSON.stringify([fixtureFact]),
+    );
+  }
+}
+
+function addActiveVerification(state: ReturnType<typeof fixture>): void {
+  state.db.sqlite.prepare(`INSERT INTO manual_news_assessment_verifications (
+    verification_id, lead_id, assessment_version, policy_version, canonical_digest,
+    hmac_sha256, verification_json, processing_owner, processing_attempt,
+    creation_nonce, status, created_at
+  ) VALUES (?, ?, 1, 'test-policy', ?, ?, '{}', ?, 1, ?, 'active', 1)`).run(
+    `verification-${state.leadId}`, state.leadId, '0'.repeat(64), '0'.repeat(64),
+    PROCESSING_OWNER, `creation-${state.leadId}`,
+  );
+}
+
+function addHistoricalInvalidatedVerification(
+  state: ReturnType<typeof fixture>,
+  invalidatedAt: number,
+  invalidationNonce = `historical-invalidation-${state.leadId}`,
+): void {
+  state.db.sqlite.prepare(`INSERT INTO manual_news_assessment_verifications (
+    verification_id, lead_id, assessment_version, policy_version, canonical_digest,
+    hmac_sha256, verification_json, processing_owner, processing_attempt,
+    creation_nonce, invalidation_nonce, status, reason, created_at, invalidated_at
+  ) VALUES (?, ?, 1, 'historical-policy', ?, ?, '{}', 'historical-owner', 1, ?, ?,
+    'invalidated', 'evidence_replaced', 1, ?)`).run(
+    `historical-verification-${state.leadId}`, state.leadId, '1'.repeat(64), '1'.repeat(64),
+    `historical-creation-${state.leadId}`, invalidationNonce, invalidatedAt,
+  );
+}
+
+function addPublishedManualItem(state: ReturnType<typeof fixture>): void {
+  state.db.sqlite.prepare(`INSERT INTO items (
+    id, source_ref, extra, published_at, scraped_at, is_relevant, deleted_at
+  ) VALUES (?, 'manual_lead', '{}', '2026-08-11', '2026-08-11', 1, NULL)`).run(
+    `blog:manual:${state.leadId}`,
+  );
+}
+
 function verifiedAssessment(
   candidate: ManualNewsProcessedAssessment = processedAssessment(),
   evidence: ManualNewsEvidence[] = fixtureEvidence(),
@@ -395,6 +452,162 @@ describe('manual lead D1-backed dedupe', () => {
       evidence_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
       mutation_nonce: audit.mutation_nonce,
     });
+  });
+
+  test('replaces an initially empty evidence set without treating DELETE changes=0 as stale', async () => {
+    const state = fixture('extracting', 4);
+    setExistingEvidenceCount(state, 0);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+
+    await expect(store.replaceEvidence(state.leadId, 4, replacementEvidence(2))).resolves.toBeUndefined();
+    expect(state.db.sqlite.prepare(
+      'SELECT evidence_id FROM manual_news_evidence WHERE lead_id = ? ORDER BY evidence_id',
+    ).all(state.leadId)).toEqual([
+      { evidence_id: 'ev-replacement-1' },
+      { evidence_id: 'ev-replacement-2' },
+    ]);
+  });
+
+  test.each([
+    { existing: 0, replacement: 2, activeVerification: false, publishedItem: false },
+    { existing: 1, replacement: 0, activeVerification: false, publishedItem: true },
+    { existing: 3, replacement: 1, activeVerification: false, publishedItem: false },
+    { existing: 1, replacement: 2, activeVerification: true, publishedItem: false },
+    { existing: 2, replacement: 0, activeVerification: true, publishedItem: true },
+  ])('keeps D1 result causality for evidence replacement %#', async ({
+    existing, replacement, activeVerification, publishedItem,
+  }) => {
+    const state = fixture('extracting', 4);
+    setExistingEvidenceCount(state, existing);
+    if (activeVerification) addActiveVerification(state);
+    if (publishedItem) addPublishedManualItem(state);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+
+    await expect(store.replaceEvidence(state.leadId, 4, replacementEvidence(replacement)))
+      .resolves.toBeUndefined();
+    expect(state.db.sqlite.prepare(
+      'SELECT evidence_id FROM manual_news_evidence WHERE lead_id = ? ORDER BY evidence_id',
+    ).all(state.leadId)).toEqual(replacementEvidence(replacement).map((item) => ({ evidence_id: item.id })));
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'evidence_replace'`).get(state.leadId)).toEqual({ count: 1 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'assessment_invalidate'`).get(state.leadId))
+      .toEqual({ count: activeVerification ? 1 : 0 });
+    if (activeVerification) {
+      expect(state.db.sqlite.prepare(`SELECT status, reason FROM manual_news_assessment_verifications
+        WHERE lead_id = ?`).get(state.leadId)).toEqual({
+        status: 'invalidated', reason: 'evidence_replaced',
+      });
+    }
+    if (publishedItem) {
+      expect(state.db.sqlite.prepare('SELECT deleted_at FROM items WHERE id = ?')
+        .get(`blog:manual:${state.leadId}`)).toEqual({
+        deleted_at: activeVerification ? expect.any(String) : null,
+      });
+    }
+  });
+
+  test.each([
+    { owner: 'stale-owner', attempt: 1, version: 4 },
+    { owner: PROCESSING_OWNER, attempt: 2, version: 4 },
+    { owner: PROCESSING_OWNER, attempt: 1, version: 5 },
+  ])('rejects evidence replacement with stale fence %#', async ({ owner, attempt, version }) => {
+    const state = fixture('extracting', 4);
+    setExistingEvidenceCount(state, 0);
+    const store = new D1ManualLeadProcessingStore(state.env, owner, attempt);
+
+    await expect(store.replaceEvidence(state.leadId, version, replacementEvidence(2)))
+      .rejects.toThrow(/stale_processing_owner/);
+    expect(state.db.sqlite.prepare(
+      'SELECT COUNT(*) AS count FROM manual_news_evidence WHERE lead_id = ?',
+    ).get(state.leadId)).toEqual({ count: 0 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'evidence_replace'`).get(state.leadId)).toEqual({ count: 0 });
+  });
+
+  test('ignores a same-millisecond historical invalidation when no active proof exists', async () => {
+    const fixedNow = 1_723_333_333_333;
+    vi.spyOn(Date, 'now').mockReturnValue(fixedNow);
+    const state = fixture('extracting', 4);
+    setExistingEvidenceCount(state, 0);
+    addHistoricalInvalidatedVerification(state, fixedNow, 'historical-evidence-invalidation');
+    addPublishedManualItem(state);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+
+    await expect(store.replaceEvidence(state.leadId, 4, replacementEvidence(2))).resolves.toBeUndefined();
+    expect(state.db.sqlite.prepare('SELECT deleted_at FROM items WHERE id = ?')
+      .get(`blog:manual:${state.leadId}`)).toEqual({ deleted_at: null });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'assessment_invalidate'`).get(state.leadId)).toEqual({ count: 0 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'evidence_replace'`).get(state.leadId)).toEqual({ count: 1 });
+    expect(state.db.sqlite.prepare(`SELECT invalidation_nonce FROM manual_news_assessment_verifications
+      WHERE lead_id = ?`).get(state.leadId)).toEqual({
+      invalidation_nonce: 'historical-evidence-invalidation',
+    });
+    expect(state.db.sqlite.prepare(
+      'SELECT evidence_id FROM manual_news_evidence WHERE lead_id = ? ORDER BY evidence_id',
+    ).all(state.leadId)).toEqual([
+      { evidence_id: 'ev-replacement-1' },
+      { evidence_id: 'ev-replacement-2' },
+    ]);
+  });
+
+  test('quarantines only the active proof invalidated by this evidence replacement nonce', async () => {
+    const fixedNow = 1_723_333_333_333;
+    vi.spyOn(Date, 'now').mockReturnValue(fixedNow);
+    const state = fixture('extracting', 4);
+    addHistoricalInvalidatedVerification(state, fixedNow, 'historical-evidence-invalidation');
+    addActiveVerification(state);
+    addPublishedManualItem(state);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+
+    await store.replaceEvidence(state.leadId, 4, replacementEvidence(1));
+    const rows = state.db.sqlite.prepare(`SELECT verification_id, invalidation_nonce
+      FROM manual_news_assessment_verifications WHERE lead_id = ? ORDER BY verification_id`)
+      .all(state.leadId) as Array<{ verification_id: string; invalidation_nonce: string | null }>;
+    expect(rows).toEqual([
+      {
+        verification_id: `historical-verification-${state.leadId}`,
+        invalidation_nonce: 'historical-evidence-invalidation',
+      },
+      {
+        verification_id: `verification-${state.leadId}`,
+        invalidation_nonce: expect.stringMatching(/^assessment_invalidate:/),
+      },
+    ]);
+    expect(state.db.sqlite.prepare('SELECT deleted_at FROM items WHERE id = ?')
+      .get(`blog:manual:${state.leadId}`)).toEqual({ deleted_at: expect.any(String) });
+    expect(state.db.sqlite.prepare(`SELECT mutation_nonce FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'assessment_invalidate'`).get(state.leadId)).toEqual({
+      mutation_nonce: rows[1].invalidation_nonce,
+    });
+  });
+
+  test('a concurrent same-fence loser cannot reuse the winner invalidation nonce for audit or item quarantine', async () => {
+    const fixedNow = 1_723_333_333_333;
+    vi.spyOn(Date, 'now').mockReturnValue(fixedNow);
+    const state = fixture('extracting', 4);
+    addActiveVerification(state);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+
+    await expect(Promise.all([
+      store.replaceEvidence(state.leadId, 4, replacementEvidence(1)),
+      store.replaceEvidence(state.leadId, 4, replacementEvidence(2)),
+    ])).resolves.toEqual([undefined, undefined]);
+    const winner = state.db.sqlite.prepare(`SELECT invalidation_nonce
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId) as {
+        invalidation_nonce: string;
+      };
+    addPublishedManualItem(state);
+
+    await expect(store.replaceEvidence(state.leadId, 4, replacementEvidence(3))).resolves.toBeUndefined();
+    expect(state.db.sqlite.prepare('SELECT deleted_at FROM items WHERE id = ?')
+      .get(`blog:manual:${state.leadId}`)).toEqual({ deleted_at: null });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'assessment_invalidate'`).get(state.leadId)).toEqual({ count: 1 });
+    expect(state.db.sqlite.prepare(`SELECT invalidation_nonce FROM manual_news_assessment_verifications
+      WHERE lead_id = ?`).get(state.leadId)).toEqual(winner);
   });
 
   test('hides legacy assessments and preserves assessment history when active verification is invalidated', async () => {
