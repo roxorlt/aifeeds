@@ -226,8 +226,7 @@ function trustedEndpoint(service: TrustedResearchService | undefined, path: '/v1
     (origin.pathname !== '/' && origin.pathname !== '') || origin.search || origin.hash
   ) throw new Error('invalid_trusted_research_origin');
   if (!service.token || service.token.length > 512) throw new Error('invalid_trusted_research_token');
-  const fetcher = service.fetcher ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
-  return { url: new URL(path, origin), fetcher, token: service.token };
+  return { url: new URL(path, origin), fetcher: service.fetcher, token: service.token };
 }
 
 function strictObject(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
@@ -411,8 +410,8 @@ async function postTrusted(
   const endpoint = trustedEndpoint(service, path);
   const controller = new AbortController();
   const deadline = Date.now() + timeoutMs;
-  const response = await withinDeadline(endpoint.fetcher(endpoint.url, {
-    method: 'POST', redirect: 'error', signal: controller.signal,
+  const init: RequestInit = {
+    method: 'POST', redirect: 'manual', signal: controller.signal,
     headers: {
       Accept: path === '/v1/search' ? 'application/json' : 'text/plain',
       Authorization: `Bearer ${endpoint.token}`,
@@ -420,7 +419,10 @@ async function postTrusted(
       'User-Agent': 'ai-feeds-manual-news-lead/2.0',
     },
     body: JSON.stringify(payload),
-  }), deadline, controller);
+  };
+  const injectedFetcher = endpoint.fetcher;
+  const pending = injectedFetcher ? injectedFetcher(endpoint.url, init) : fetch(endpoint.url, init);
+  const response = await withinDeadline(pending, deadline, controller);
   if (!response.ok) {
     controller.abort();
     throw new Error(`trusted_gateway_http_${response.status}`);

@@ -37,6 +37,26 @@ function compact(value: unknown, max: number): string {
   return Array.from(String(value || '').replace(/\s+/g, ' ').trim()).slice(0, max).join('');
 }
 
+function safeSearchError(error: unknown, secrets: readonly string[] = []): string {
+  let message = error instanceof Error ? error.message : String(error);
+  for (const secret of secrets) {
+    if (secret) message = message.split(secret).join('[redacted]');
+  }
+  return compact(message.replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [redacted]'), 300) || 'unknown_error';
+}
+
+async function withSearchStage<T>(
+  stage: 'search_existing' | 'search_public',
+  operation: () => Promise<T>,
+  secrets: readonly string[] = [],
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw new Error(`${stage}:${safeSearchError(error, secrets)}`);
+  }
+}
+
 function searchTerms(text: string): string[] {
   const terms = new Set<string>();
   for (const token of text.toLowerCase().match(/[a-z0-9][a-z0-9._-]{2,}|[\u3400-\u9fff]{2,}/g) || []) {
@@ -208,8 +228,12 @@ async function searchAllNews(
   // Open-web research is mandatory for text clues. D1 is useful context but is
   // not treated as proof that broader research completed.
   const [existing, openWeb] = await Promise.all([
-    searchExistingNews(env, input),
-    searchPublicWeb(input, { service: researchService(env, fetcher) }),
+    withSearchStage('search_existing', () => searchExistingNews(env, input)),
+    withSearchStage(
+      'search_public',
+      () => searchPublicWeb(input, { service: researchService(env, fetcher) }),
+      [env.MANUAL_NEWS_RESEARCH_TOKEN || ''],
+    ),
   ]);
   const combined: ManualSearchResult[] = [...existing, ...openWeb];
   return combined.filter((item, index) => combined.findIndex((candidate) => candidate.url === item.url) === index).slice(0, 8);

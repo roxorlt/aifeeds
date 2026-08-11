@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 
 import { applyManualLeadEvidencePolicy, validateManualLeadAssessment } from './manual-news-leads';
 import { createManualNewsLeadRuntimeAdapters, extractManualNewsEvidence } from './manual-news-leads-runtime';
@@ -121,6 +121,48 @@ describe('manual lead evidence extraction', () => {
     expect(results.map((item) => item.url)).toEqual([
       'https://www.anthropic.com/news/existing', 'https://www.axios.com/report',
     ]);
+  });
+
+  test('identifies a failure in the existing-news search branch without preventing open-web search startup', async () => {
+    const researchFetcher = vi.fn(async () => new Response(JSON.stringify({ results: [] }), {
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    const adapters = createManualNewsLeadRuntimeAdapters({
+      DB: { prepare() { throw new TypeError('D1 receiver mismatch'); } },
+      MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
+      MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
+    } as never, { researchFetcher });
+
+    await expect(adapters.search({ date: '2026-08-11', text: 'Anthropic watermark', note: '' }))
+      .rejects.toThrow(/^search_existing:D1 receiver mismatch$/);
+    expect(researchFetcher).toHaveBeenCalledTimes(1);
+  });
+
+  test('identifies a failure in the public-web search branch without exposing the gateway token', async () => {
+    const statement = {
+      bind() { return statement; },
+      async all() { return { results: [] }; },
+    };
+    const adapters = createManualNewsLeadRuntimeAdapters({
+      DB: { prepare() { return statement; } },
+      MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
+      MANUAL_NEWS_RESEARCH_TOKEN: 'secret-test-token',
+    } as never, {
+      researchFetcher: async () => {
+        throw new TypeError('Illegal invocation for Bearer secret-test-token');
+      },
+    });
+
+    let failure: unknown;
+    try {
+      await adapters.search({ date: '2026-08-11', text: 'Anthropic watermark', note: '' });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe('search_public:Illegal invocation for Bearer [redacted]');
+    expect((failure as Error).message).not.toContain('secret-test-token');
+    expect((failure as Error).cause).toBeUndefined();
   });
 
   test('Bernie letter uses bounded trusted PDF text conversion and still needs an independent report', async () => {
