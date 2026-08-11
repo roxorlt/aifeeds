@@ -155,9 +155,9 @@ describe('trusted manual-news research boundary', () => {
     });
   });
 
-  test('keeps the Worker global fetch receiver when no gateway fetcher is injected', async () => {
+  test('calls the Worker intrinsic fetch lexically when no gateway fetcher is injected', async () => {
     const receiverAwareFetch = vi.fn(function (this: unknown) {
-      if (this !== globalThis) {
+      if (this !== undefined) {
         throw new TypeError('Illegal invocation: function called with incorrect this reference');
       }
       return Promise.resolve(new Response(JSON.stringify({ results: [] }), {
@@ -318,6 +318,24 @@ describe('trusted manual-news research boundary', () => {
         source_content_type: 'application/pdf', extraction: 'binary',
       }) as never),
     })).rejects.toThrow(/invalid_pdf_extraction/);
+  });
+
+  test('uses an edge-supported manual redirect mode and rejects gateway redirects without following them', async () => {
+    const edgeStrictFetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.redirect === 'error') {
+        throw new TypeError('Invalid redirect value, must be one of "follow" or "manual"');
+      }
+      expect(init?.redirect).toBe('manual');
+      return new Response(null, {
+        status: 302,
+        headers: { Location: 'https://untrusted.example/v1/search' },
+      });
+    });
+
+    await expect(searchPublicWeb({ text: 'Anthropic watermark', date: '2026-08-11' }, {
+      service: service(edgeStrictFetcher as typeof fetch),
+    })).rejects.toThrow(/trusted_gateway_http_302/);
+    expect(edgeStrictFetcher).toHaveBeenCalledTimes(1);
   });
 
   test('validates open-web search response schema and target URLs through the same fixed origin', async () => {

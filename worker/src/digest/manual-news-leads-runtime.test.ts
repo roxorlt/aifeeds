@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 
 import { applyManualLeadEvidencePolicy, validateManualLeadAssessment } from './manual-news-leads';
 import { createManualNewsLeadRuntimeAdapters, extractManualNewsEvidence } from './manual-news-leads-runtime';
@@ -121,6 +121,119 @@ describe('manual lead evidence extraction', () => {
     expect(results.map((item) => item.url)).toEqual([
       'https://www.anthropic.com/news/existing', 'https://www.axios.com/report',
     ]);
+  });
+
+  test('identifies a failure in the existing-news search branch without preventing open-web search startup', async () => {
+    const researchFetcher = vi.fn(async () => new Response(JSON.stringify({ results: [] }), {
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    const adapters = createManualNewsLeadRuntimeAdapters({
+      DB: { prepare() { throw new TypeError('D1 receiver mismatch'); } },
+      MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
+      MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
+    } as never, { researchFetcher });
+
+    await expect(adapters.search({ date: '2026-08-11', text: 'Anthropic watermark', note: '' }))
+      .rejects.toThrow(/^search_existing:D1 receiver mismatch$/);
+    expect(researchFetcher).toHaveBeenCalledTimes(1);
+  });
+
+  test('identifies a failure in the public-web search branch without exposing the gateway token', async () => {
+    const statement = {
+      bind() { return statement; },
+      async all() { return { results: [] }; },
+    };
+    const adapters = createManualNewsLeadRuntimeAdapters({
+      DB: { prepare() { return statement; } },
+      MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
+      MANUAL_NEWS_RESEARCH_TOKEN: 'secret-test-token',
+    } as never, {
+      researchFetcher: async () => {
+        throw new TypeError('Illegal invocation for Bearer secret-test-token');
+      },
+    });
+
+    let failure: unknown;
+    try {
+      await adapters.search({ date: '2026-08-11', text: 'Anthropic watermark', note: '' });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe('search_public:Illegal invocation for Bearer [redacted]');
+    expect((failure as Error).message).not.toContain('secret-test-token');
+    expect((failure as Error).cause).toBeUndefined();
+  });
+
+  test('redacts every provider URL while preserving the search stage and stable gateway status', async () => {
+    const statement = {
+      bind() { return statement; },
+      async all() { return { results: [] }; },
+    };
+    const adapters = createManualNewsLeadRuntimeAdapters({
+      DB: { prepare() { return statement; } },
+      MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
+      MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
+    } as never, {
+      researchFetcher: async () => {
+        throw new Error(
+          'trusted_gateway_http_502 fetching https://example.com/path?token=secret#frag '
+          + 'via https://provider.example/private/report?id=hidden',
+        );
+      },
+    });
+
+    let message = '';
+    try {
+      await adapters.search({ date: '2026-08-11', text: 'Anthropic watermark', note: '' });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toBe('search_public:trusted_gateway_http_502 fetching [url] via [url]');
+    for (const leaked of ['example.com', '/path', 'token=secret', '#frag', 'provider.example', 'id=hidden']) {
+      expect(message).not.toContain(leaked);
+    }
+  });
+
+  test('redacts adversarial URL forms without leaving credential, path, query, or fragment suffixes', async () => {
+    const statement = {
+      bind() { return statement; },
+      async all() { return { results: [] }; },
+    };
+    const unsafeMessage = [
+      'trusted_gateway_http_503',
+      '_https://u.example/p?q=1#uf',
+      'HtTpS://c.example/P?Q=2#CF',
+      "https://u:p's@d.example/c?t=3#df",
+      "http://p.example/a'b?t=4#pf",
+      '(https://r.example/i?q=5#rf),',
+      'https://t.example/f?q=6#tf...',
+    ].join(' ');
+    const adapters = createManualNewsLeadRuntimeAdapters({
+      DB: { prepare() { return statement; } },
+      MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
+      MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
+    } as never, {
+      researchFetcher: async () => { throw new Error(unsafeMessage); },
+    });
+
+    let message = '';
+    try {
+      await adapters.search({ date: '2026-08-11', text: 'Anthropic watermark', note: '' });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain('search_public:trusted_gateway_http_503');
+    expect(message.match(/\[url\]/g)).toHaveLength(6);
+    expect(message).not.toMatch(/https?:\/\//i);
+    for (const leaked of [
+      'u.example', '/p', 'q=1', '#uf',
+      'c.example', '/P', 'Q=2', '#CF',
+      "u:p's", 'd.example', '/c', 't=3', '#df',
+      'p.example', "/a'b", 't=4', '#pf',
+      'r.example', '/i', 'q=5', '#rf',
+      't.example', '/f', 'q=6', '#tf',
+    ]) expect(message.toLowerCase()).not.toContain(leaked.toLowerCase());
   });
 
   test('Bernie letter uses bounded trusted PDF text conversion and still needs an independent report', async () => {
