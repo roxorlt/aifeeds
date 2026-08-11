@@ -17,6 +17,7 @@ class SqliteD1 {
   failAudit = false;
   private batchTail: Promise<void> = Promise.resolve();
   private nextBatchGate: { entered: () => void; released: Promise<void> } | null = null;
+  private nextFirstGate: { marker: string; entered: () => void; released: Promise<void> } | null = null;
 
   constructor() {
     this.sqlite.exec(`
@@ -69,7 +70,15 @@ class SqliteD1 {
         bindings = values as SQLInputValue[];
         return prepared;
       },
-      first: async <T>() => (statement.get(...bindings) as T | undefined) ?? null,
+      first: async <T>() => {
+        const gate = this.nextFirstGate;
+        if (gate && sql.includes(gate.marker)) {
+          this.nextFirstGate = null;
+          gate.entered();
+          await gate.released;
+        }
+        return (statement.get(...bindings) as T | undefined) ?? null;
+      },
       all: async <T>() => ({ results: statement.all(...bindings) as T[], success: true, meta: {} }),
       run: async () => {
         if (this.failAudit && sql.includes('manual_audit:mutation')) throw new Error('injected_audit_failure');
@@ -111,6 +120,15 @@ class SqliteD1 {
     const entered = new Promise<void>((resolve) => { markEntered = resolve; });
     const released = new Promise<void>((resolve) => { release = resolve; });
     this.nextBatchGate = { entered: markEntered, released };
+    return { entered, release };
+  }
+
+  pauseNextFirst(marker: string): { entered: Promise<void>; release: () => void } {
+    let markEntered!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    this.nextFirstGate = { marker, entered: markEntered, released };
     return { entered, release };
   }
 
@@ -460,6 +478,29 @@ describe('manual lead D1-backed dedupe', () => {
     expect(state.db.sqlite.prepare(
       `SELECT COUNT(*) AS count FROM manual_news_lead_audit
        WHERE lead_id = ? AND action = 'retry' AND idempotency_key = ? AND resulting_version = 8`,
+    ).get(state.leadId, key)).toEqual({ count: 1 });
+  });
+
+  test('an idempotent retry re-reads the lead after a concurrent winner audit becomes visible', async () => {
+    const state = fixture('failed', 7);
+    const key = 'retry-interleaved-current-lead';
+    const gate = state.db.pauseNextFirst('manual_audit:retry_idempotency');
+
+    const replayRequest = retryManualNewsLead(state.env, state.leadId, 7, key, 100);
+    await gate.entered;
+    const winner = await retryManualNewsLead(state.env, state.leadId, 7, key, 101);
+    gate.release();
+    const replay = await replayRequest;
+
+    expect(winner).toMatchObject({ ok: true, changed: true, lead: { version: 8 } });
+    expect(replay).toMatchObject({
+      ok: true,
+      changed: false,
+      lead: { status: 'validating', version: 8, processing_owner: `manual-news-${state.leadId}-v8` },
+    });
+    expect(state.db.sqlite.prepare(
+      `SELECT COUNT(*) AS count FROM manual_news_lead_audit
+       WHERE lead_id = ? AND action = 'retry' AND idempotency_key = ?`,
     ).get(state.leadId, key)).toEqual({ count: 1 });
   });
 

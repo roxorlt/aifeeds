@@ -302,7 +302,10 @@ export async function retryManualNewsLead(
   const lead = await getManualNewsLead(env, id);
   if (!lead) return { ok: false, status: 404, error: 'manual_news_lead_not_found' };
   if (await hasCompletedRetryAudit(env, id, expectedVersion, idempotencyKey)) {
-    return { ok: true, changed: false, lead };
+    const current = await getManualNewsLead(env, id);
+    return current
+      ? { ok: true, changed: false, lead: current }
+      : { ok: false, status: 404, error: 'manual_news_lead_not_found' };
   }
   if (lead.confirmed_at) return { ok: false, status: 409, error: 'lead_already_confirmed', lead };
   if (lead.version !== expectedVersion) return { ok: false, status: 409, error: 'lead_version_conflict', lead };
@@ -327,8 +330,11 @@ export async function retryManualNewsLead(
   }));
   if (!changed) {
     const conflicted = await getManualNewsLead(env, id);
-    if (conflicted && await hasCompletedRetryAudit(env, id, expectedVersion, idempotencyKey)) {
-      return { ok: true, changed: false, lead: conflicted };
+    if (await hasCompletedRetryAudit(env, id, expectedVersion, idempotencyKey)) {
+      const current = await getManualNewsLead(env, id);
+      return current
+        ? { ok: true, changed: false, lead: current }
+        : { ok: false, status: 404, error: 'manual_news_lead_not_found' };
     }
     return { ok: false, status: 409, error: 'lead_version_conflict', ...(conflicted ? { lead: conflicted } : {}) };
   }
