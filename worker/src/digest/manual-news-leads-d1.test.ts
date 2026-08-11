@@ -82,7 +82,7 @@ class SqliteD1 {
       );
       CREATE UNIQUE INDEX idx_manual_news_verification_one_active_lead
         ON manual_news_assessment_verifications(lead_id) WHERE status = 'active';
-      CREATE TABLE manual_news_assessment_generation_cycles (
+      CREATE TABLE manual_news_assessment_generation_cycles_v2 (
         cycle_id TEXT PRIMARY KEY, lead_id TEXT NOT NULL, processing_owner TEXT NOT NULL,
         base_version INTEGER NOT NULL, call_state TEXT NOT NULL,
         first_validation_code TEXT, first_validation_path TEXT,
@@ -95,9 +95,9 @@ class SqliteD1 {
         created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
         UNIQUE (lead_id, processing_owner, base_version)
       );
-      CREATE UNIQUE INDEX idx_manual_news_generation_one_current_lead
-        ON manual_news_assessment_generation_cycles(lead_id) WHERE is_current = 1;
-      CREATE TABLE manual_news_assessment_generation_revisions (
+      CREATE UNIQUE INDEX idx_manual_news_generation_v2_one_current_lead
+        ON manual_news_assessment_generation_cycles_v2(lead_id) WHERE is_current = 1;
+      CREATE TABLE manual_news_assessment_generation_revisions_v2 (
         cycle_id TEXT NOT NULL, generation_revision INTEGER NOT NULL,
         call_kind TEXT NOT NULL, call_state TEXT NOT NULL,
         validation_code TEXT, validation_path TEXT, validated_assessment_json TEXT,
@@ -541,10 +541,39 @@ describe('manual lead D1-backed dedupe', () => {
     });
 
     expect(state.db.sqlite.prepare(`SELECT generation_revision, call_kind, call_state
-      FROM manual_news_assessment_generation_revisions ORDER BY generation_revision`).all()).toEqual([
+      FROM manual_news_assessment_generation_revisions_v2 ORDER BY generation_revision`).all()).toEqual([
       { generation_revision: 1, call_kind: 'initial', call_state: 'validation_failed' },
       { generation_revision: 2, call_kind: 'regeneration', call_state: 'started' },
     ]);
+  });
+
+  test('ignores unverifiable legacy v1 generation state and starts a fresh v2 initial revision', async () => {
+    const state = fixture('verifying', 4);
+    state.db.sqlite.exec(`CREATE TABLE manual_news_assessment_generation_cycles (
+      cycle_id TEXT PRIMARY KEY, lead_id TEXT NOT NULL, processing_owner TEXT NOT NULL,
+      base_version INTEGER NOT NULL, call_state TEXT NOT NULL,
+      regeneration_consumed INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    )`);
+    state.db.sqlite.prepare(`INSERT INTO manual_news_assessment_generation_cycles (
+      cycle_id, lead_id, processing_owner, base_version, call_state,
+      regeneration_consumed, created_at, updated_at
+    ) VALUES ('legacy-v1-cycle', ?, ?, 4, 'regeneration_started', 1, 1, 1)`).run(
+      state.leadId, PROCESSING_OWNER,
+    );
+
+    const cycle = await new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1)
+      .beginAssessmentGenerationCycle(state.leadId, 4);
+
+    expect(cycle).toMatchObject({
+      generation_revision: 1, regeneration_consumed: false,
+      call_state: 'initial_started', acquired_call: true,
+    });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
+      FROM manual_news_assessment_generation_cycles_v2 WHERE lead_id = ?`).get(state.leadId))
+      .toEqual({ count: 1 });
+    expect(state.db.sqlite.prepare(`SELECT call_state, regeneration_consumed
+      FROM manual_news_assessment_generation_cycles WHERE cycle_id = 'legacy-v1-cycle'`).get())
+      .toEqual({ call_state: 'regeneration_started', regeneration_consumed: 1 });
   });
 
   test('binds start, result, and regeneration audits to the exact concurrent mutation nonce', async () => {
@@ -560,9 +589,9 @@ describe('manual lead D1-backed dedupe', () => {
     const starts = await Promise.all([startOne, startTwo]);
     expect(starts.filter((result) => result.acquired_call)).toHaveLength(1);
 
-    const cycleStart = state.db.sqlite.prepare(`SELECT start_nonce FROM manual_news_assessment_generation_cycles
+    const cycleStart = state.db.sqlite.prepare(`SELECT start_nonce FROM manual_news_assessment_generation_cycles_v2
       WHERE lead_id = ? AND is_current = 1`).get(state.leadId) as { start_nonce: string };
-    const revisionStart = state.db.sqlite.prepare(`SELECT start_nonce FROM manual_news_assessment_generation_revisions
+    const revisionStart = state.db.sqlite.prepare(`SELECT start_nonce FROM manual_news_assessment_generation_revisions_v2
       WHERE generation_revision = 1`).get() as { start_nonce: string };
     const startAudits = state.db.sqlite.prepare(`SELECT mutation_nonce FROM manual_news_lead_audit
       WHERE lead_id = ? AND action = 'assessment_generation_start_1'`).all(state.leadId) as Array<{ mutation_nonce: string }>;
@@ -583,10 +612,10 @@ describe('manual lead D1-backed dedupe', () => {
     await expect(Promise.all([resultOne, resultTwo])).resolves.toHaveLength(2);
 
     const cycleResult = state.db.sqlite.prepare(`SELECT last_result_nonce
-      FROM manual_news_assessment_generation_cycles WHERE lead_id = ? AND is_current = 1`)
+      FROM manual_news_assessment_generation_cycles_v2 WHERE lead_id = ? AND is_current = 1`)
       .get(state.leadId) as { last_result_nonce: string };
     const revisionResult = state.db.sqlite.prepare(`SELECT result_nonce
-      FROM manual_news_assessment_generation_revisions WHERE generation_revision = 1`)
+      FROM manual_news_assessment_generation_revisions_v2 WHERE generation_revision = 1`)
       .get() as { result_nonce: string };
     const resultAudits = state.db.sqlite.prepare(`SELECT mutation_nonce FROM manual_news_lead_audit
       WHERE lead_id = ? AND action = 'assessment_generation_result_1'`).all(state.leadId) as Array<{ mutation_nonce: string }>;
@@ -602,10 +631,10 @@ describe('manual lead D1-backed dedupe', () => {
     expect(regenerations.filter((result) => result.acquired_call)).toHaveLength(1);
 
     const cycleRegeneration = state.db.sqlite.prepare(`SELECT regeneration_nonce
-      FROM manual_news_assessment_generation_cycles WHERE lead_id = ? AND is_current = 1`)
+      FROM manual_news_assessment_generation_cycles_v2 WHERE lead_id = ? AND is_current = 1`)
       .get(state.leadId) as { regeneration_nonce: string };
     const revisionRegeneration = state.db.sqlite.prepare(`SELECT start_nonce
-      FROM manual_news_assessment_generation_revisions WHERE generation_revision = 2`)
+      FROM manual_news_assessment_generation_revisions_v2 WHERE generation_revision = 2`)
       .get() as { start_nonce: string };
     const regenerationAudits = state.db.sqlite.prepare(`SELECT mutation_nonce FROM manual_news_lead_audit
       WHERE lead_id = ? AND action = 'assessment_generation_start_2'`).all(state.leadId) as Array<{ mutation_nonce: string }>;
@@ -648,7 +677,7 @@ describe('manual lead D1-backed dedupe', () => {
     })).rejects.toThrow(/stale_processing_owner/);
     expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
       WHERE lead_id = ? AND action LIKE 'assessment_generation_%'`).get(state.leadId)).toEqual(auditsBefore);
-    expect(state.db.sqlite.prepare(`SELECT cycle_id, is_current, call_state FROM manual_news_assessment_generation_cycles
+    expect(state.db.sqlite.prepare(`SELECT cycle_id, is_current, call_state FROM manual_news_assessment_generation_cycles_v2
       WHERE lead_id = ? ORDER BY created_at, cycle_id`).all(state.leadId)).toEqual(expect.arrayContaining([
         { cycle_id: oldCycle.cycle_id, is_current: 0, call_state: 'superseded' },
         { cycle_id: nextCycle.cycle_id, is_current: 1, call_state: 'initial_started' },
@@ -671,10 +700,10 @@ describe('manual lead D1-backed dedupe', () => {
     if (!retried.ok) throw new Error('expected retry success');
     expect('assessment_generation' in retried.lead).toBe(false);
     expect(state.db.sqlite.prepare(`SELECT call_state, superseded_by_processing_owner
-      FROM manual_news_assessment_generation_cycles`).get()).toMatchObject({
+      FROM manual_news_assessment_generation_cycles_v2`).get()).toMatchObject({
       call_state: 'superseded',
     });
-    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_assessment_generation_cycles
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_assessment_generation_cycles_v2
       WHERE lead_id = ? AND is_current = 1`).get(state.leadId)).toEqual({ count: 0 });
   });
 
@@ -695,12 +724,12 @@ describe('manual lead D1-backed dedupe', () => {
       },
     });
 
-    state.db.sqlite.prepare(`UPDATE manual_news_assessment_generation_cycles
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_generation_cycles_v2
       SET processing_owner = 'stale-owner' WHERE lead_id = ?`).run(state.leadId);
     const mismatched = await getManualNewsLead(state.env, state.leadId);
     expect(mismatched && 'assessment_generation' in mismatched).toBe(false);
 
-    state.db.sqlite.prepare(`UPDATE manual_news_assessment_generation_cycles
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_generation_cycles_v2
       SET processing_owner = ? WHERE lead_id = ?`).run(PROCESSING_OWNER, state.leadId);
     state.db.sqlite.prepare(`UPDATE manual_news_leads SET status = 'needs_review', version = 5,
       processing_owner = NULL, processing_lease_until = NULL WHERE id = ?`).run(state.leadId);
@@ -1667,6 +1696,100 @@ describe('manual lead D1-backed dedupe', () => {
       `SELECT COUNT(*) AS count FROM manual_news_lead_audit
        WHERE action = 'stale_recovery' AND resulting_version = 5`,
     ).get()).toMatchObject({ count: statuses.length });
+  });
+
+  test.each(['initial_started', 'regeneration_started'] as const)(
+    'atomically supersedes the current %s generation cycle during stale recovery',
+    async (cycleState) => {
+      const state = fixture('verifying', 4);
+      const oldStore = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+      const initial = await oldStore.beginAssessmentGenerationCycle(state.leadId, 4);
+      if (cycleState === 'regeneration_started') {
+        await oldStore.recordAssessmentGenerationValidation(state.leadId, 4, {
+          generation_revision: 1, validation_code: 'non_atomic_source_object',
+          validation_path: 'source_facts[0].atomic_fact.object', regeneratable: true,
+        });
+        await oldStore.consumeAssessmentRegeneration(state.leadId, 4);
+      }
+      state.db.sqlite.prepare(`UPDATE manual_news_leads
+        SET processing_lease_until = 10 WHERE id = ?`).run(state.leadId);
+
+      const recovered = await recoverStaleManualNewsLeads(state.env, '2026-08-11', 100);
+
+      expect(recovered).toHaveLength(1);
+      expect(state.db.sqlite.prepare(`SELECT call_state, is_current, supersede_nonce,
+          superseded_by_processing_owner AS next_owner
+        FROM manual_news_assessment_generation_cycles_v2 WHERE cycle_id = ?`).get(initial.cycle_id))
+        .toMatchObject({
+          call_state: 'superseded', is_current: 0,
+          supersede_nonce: expect.stringMatching(/^assessment_generation_stale_supersede:/),
+          next_owner: `manual-news-${state.leadId}-v5`,
+        });
+      expect(state.db.sqlite.prepare(`SELECT action, mutation_nonce, resulting_version
+        FROM manual_news_lead_audit WHERE lead_id = ? AND action = 'assessment_generation_supersede'`)
+        .all(state.leadId)).toEqual([{
+        action: 'assessment_generation_supersede',
+        mutation_nonce: expect.stringMatching(/^assessment_generation_stale_supersede:/),
+        resulting_version: 5,
+      }]);
+      const recoveredOwner = `manual-news-${state.leadId}-v5`;
+      const recoveredStore = new D1ManualLeadProcessingStore(state.env, recoveredOwner, 1);
+      await recoveredStore.transition(state.leadId, 'validating', 'researching');
+      await recoveredStore.transition(state.leadId, 'researching', 'extracting');
+      await recoveredStore.transition(state.leadId, 'extracting', 'verifying');
+      await expect(recoveredStore.beginAssessmentGenerationCycle(state.leadId, 8)).resolves.toMatchObject({
+        call_state: 'initial_started', acquired_call: true,
+      });
+      expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
+        FROM manual_news_assessment_generation_cycles_v2
+        WHERE lead_id = ? AND is_current = 1`).get(state.leadId)).toEqual({ count: 1 });
+    },
+  );
+
+  test('recovers a stale lead without a v2 cycle and emits no supersede ghost audit', async () => {
+    const state = fixture('verifying', 4);
+    state.db.sqlite.prepare(`UPDATE manual_news_leads
+      SET processing_lease_until = 10 WHERE id = ?`).run(state.leadId);
+
+    await expect(recoverStaleManualNewsLeads(state.env, '2026-08-11', 100))
+      .resolves.toHaveLength(1);
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'assessment_generation_supersede'`).get(state.leadId))
+      .toEqual({ count: 0 });
+  });
+
+  test('stale recovery has one CAS winner and no loser cycle audit or ABA nonce reuse', async () => {
+    const state = fixture('verifying', 4);
+    const oldStore = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    const current = await oldStore.beginAssessmentGenerationCycle(state.leadId, 4);
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_generation_cycles_v2
+      SET call_state = 'superseded', is_current = 0, superseded_by_processing_owner = 'older-owner',
+          supersede_nonce = 'old-aba-nonce' WHERE cycle_id = ?`).run(current.cycle_id);
+    state.db.sqlite.prepare(`INSERT INTO manual_news_assessment_generation_cycles_v2 (
+      cycle_id, lead_id, processing_owner, base_version, call_state, regeneration_consumed,
+      is_current, start_nonce, created_at, updated_at
+    ) VALUES ('cycle-current-replacement', ?, 'stale-cycle-owner', 4, 'initial_started', 0, 1,
+      'replacement-start-nonce', 2, 2)`).run(state.leadId);
+    state.db.sqlite.prepare(`UPDATE manual_news_leads
+      SET processing_lease_until = 10 WHERE id = ?`).run(state.leadId);
+
+    const [left, right] = await Promise.all([
+      recoverStaleManualNewsLeads(state.env, '2026-08-11', 100),
+      recoverStaleManualNewsLeads(state.env, '2026-08-11', 100),
+    ]);
+
+    expect(left.length + right.length).toBe(1);
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'stale_recovery'`).get(state.leadId)).toEqual({ count: 1 });
+    expect(state.db.sqlite.prepare(`SELECT mutation_nonce FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'assessment_generation_supersede'`).all(state.leadId))
+      .toEqual([{ mutation_nonce: expect.not.stringMatching(/^old-aba-nonce$/) }]);
+    expect(state.db.sqlite.prepare(`SELECT call_state, is_current, supersede_nonce
+      FROM manual_news_assessment_generation_cycles_v2 WHERE cycle_id = 'cycle-current-replacement'`).get())
+      .toMatchObject({
+        call_state: 'superseded', is_current: 0,
+        supersede_nonce: expect.stringMatching(/^assessment_generation_stale_supersede:/),
+      });
   });
 
   test('marks a still-owned lead failed after workflow retry exhaustion and audits the terminal version', async () => {

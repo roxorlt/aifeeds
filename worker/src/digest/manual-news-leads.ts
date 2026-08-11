@@ -1621,14 +1621,34 @@ function isQuestionFramedEvidenceClause(value: string): boolean {
     || /^(?:为何|为什么|是否|如何|怎么|难道)/u.test(value.trim());
 }
 
+function leadingRegisteredEntityIdentity(value: string): string | null {
+  const normalized = normalizedSourceText(value).replace(/^[\p{P}\p{S}]+/gu, '');
+  const entries = Object.entries({
+    ...AUTHORITY_ENTITY_REGISTRY,
+    ...ORGANIZATION_ENTITY_REGISTRY,
+    ...PRODUCT_ENTITY_REGISTRY,
+  }).flatMap(([identity, aliases]) => aliases.map((alias) => ({ identity, alias })))
+    .sort((left, right) => right.alias.length - left.alias.length);
+  for (const entry of entries) {
+    const escaped = entry.alias.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&').replace(/\s+/gu, '\\s+');
+    const latin = /[a-z0-9]/iu.test(entry.alias);
+    const pattern = latin
+      ? new RegExp(`^${escaped}(?=$|[^a-z0-9])`, 'iu')
+      : new RegExp(`^${escaped}(?=$|[\\s，,。.!！？?；;：:、“”‘’（）()])`, 'u');
+    if (pattern.test(normalized)) return entry.identity;
+  }
+  return null;
+}
+
 function sourceFactSubjectMatchesClause(fact: ManualSourceAtomicFact, clause: string): boolean {
   const expected = canonicalSubjectIdentity(fact.atomic_fact.subject)
     || canonicalEntityRoleKey(fact.atomic_fact.subject);
   if (!expected) return false;
-  return structuredFactUnits(clause).some((unit) => {
+  const structuredMatch = structuredFactUnits(clause).some((unit) => {
     if (!unit.subject) return false;
     return (canonicalSubjectIdentity(unit.subject) || canonicalEntityRoleKey(unit.subject)) === expected;
-  }) || registeredEntityIdentities(clause).has(expected);
+  });
+  return structuredMatch || leadingRegisteredEntityIdentity(clause) === expected;
 }
 
 function sameStructuredEventTarget(fact: ManualSourceAtomicFact, clause: string): boolean {
@@ -1688,23 +1708,65 @@ function sameCoreProductAndSubject(fact: ManualSourceAtomicFact, clause: string)
   return anchors.length > 0 && anchors.every((anchor) => exactStructuredAnchorPresent(anchor, clause));
 }
 
-function directDenialEmbeddedClause(value: string, fact: ManualSourceAtomicFact): string | null {
+function mentionsCoreSubjectAndProduct(fact: ManualSourceAtomicFact, clause: string): boolean {
+  const expectedSubject = canonicalSubjectIdentity(fact.atomic_fact.subject)
+    || canonicalEntityRoleKey(fact.atomic_fact.subject);
+  if (!expectedSubject || !registeredEntityIdentities(clause).has(expectedSubject)) return false;
+  const expectedTargets = registeredEntityIdentities(fact.atomic_fact.object);
+  const actualTargets = registeredEntityIdentities(clause);
+  return expectedTargets.size > 0 && [...expectedTargets].every((target) => actualTargets.has(target));
+}
+
+interface DirectDenialClause {
+  controller: string;
+  embedded: string;
+  nominal_report: boolean;
+}
+
+function directDenialEmbeddedClause(value: string): DirectDenialClause | null {
   if (isQuestionFramedEvidenceClause(value)) return null;
   const normalized = normalizedSourceText(value);
-  const english = /^(.*?)\b(?:den(?:y|ies|ied)|refut(?:e|es|ed)|disput(?:e|es|ed)|reject(?:s|ed)?\s+(?:the\s+)?reports?|call(?:s|ed)?\s+(?:the\s+)?reports?)\b\s*(?:that\s+)?(.+?)(?:\s+(?:false|misleading))?[.!]?$/iu.exec(normalized);
+  const callFalse = /^(.*?)\bcall(?:s|ed)?\s+(?:the\s+)?reports?\s+(?:(that)\s+|of\s+)?(.+?)\s+(?:false|misleading)[.!]?$/iu.exec(normalized);
+  if (callFalse) {
+    const controller = callFalse[1].trim();
+    const embedded = callFalse[3].trim()
+      .replace(/^(?:the\s+)?(?:reports?|claims?)\s+(?:that\s+)?/iu, '')
+      .replace(/^(?:it|the company)\b/iu, controller);
+    return { controller, embedded, nominal_report: !callFalse[2] };
+  }
+  const english = /^(.*?)\b(?:den(?:y|ies|ied)|refut(?:e|es|ed)|disput(?:e|es|ed)|reject(?:s|ed)?)\b\s*(?:the\s+)?(?:reports?|claims?)?\s*(?:that\s+)?(.+?)(?:\s+(?:false|misleading))?[.!]?$/iu.exec(normalized);
   if (english) {
-    const subject = english[1].trim();
+    const controller = english[1].trim();
     const embedded = english[2].trim()
       .replace(/^(?:the\s+)?(?:reports?|claims?)\s+(?:that\s+)?/iu, '')
-      .replace(/^(?:it|the company)\b/iu, subject);
-    return `${subject} ${embedded}`.trim();
+      .replace(/^(?:it|the company)\b/iu, controller);
+    return { controller, embedded, nominal_report: false };
   }
   const chinese = /^(.*?)(?:否认|驳斥|反驳|质疑|拒绝承认|称(?:相关)?(?:报道|消息|传闻)(?:为|是)?(?:虚假|不实|错误|误导))\s*(?:有关|关于)?(.+?)(?:的)?(?:报道|消息|传闻)?(?:不实|错误|虚假|误导)?[。！]?$/u.exec(normalized);
-  if (chinese) return `${chinese[1].trim()}${chinese[2].trim()}`;
-  const sourceSubject = fact.atomic_fact.subject.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-  const callFalse = new RegExp(`^(${sourceSubject})\\s+call(?:s|ed)?\\s+(?:the\\s+)?reports?\\s+(?:that\\s+)?(.+?)\\s+(?:false|misleading)[.!]?$`, 'iu')
-    .exec(normalized);
-  return callFalse ? `${callFalse[1]} ${callFalse[2].replace(/^(?:it|the company)\b/iu, callFalse[1])}` : null;
+  return chinese
+    ? { controller: chinese[1].trim(), embedded: chinese[2].trim(), nominal_report: false }
+    : null;
+}
+
+function denialTargetsCoreEvent(fact: ManualSourceAtomicFact, denial: DirectDenialClause): boolean {
+  const expectedSubject = canonicalSubjectIdentity(fact.atomic_fact.subject)
+    || canonicalEntityRoleKey(fact.atomic_fact.subject);
+  const controller = canonicalSubjectIdentity(denial.controller)
+    || canonicalEntityRoleKey(denial.controller);
+  if (!expectedSubject || controller !== expectedSubject) return false;
+  const reconstructed = `${fact.atomic_fact.subject} ${denial.embedded}`.trim();
+  if (structurallyMatchesFactIgnoringAssertionStatus(fact, reconstructed)) return true;
+  const expectedActions = factActionOccurrences(fact.atomic_fact.predicate);
+  const actualActions = factActionOccurrences(denial.embedded);
+  if (expectedActions.length !== 1
+    || !actualActions.some((action) => action.action === expectedActions[0].action)
+    || !sameCoreProductAndSubject(fact, reconstructed)) return false;
+  const expectedParticipants = bilingualParticipantRoles(fact.atomic_fact.object);
+  const actualParticipants = bilingualParticipantRoles(denial.embedded);
+  if (actualParticipants.length > 0) {
+    return canonicalJson(expectedParticipants) === canonicalJson(actualParticipants);
+  }
+  return denial.nominal_report && expectedActions[0].action === 'ban';
 }
 
 function structurallyMatchesFactIgnoringAssertionStatus(
@@ -1726,26 +1788,36 @@ function evidenceClauseRelation(
   evidenceById: ReadonlyMap<string, ManualNewsEvidence>,
 ): DeterministicEvidenceRelation {
   let relatedButUnresolved = false;
+  const trustedRelationSource = evidence.reliable && evidence.source_type !== 'other';
   for (const fact of sourceFacts) {
     const subjectMatches = sourceFactSubjectMatchesClause(fact, clause.text);
     const targetMatches = subjectMatches && sameStructuredEventTarget(fact, clause.text);
     const productTargetMatches = sameCoreProductAndSubject(fact, clause.text);
     const questionFramed = isQuestionFramedEvidenceClause(clause.text);
     if (questionFramed) {
-      if (targetMatches || productTargetMatches) relatedButUnresolved = true;
+      if (targetMatches || productTargetMatches || mentionsCoreSubjectAndProduct(fact, clause.text)) {
+        relatedButUnresolved = true;
+      }
       continue;
     }
     const exactError = structuredFactUnitVerificationError(fact.text, clause.text);
     if (exactError === null) {
-      return evidence.reliable ? 'supports' : 'uncertain';
+      return evidence.reliable && clause.reliable ? 'supports' : 'uncertain';
     }
-    if (targetMatches && exactError === 'fact_verification_polarity_mismatch') return 'conflicts';
-    const embedded = directDenialEmbeddedClause(clause.text, fact);
-    if (embedded && structurallyMatchesFactIgnoringAssertionStatus(fact, embedded)) return 'conflicts';
+    if (targetMatches && exactError === 'fact_verification_polarity_mismatch') {
+      return trustedRelationSource ? 'conflicts' : 'uncertain';
+    }
+    const denial = directDenialEmbeddedClause(clause.text);
+    if (denial && denialTargetsCoreEvent(fact, denial)) {
+      return trustedRelationSource ? 'conflicts' : 'uncertain';
+    }
     const scopeChange = /(?:仅限|只适用|仅适用|部分适用|范围缩小|限于)|\b(?:only applies|limited to|restricted to|scope was narrowed)\b/iu.test(clause.text);
-    if ((targetMatches || productTargetMatches) && scopeChange) return 'conflicts';
+    if ((targetMatches || productTargetMatches) && scopeChange) {
+      return trustedRelationSource ? 'conflicts' : 'uncertain';
+    }
     const statusChange = /(?:恢复|取消|撤回|收回|撤销|反转|改为|随后更新|后来更新|状态变化)|\b(?:revers(?:e|es|ed)|updated|resum(?:e|es|ed)|withdrawn|withdrew|withdraws?|retract(?:s|ed)?|rescind(?:s|ed)?|cancelled|canceled|subsequently changed)\b/iu.test(clause.text);
     if ((targetMatches || productTargetMatches) && statusChange) {
+      if (!trustedRelationSource) return 'uncertain';
       const citedTimes = sourceFacts.flatMap((sourceFact) => sourceFact.evidence_ids)
         .map((id) => evidenceById.get(id)?.published_at || '')
         .map((value) => Date.parse(value))
@@ -1755,6 +1827,17 @@ function evidenceClauseRelation(
         return 'updates';
       }
       return 'conflicts';
+    }
+    const unresolvedDenial = /(?:未(?:能)?(?:确认|证实|验证)|无法(?:确认|证实|验证)|拒绝(?:确认|证实|验证)|\b(?:would|could|did|can)\s+not\s+(?:confirm|verify|validate|substantiate)|\b(?:cannot|can't|won't)\s+(?:confirm|verify|validate|substantiate))/iu.test(clause.text);
+    if ((targetMatches || productTargetMatches) && unresolvedDenial) {
+      return 'uncertain';
+    }
+    const expectedActions = factActionOccurrences(fact.atomic_fact.predicate);
+    const actualActions = factActionOccurrences(clause.text);
+    if (productTargetMatches && expectedActions.length === 1
+      && actualActions.some((action) => action.action === expectedActions[0].action)
+      && evidence.reliable) {
+      return 'supports';
     }
     if (!clause.reliable) {
       if (targetMatches || productTargetMatches) relatedButUnresolved = true;
@@ -1773,8 +1856,8 @@ function aggregateEvidenceRelations(
 ): DeterministicEvidenceRelation {
   if (relations.includes('updates')) return 'updates';
   if (relations.includes('conflicts')) return 'conflicts';
-  if (relations.includes('supports')) return 'supports';
   if (relations.includes('uncertain')) return 'uncertain';
+  if (relations.includes('supports')) return 'supports';
   return 'unrelated';
 }
 
@@ -1789,12 +1872,12 @@ function deterministicEvidenceRelation(
     evidenceClauseRelation(clause, evidence, sourceFacts, evidenceById)));
 }
 
-function deterministicDispositionQuoteRelation(
+function deterministicDispositionQuoteRelations(
   quote: string,
   evidence: ManualNewsEvidence,
   sourceFacts: readonly ManualSourceAtomicFact[],
   evidenceById: ReadonlyMap<string, ManualNewsEvidence>,
-): DeterministicEvidenceRelation {
+): DeterministicEvidenceRelation[] {
   const parsed = splitAtomicFactClauses(normalizedSourceText(quote));
   const clauses = (parsed.clauses.length ? parsed.clauses : [normalizedSourceText(quote)])
     .filter(Boolean)
@@ -1802,9 +1885,8 @@ function deterministicDispositionQuoteRelation(
       text,
       reliable: parsed.reliable && !parsed.has_unknown_compound,
     }));
-  if (!clauses.length) return 'uncertain';
-  return aggregateEvidenceRelations(clauses.map((clause) =>
-    evidenceClauseRelation(clause, evidence, sourceFacts, evidenceById)));
+  if (!clauses.length) return ['uncertain'];
+  return clauses.map((clause) => evidenceClauseRelation(clause, evidence, sourceFacts, evidenceById));
 }
 
 function validateGeneratedEvidenceDispositions(
@@ -2649,6 +2731,7 @@ export function buildManualLeadFactVerificationPrompt(input: {
       '中文投影新增事实用 fact_expansion，遗漏源事实槽位用 fact_omission，翻译改变语义用 translation_mismatch。不得把中文投影自身当证据，也不得用未映射 source fact 补齐。',
       'disposition_results 必须覆盖顶层每个 evidence disposition 恰好一次，并用该 evidence 自身的一段连续原文核验其 supports_core、contradicts_core、material_update、background 或 irrelevant 分类。不得只核验支持证据而忽略官方否认、撤回、范围限制或更晚更新。',
       '每个 disposition quote 必须先按原子子句拆分，再在同一子句内完整对齐 source_fact 的主体、动作、完整产品 target tuple、否定/情态、参与者/数量范围、状态与时间；只有公司名、任意 not/否认词或跨子句拼接都不构成支持、冲突或更新。',
+      '若一个 disposition 返回多段 quote，或单段 quote 含多个子句，每一段 quote 的每一个实义原子子句都必须分别满足同一 disposition；禁止用其中一条正确引文掩盖其他无关、冲突或无法解析的引文。',
       'deny/refute/dispute/reject reports/call reports false 等否认只有在其被否认的内嵌事件完整对齐 source_fact 时才是冲突；Why/是否等疑问式 rumor is misleading 标题不得当作主体正式否认。',
       '官方撤回、取消或反转同一限制即使缺少 published_at 也必须按冲突/不确定性阻断；无法可靠解析的 relation 必须 unsupported/needs_review，低可靠标题不得伪造 supports_core。',
       '只有所有 fact、projection 与 disposition 都 supported=true 且 issue_code=none 时才能形成有效结论；若存在已正确覆盖的 contradicts_core/material_update，overall_verdict 必须为 conflicted 且 assessment recommendation 必须为 needs_review，否则 overall_verdict 为 supported；任一未支持项则为 unsupported。',
@@ -4866,7 +4949,7 @@ export function validateManualLeadFactVerification(
         throw new Error('invalid_disposition_verification_quote');
       }
       const referencedFacts = sourceFacts.filter((fact) => definition.source_fact_ids.includes(fact.fact_id));
-      const quoteRelations = sourceQuotes.map((quote) => deterministicDispositionQuoteRelation(
+      const quoteRelations = sourceQuotes.flatMap((quote) => deterministicDispositionQuoteRelations(
         quote.quote,
         source,
         referencedFacts.length ? referencedFacts : sourceFacts,
@@ -4879,12 +4962,15 @@ export function validateManualLeadFactVerification(
           ? deterministicEvidenceRelation(source, referencedFacts, byEvidenceId)
           : null;
         const quoteRelationMatches = definition.disposition === 'supports_core'
-          ? quoteRelations.includes('supports')
+          ? quoteRelations.every((relation) => relation === 'supports')
           : definition.disposition === 'contradicts_core'
-            ? quoteRelations.includes('conflicts')
+            ? quoteRelations.every((relation) => relation === 'conflicts')
             : definition.disposition === 'material_update'
-              ? quoteRelations.includes('updates')
-              : quoteRelations.every((quoteRelation) => ['unrelated', 'uncertain'].includes(quoteRelation));
+              ? quoteRelations.every((relation) => relation === 'updates')
+              : relation === 'uncertain'
+                ? definition.disposition === 'background'
+                  && quoteRelations.every((quoteRelation) => quoteRelation === 'uncertain')
+                : quoteRelations.every((quoteRelation) => quoteRelation === 'unrelated');
         const locallyConsistent = (relation === 'supports'
           ? definition.disposition === 'supports_core'
           : relation === 'conflicts'

@@ -280,7 +280,7 @@ async function loadCurrentAssessmentGenerationAudit(
     `/* manual_generation:current_api */ SELECT first_validation_code, first_validation_path,
        last_validation_code, last_validation_path, regeneration_consumed,
        processing_owner, base_version, call_state
-     FROM manual_news_assessment_generation_cycles
+     FROM manual_news_assessment_generation_cycles_v2
      WHERE lead_id = ? AND is_current = 1 AND call_state <> 'superseded'`,
   ).bind(leadId).first<{
     first_validation_code: string | null;
@@ -478,7 +478,7 @@ export async function retryManualNewsLead(
   }
   const generationCycle = await env.DB.prepare(
     `/* manual_generation:retry_current */ SELECT cycle_id
-     FROM manual_news_assessment_generation_cycles
+     FROM manual_news_assessment_generation_cycles_v2
      WHERE lead_id = ? AND is_current = 1 AND call_state <> 'superseded'`,
   ).bind(id).first<{ cycle_id: string }>();
   const previousGenerationCycleId = generationCycle?.cycle_id || null;
@@ -546,7 +546,7 @@ export async function retryManualNewsLead(
       id, nextVersion, idempotencyKey, mutationNonce,
     ),
     env.DB.prepare(
-      `/* manual_generation:retry_supersede */ UPDATE manual_news_assessment_generation_cycles
+      `/* manual_generation:retry_supersede */ UPDATE manual_news_assessment_generation_cycles_v2
        SET call_state = 'superseded', superseded_by_processing_owner = ?, is_current = 0,
            supersede_nonce = ?, updated_at = ?
        WHERE cycle_id = ? AND lead_id = ? AND call_state <> 'superseded'
@@ -561,7 +561,7 @@ export async function retryManualNewsLead(
          resulting_version, metadata_json, created_at
        ) SELECT ?, 'assessment_generation_supersede', 'validating', 'validating', NULL, ?, ?, ?, ?
        WHERE ${retryGuard} AND EXISTS (
-         SELECT 1 FROM manual_news_assessment_generation_cycles cycle
+         SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
          WHERE cycle.cycle_id = ? AND cycle.lead_id = ? AND cycle.call_state = 'superseded'
            AND cycle.superseded_by_processing_owner = ? AND cycle.supersede_nonce = ?
        )`,
@@ -710,23 +710,97 @@ export async function recoverStaleManualNewsLeads(
   ).bind(date, now).all<{ id: string; status: ManualNewsLeadStatus; version: number }>();
   const recovered: ManualNewsLeadRecord[] = [];
   for (const row of stale.results || []) {
+    const currentGeneration = await env.DB.prepare(
+      `/* manual_generation:stale_current */ SELECT cycle_id
+       FROM manual_news_assessment_generation_cycles_v2
+       WHERE lead_id = ? AND is_current = 1 AND call_state <> 'superseded'`,
+    ).bind(row.id).first<{ cycle_id: string }>();
+    const previousGenerationCycleId = currentGeneration?.cycle_id || null;
     const key = `stale-recovery:${row.version}`;
     const nextVersion = Number(row.version) + 1;
     const processingOwner = manualNewsLeadProcessingOwner(row.id, nextVersion);
     const mutationNonce = createMutationNonce('stale_recovery');
+    const supersedeNonce = createMutationNonce('assessment_generation_stale_supersede');
+    const generationSnapshotGuard = previousGenerationCycleId
+      ? `AND EXISTS (
+           SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
+           WHERE cycle.cycle_id = ? AND cycle.lead_id = manual_news_leads.id
+             AND cycle.is_current = 1 AND cycle.call_state <> 'superseded'
+         )`
+      : `AND NOT EXISTS (
+           SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
+           WHERE cycle.lead_id = manual_news_leads.id AND cycle.is_current = 1
+             AND cycle.call_state <> 'superseded'
+         )`;
     const mutation = env.DB.prepare(
       `/* manual_lead:recover_stale */ UPDATE manual_news_leads SET
          status = 'validating', version = version + 1, error_code = NULL, error_message = NULL,
          last_mutation_kind = 'stale_recovery', last_mutation_idempotency_key = ?,
          last_mutation_nonce = ?, processing_owner = ?, processing_lease_until = ?, updated_at = ?
        WHERE id = ? AND status = ? AND version = ?
-         AND (processing_lease_until IS NULL OR processing_lease_until < ?)`,
-    ).bind(key, mutationNonce, processingOwner, now + PROCESSING_LEASE_MS, now, row.id, row.status, row.version, now);
-    const changed = await runAuditedMutation(env, mutation, auditMutationStatement(env, {
+         AND (processing_lease_until IS NULL OR processing_lease_until < ?)
+         ${generationSnapshotGuard}`,
+    ).bind(
+      key, mutationNonce, processingOwner, now + PROCESSING_LEASE_MS, now,
+      row.id, row.status, row.version, now,
+      ...(previousGenerationCycleId ? [previousGenerationCycleId] : []),
+    );
+    const recoveryAudit = auditMutationStatement(env, {
       leadId: row.id, action: 'stale_recovery', mutationKind: 'stale_recovery', mutationNonce,
       fromStatus: row.status, toStatus: 'validating',
       idempotencyKey: key, resultingVersion: nextVersion, createdAt: now,
-    }));
+    });
+    const recoveredLeadGuard = `EXISTS (
+      SELECT 1 FROM manual_news_leads lead
+      WHERE lead.id = ? AND lead.version = ? AND lead.status = 'validating'
+        AND lead.last_mutation_kind = 'stale_recovery'
+        AND lead.last_mutation_idempotency_key = ? AND lead.last_mutation_nonce = ?
+        AND lead.processing_owner = ?
+    )`;
+    const results = await env.DB.batch([
+      mutation,
+      recoveryAudit,
+      env.DB.prepare(
+        `/* manual_generation:stale_supersede */ UPDATE manual_news_assessment_generation_cycles_v2
+         SET call_state = 'superseded', superseded_by_processing_owner = ?, is_current = 0,
+             supersede_nonce = ?, updated_at = ?
+         WHERE cycle_id = ? AND lead_id = ? AND is_current = 1
+           AND call_state <> 'superseded' AND supersede_nonce IS NULL
+           AND ${recoveredLeadGuard}`,
+      ).bind(
+        processingOwner, supersedeNonce, now, previousGenerationCycleId, row.id,
+        row.id, nextVersion, key, mutationNonce, processingOwner,
+      ),
+      env.DB.prepare(
+        `/* manual_generation:stale_supersede_audit */ INSERT INTO manual_news_lead_audit (
+           lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
+           resulting_version, metadata_json, created_at
+         ) SELECT ?, 'assessment_generation_supersede', 'validating', 'validating', NULL, ?, ?, ?, ?
+         WHERE ${recoveredLeadGuard} AND EXISTS (
+           SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
+           WHERE cycle.cycle_id = ? AND cycle.lead_id = ? AND cycle.call_state = 'superseded'
+             AND cycle.is_current = 0 AND cycle.superseded_by_processing_owner = ?
+             AND cycle.supersede_nonce = ?
+         )`,
+      ).bind(
+        row.id, supersedeNonce, nextVersion, JSON.stringify({
+          cycle_id: previousGenerationCycleId,
+          superseded_by_processing_owner: processingOwner,
+          previous_lead_version: row.version,
+          next_lead_version: nextVersion,
+          recovery_nonce: mutationNonce,
+        }), now,
+        row.id, nextVersion, key, mutationNonce, processingOwner,
+        previousGenerationCycleId, row.id, processingOwner, supersedeNonce,
+      ),
+    ]) as Array<{ meta?: { changes?: number } }>;
+    const changed = auditedMutationChanges(results, 0, 1);
+    const superseded = Number(results[2]?.meta?.changes || 0);
+    const supersedeAudit = Number(results[3]?.meta?.changes || 0);
+    const expectedSupersede = changed && previousGenerationCycleId ? 1 : 0;
+    if (superseded !== expectedSupersede || supersedeAudit !== expectedSupersede) {
+      throw new Error('assessment_generation_stale_supersede_causality_mismatch');
+    }
     if (!changed) continue;
     const lead = await getManualNewsLead(env, row.id);
     if (lead) recovered.push(lead);
@@ -770,7 +844,7 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     const row = await this.env.DB.prepare(
       `/* manual_generation:current_fenced */ SELECT cycle.*
        FROM manual_news_leads lead
-       JOIN manual_news_assessment_generation_cycles cycle
+       JOIN manual_news_assessment_generation_cycles_v2 cycle
          ON cycle.lead_id = lead.id AND cycle.is_current = 1
        WHERE lead.id = ? AND lead.version = ? AND lead.status = 'verifying'
          AND lead.processing_owner = ? AND lead.processing_attempt = ?
@@ -798,11 +872,11 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     )`;
     const statements = [
       this.env.DB.prepare(
-        `/* manual_generation:insert_cycle */ INSERT OR IGNORE INTO manual_news_assessment_generation_cycles (
+        `/* manual_generation:insert_cycle */ INSERT OR IGNORE INTO manual_news_assessment_generation_cycles_v2 (
            cycle_id, lead_id, processing_owner, base_version, call_state,
            regeneration_consumed, is_current, start_nonce, created_at, updated_at
          ) SELECT ?, ?, ?, ?, 'initial_started', 0, 1, ?, ?, ? WHERE ${leadGuard}
-           AND NOT EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles current
+           AND NOT EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles_v2 current
              WHERE current.lead_id = ? AND current.is_current = 1)`,
       ).bind(
         cycleId, id, owner, expectedVersion, mutationNonce, now, now,
@@ -810,10 +884,10 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
         id,
       ),
       this.env.DB.prepare(
-        `/* manual_generation:insert_revision */ INSERT OR IGNORE INTO manual_news_assessment_generation_revisions (
+        `/* manual_generation:insert_revision */ INSERT OR IGNORE INTO manual_news_assessment_generation_revisions_v2 (
            cycle_id, generation_revision, call_kind, call_state, start_nonce, created_at
          ) SELECT ?, 1, 'initial', 'started', ?, ? WHERE ${leadGuard}
-           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles cycle
+           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
              WHERE cycle.cycle_id = ? AND cycle.call_state = 'initial_started'
                AND cycle.is_current = 1 AND cycle.start_nonce = ?)`,
       ).bind(
@@ -827,11 +901,11 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
            resulting_version, metadata_json, created_at
          ) SELECT ?, 'assessment_generation_start_1', 'verifying', 'verifying', NULL, ?, ?, ?, ?
          WHERE ${leadGuard} AND EXISTS (
-           SELECT 1 FROM manual_news_assessment_generation_revisions revision
+           SELECT 1 FROM manual_news_assessment_generation_revisions_v2 revision
            WHERE revision.cycle_id = ? AND revision.generation_revision = 1
              AND revision.call_state = 'started' AND revision.start_nonce = ?
          ) AND EXISTS (
-           SELECT 1 FROM manual_news_assessment_generation_cycles cycle
+           SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
            WHERE cycle.cycle_id = ? AND cycle.start_nonce = ? AND cycle.is_current = 1
          )`,
       ).bind(
@@ -909,12 +983,12 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     )`;
     const statements = [
       this.env.DB.prepare(
-        `/* manual_generation:complete_revision */ UPDATE manual_news_assessment_generation_revisions
+        `/* manual_generation:complete_revision */ UPDATE manual_news_assessment_generation_revisions_v2
          SET call_state = ?, validation_code = ?, validation_path = ?,
              validated_assessment_json = ?, provider_failure_json = ?, result_nonce = ?, completed_at = ?
          WHERE cycle_id = ? AND generation_revision = ? AND call_state = 'started'
            AND result_nonce IS NULL AND ${guard}
-           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles cycle
+           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
              WHERE cycle.cycle_id = ? AND cycle.is_current = 1
                AND cycle.processing_owner = ? AND cycle.base_version = ?)`,
       ).bind(
@@ -925,7 +999,7 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
         current.cycle_id, owner, expectedVersion,
       ),
       this.env.DB.prepare(
-        `/* manual_generation:update_cycle */ UPDATE manual_news_assessment_generation_cycles
+        `/* manual_generation:update_cycle */ UPDATE manual_news_assessment_generation_cycles_v2
          SET call_state = ?,
              first_validation_code = CASE WHEN ? = 1 THEN ? ELSE first_validation_code END,
              first_validation_path = CASE WHEN ? = 1 THEN ? ELSE first_validation_path END,
@@ -935,7 +1009,7 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
          WHERE cycle_id = ? AND call_state = ? AND is_current = 1
            AND processing_owner = ? AND base_version = ?
            AND ${guard}
-           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_revisions revision
+           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_revisions_v2 revision
              WHERE revision.cycle_id = ? AND revision.generation_revision = ?
                AND revision.call_state = ? AND revision.result_nonce = ?)`,
       ).bind(
@@ -953,10 +1027,10 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
            lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
            resulting_version, metadata_json, created_at
          ) SELECT ?, ?, 'verifying', 'verifying', NULL, ?, ?, ?, ? WHERE ${guard}
-           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles cycle
+           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
              WHERE cycle.cycle_id = ? AND cycle.is_current = 1
                AND cycle.last_result_nonce = ?)
-           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_revisions revision
+           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_revisions_v2 revision
              WHERE revision.cycle_id = ? AND revision.generation_revision = ?
                AND revision.call_state = ? AND revision.validation_code = ?
                AND revision.result_nonce = ?)`,
@@ -1007,7 +1081,7 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     )`;
     const statements = [
       this.env.DB.prepare(
-        `/* manual_generation:consume_regeneration */ UPDATE manual_news_assessment_generation_cycles
+        `/* manual_generation:consume_regeneration */ UPDATE manual_news_assessment_generation_cycles_v2
          SET regeneration_consumed = 1, call_state = 'regeneration_started',
              regeneration_nonce = ?, updated_at = ?
          WHERE cycle_id = ? AND call_state = 'regeneration_ready' AND regeneration_consumed = 0
@@ -1015,10 +1089,10 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
            AND regeneration_nonce IS NULL AND ${guard}`,
       ).bind(mutationNonce, now, current.cycle_id, owner, expectedVersion, id, expectedVersion, owner, attempt),
       this.env.DB.prepare(
-        `/* manual_generation:insert_regeneration_revision */ INSERT OR IGNORE INTO manual_news_assessment_generation_revisions (
+        `/* manual_generation:insert_regeneration_revision */ INSERT OR IGNORE INTO manual_news_assessment_generation_revisions_v2 (
            cycle_id, generation_revision, call_kind, call_state, start_nonce, created_at
          ) SELECT ?, 2, 'regeneration', 'started', ?, ? WHERE ${guard}
-           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles cycle
+           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
              WHERE cycle.cycle_id = ? AND cycle.call_state = 'regeneration_started'
                AND cycle.regeneration_consumed = 1 AND cycle.is_current = 1
                AND cycle.regeneration_nonce = ?)`,
@@ -1033,11 +1107,11 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
            resulting_version, metadata_json, created_at
          ) SELECT ?, 'assessment_generation_start_2', 'verifying', 'verifying', NULL, ?, ?, ?, ?
          WHERE ${guard} AND EXISTS (
-           SELECT 1 FROM manual_news_assessment_generation_revisions revision
+           SELECT 1 FROM manual_news_assessment_generation_revisions_v2 revision
            WHERE revision.cycle_id = ? AND revision.generation_revision = 2
              AND revision.call_state = 'started' AND revision.start_nonce = ?
          ) AND EXISTS (
-           SELECT 1 FROM manual_news_assessment_generation_cycles cycle
+           SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
            WHERE cycle.cycle_id = ? AND cycle.regeneration_nonce = ? AND cycle.is_current = 1
          )`,
       ).bind(

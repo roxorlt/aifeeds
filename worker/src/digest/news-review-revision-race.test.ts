@@ -47,6 +47,7 @@ class SerialSqliteD1 {
     this.sqlite.exec(fs.readFileSync(path.join(migrations, '033-manual-news-leads.sql'), 'utf8'));
     this.sqlite.exec(fs.readFileSync(path.join(migrations, '034-manual-news-assessment-verifications.sql'), 'utf8'));
     this.sqlite.exec(fs.readFileSync(path.join(migrations, '035-manual-news-assessment-generation-cycles.sql'), 'utf8'));
+    this.sqlite.exec(fs.readFileSync(path.join(migrations, '036-manual-news-assessment-generation-cycles-v2.sql'), 'utf8'));
   }
 
   prepare(sql: string) {
