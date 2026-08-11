@@ -1077,7 +1077,17 @@ interface FactControlChainParse {
   has_unknown_predicate: boolean;
 }
 
-const CONTROL_OBJECT_NOUN_HEAD = '(?:模型训练|训练模型|模型|权重|服务|系统|平台|工具|计划|项目|产品|市场|业务|运营|协议|代码|数据集|能力|功能|训练|开发)';
+const CONTROL_OBJECT_NOUN_HEADS = [
+  '模型训练', '训练模型', '数据集', '模型', '权重', '服务', '系统', '平台', '工具', '计划',
+  '项目', '产品', '市场', '业务', '运营', '协议', '代码', '能力', '功能', '训练', '开发',
+] as const;
+const CONTROL_OBJECT_NOUN_HEADS_BY_LENGTH = [...CONTROL_OBJECT_NOUN_HEADS]
+  .sort((left, right) => Array.from(right).length - Array.from(left).length);
+const CONTROL_OBJECT_NOUN_HEAD = `(?:${CONTROL_OBJECT_NOUN_HEADS.join('|')})`;
+
+function longestControlObjectNounHeadSuffix(value: string): string | null {
+  return CONTROL_OBJECT_NOUN_HEADS_BY_LENGTH.find((head) => value.endsWith(head)) || null;
+}
 
 function controlSubjectSegmentFullyConsumed(
   value: string,
@@ -1123,11 +1133,10 @@ function isAllowedChineseNominalComponent(value: string): boolean {
   const phrase = value.normalize('NFKC').replace(/\s+/gu, '');
   if (!phrase || Array.from(phrase).length > 48) return false;
   if (containsRegisteredOrganization(phrase)) return false;
-  const heads = [...phrase.matchAll(new RegExp(CONTROL_OBJECT_NOUN_HEAD, 'gu'))];
-  const finalHead = phrase.match(new RegExp(`${CONTROL_OBJECT_NOUN_HEAD}$`, 'u'));
-  if (!finalHead || finalHead.index === undefined) return false;
-  if (heads.length > 1) return CHINESE_ALLOWED_MULTI_HEAD_NOMINALS.has(phrase);
-  const prefix = phrase.slice(0, finalHead.index);
+  if (CHINESE_ALLOWED_MULTI_HEAD_NOMINALS.has(phrase)) return true;
+  const finalHead = longestControlObjectNounHeadSuffix(phrase);
+  if (!finalHead) return false;
+  const prefix = phrase.slice(0, -finalHead.length);
   return !prefix || new RegExp(
     `^(?:${CHINESE_AI_NOMINAL_DESCRIPTOR_SOURCE})+$`,
     'iu',

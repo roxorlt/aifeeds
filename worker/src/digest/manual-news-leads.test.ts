@@ -699,6 +699,29 @@ describe('manual news lead domain', () => {
   });
 
   test.each([
+    'OpenAI发布代码生成模型。',
+    'OpenAI发布代码分析工具。',
+    'OpenAI发布训练数据集。',
+  ])('treats a noun-head word before the longest terminal noun head as a descriptor: %s', (text) => {
+    const fixture = supportedTextVerification(text, text);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    'OpenAI发布代码生成模型百度升级系统。',
+    'OpenAI发布代码分析工具Acme造模型。',
+    'OpenAI发布训练数据集并训练GPT 6。',
+    'OpenAI发布代码模型生成系统。',
+    'OpenAI发布训练系统数据集。',
+  ])('does not let longest-suffix parsing hide a second event or noun phrase: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
+  test.each([
     'OpenAI发布芯片设计模型百度升级系统。',
     '法院命令OpenAI停止发布多模态推理系统腾讯改平台。',
     'OpenAI发布图像生成模型Acme造工具。',
