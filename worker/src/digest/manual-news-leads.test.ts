@@ -230,6 +230,51 @@ function alibabaBanGeneratedAssessment(
   };
 }
 
+function singleRegisteredActionGeneratedAssessment(input: {
+  source_predicate: string;
+  projection_predicate: string;
+  source_object?: string;
+  projection_object?: string;
+}) {
+  const sourceObject = input.source_object ?? 'Claude model';
+  const projectionObject = input.projection_object ?? 'Claude模型';
+  return {
+    event_key: 'anthropic-registered-action-morphology-2026-08-11',
+    event_type: 'industry_event',
+    material_update: false,
+    score: 80,
+    recommendation: 'needs_review',
+    occurred_at: null,
+    uncertainties: [],
+    matched_event_key: null,
+    source_facts: [{
+      fact_ref: 'fact-01',
+      source_language: 'en',
+      atomic_fact: {
+        subject: 'Anthropic', subject_role: 'organization',
+        predicate: input.source_predicate, object: sourceObject,
+      },
+      evidence_ids: [techCrunchAlibabaBan.id],
+    }],
+    editorial_projection: {
+      title: {
+        projection_ref: 'title-01', source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: 'Anthropic', subject_role: 'organization',
+          predicate: input.projection_predicate, object: projectionObject,
+        },
+      },
+      summary: [{
+        projection_ref: 'summary-01', source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: 'Anthropic', subject_role: 'organization',
+          predicate: input.projection_predicate, object: projectionObject,
+        },
+      }],
+    },
+  };
+}
+
 async function createMaliciouslySupportedAlibabaProjectionProof(input: {
   projection?: { subject?: string; predicate?: string; object?: string };
   source?: { predicate?: string; object?: string };
@@ -701,6 +746,69 @@ describe('manual news lead domain', () => {
       projection: { predicate: projectionPredicate },
       quote: `Alibaba ${quotePredicate} employees from using Claude Code.`,
     })).rejects.toThrow(/fact_verification_modality_mismatch/);
+  });
+
+  test.each([
+    'can ban',
+    'would ban',
+    'will have banned',
+    'would have banned',
+    'is ban',
+    'are ban',
+  ])('fails closed when the supporting quote predicate cannot be structurally parsed: %s', async (
+    quotePredicate,
+  ) => {
+    await expect(createMaliciouslySupportedAlibabaProjectionProof({
+      source: { predicate: 'bans' },
+      projection: { predicate: '禁止' },
+      quote: `Alibaba ${quotePredicate} employees from using Claude Code.`,
+    })).rejects.toThrow(/fact_verification_modality_mismatch/);
+  });
+
+  test.each([
+    ['has withdrawn', '已退出', 'Claude model', 'Claude模型'],
+    ['has gained approval', '已获批', 'Claude model', 'Claude模型'],
+    ['has applied for approval', '已申请审批', 'Claude model', 'Claude模型'],
+    ['has filed a lawsuit', '已起诉', 'Claude model', 'Claude模型'],
+    ['has called for', '已呼吁', 'Claude model', 'Claude模型'],
+    ['has raised funding', '已融资', 'Claude model', 'Claude模型'],
+    ['has bought', '已收购', 'Claude model', 'Claude模型'],
+    ['has sold', '已出售', 'Claude model', 'Claude模型'],
+    ['has laid off', '已裁员', 'employees', '员工'],
+  ])('uses the registered action finite head for a legal perfect construction: %s', async (
+    sourcePredicate,
+    projectionPredicate,
+    sourceObject,
+    projectionObject,
+  ) => {
+    const raw = singleRegisteredActionGeneratedAssessment({
+      source_predicate: sourcePredicate,
+      projection_predicate: projectionPredicate,
+      source_object: sourceObject,
+      projection_object: projectionObject,
+    });
+    await expect(createMaliciouslySupportedGeneratedProjectionProof(
+      raw,
+      `Anthropic ${sourcePredicate} ${sourceObject}.`,
+    )).resolves.toBe(true);
+  });
+
+  test.each([
+    ['has withdrawn', '已退出', 'withdraws'],
+    ['has gained approval', '已获批', 'has applied for approval'],
+  ])('does not let a legal multiword finite head hide deleted or changed semantics: %s', async (
+    sourcePredicate,
+    projectionPredicate,
+    quotePredicate,
+  ) => {
+    const raw = singleRegisteredActionGeneratedAssessment({
+      source_predicate: sourcePredicate,
+      projection_predicate: projectionPredicate,
+    });
+    await expect(createMaliciouslySupportedGeneratedProjectionProof(
+      raw,
+      `Anthropic ${quotePredicate} Claude model.`,
+    )).rejects.toThrow(/fact_verification_(?:modality|action)_mismatch/);
   });
 
   test.each([

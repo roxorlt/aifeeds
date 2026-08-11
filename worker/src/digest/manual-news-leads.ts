@@ -633,10 +633,14 @@ function bilingualModalitySlots(
   };
 }
 
-function englishActionMorphology(surface: string): 'base' | 'progressive' | 'participle' {
-  const normalized = surface.normalize('NFKC').toLowerCase().replace(/\s+/gu, ' ').trim();
+function englishActionMorphology(
+  occurrence: FactActionOccurrence,
+): 'base' | 'progressive' | 'participle' {
+  if (!occurrence.finite_surface) throw new Error('invalid_claim_predicate');
+  const normalized = occurrence.finite_surface.normalize('NFKC').toLowerCase()
+    .replace(/\s+/gu, ' ').trim();
   if (/(?:ing|ying|pping|nning)$/u.test(normalized)) return 'progressive';
-  if (/(?:ed|ned|pped|ied|bought|sold|signed|approved|laid\s+off)$/u.test(normalized)) {
+  if (/(?:ed|ned|pped|ied|bought|sold|withdrawn|laid)$/u.test(normalized)) {
     return 'participle';
   }
   return 'base';
@@ -695,7 +699,7 @@ function structuredEnglishPredicateModality(
     || consume(["won't"]);
   if (negative !== occurrence.negated) throw new Error('invalid_claim_predicate');
 
-  const form = englishActionMorphology(occurrence.surface);
+  const form = englishActionMorphology(occurrence);
   const exact = (...expected: string[]) => tokens.length === expected.length
     && expected.every((token, index) => tokens[index] === token);
   if (!tokens.length) {
@@ -2217,42 +2221,49 @@ interface FactActionOccurrence {
   index: number;
   end: number;
   surface: string;
+  finite_surface: string | null;
   negated: boolean;
   modality: 'weak' | 'asserted' | 'completed';
 }
 
-const FACT_ACTION_PATTERNS: ReadonlyArray<[FactAction, RegExp]> = [
-  ['apply_approval', /(?:申请(?:批准|审批)|寻求批准)|\b(?:appl(?:y|ies|ied)\s+for|seek(?:s|ing)?)\s+approval\b/giu],
-  ['acquire', /(?:收购|并购)|\b(?:acquir(?:e|es|ed)|buy(?:s|ing)?|bought)\b/giu],
-  ['sell', /(?:出售|售出)|\b(?:sell(?:s|ing)?|sold|divest(?:s|ed)?)\b/giu],
-  ['expand', /(?:扩大|扩展|拓展)|\b(?:expand(?:s|ed)?|extend(?:s|ed)?)\b/giu],
-  ['exit', /(?:退出|撤出)|\b(?:exit(?:s|ed)?|withdraw(?:s|n)?)\b/giu],
-  ['add', /(?:加入|添加|新增|增加|带有)|\b(?:add(?:s|ed|ing)?|includ(?:e|es|ed)|attach(?:es|ed)?)\b/giu],
-  ['remove', /(?:移除|删除|撤下)|\b(?:remov(?:e|es|ed)|delet(?:e|es|ed))\b/giu],
-  ['support', /(?:支持|提供)|\b(?:support(?:s|ed)?|provid(?:e|es|ed))\b/giu],
-  ['approve', /(?:获批|批准|通过(?:审核|审批|批准))|\b(?:approv(?:e|es|ed)|gain(?:s|ed)?\s+approval)\b/giu],
-  ['reject', /(?:拒绝|否决)|\b(?:reject(?:s|ed)?|refus(?:e|es|ed))\b/giu],
-  ['disclose', /(?:披露|说明|文档)|\b(?:disclos(?:e|es|ed)|document(?:s|ed|ation)?|state(?:s|d))\b/giu],
-  ['release', /(?:发布|推出|上线)|\b(?:releas(?:e|es|ed)|launch(?:es|ed)?)\b/giu],
-  ['request', /(?:请求|呼吁|建议|敦促)|\b(?:request(?:s|ed)?|recommend(?:s|ed)?|urge(?:s|d)?|call(?:s|ed)?\s+for)\b/giu],
-  ['regulatory_require', /(?:法规要求|法案要求|监管要求|要求)|\brequir(?:e|es|ed)\b/giu],
-  ['mandate', /(?:强制|必须)|\b(?:mandat(?:e|es|ed)|must)\b/giu],
-  ['order', /(?:下令|命令)|\b(?:order(?:s|ed))\b/giu],
-  ['pause', /(?:停止|暂停)|\b(?:stop(?:s|ped|ping)?|paus(?:e|es|ed|ing))\b/giu],
-  ['invest', /(?:投资)|\b(?:invest(?:s|ed|ing|ment)?)\b/giu],
-  ['finance', /(?:融资)|\b(?:financ(?:e|es|ed|ing)|fundrais(?:e|es|ing)|raised?\s+funding)\b/giu],
-  ['sign', /(?:签署|签订|签约)|\b(?:sign(?:s|ed|ing))\b/giu],
-  ['sue', /(?:起诉|提起诉讼)|\b(?:su(?:e|es|ed|ing)|file(?:s|d)?\s+(?:a\s+)?lawsuit)\b/giu],
-  ['ban', /(?:禁止|禁用)|\b(?:ban(?:s|ned|ning)?|prohibit(?:s|ed|ing)?)\b/giu],
-  ['open_source', /(?:开源)|\b(?:open[ -]?sourc(?:e|es|ed|ing))\b/giu],
-  ['train', /(?:训练)|\b(?:train(?:s|ed|ing))\b/giu],
-  ['partner', /(?:合作)|\b(?:partner(?:s|ed|ing)?|collaborat(?:e|es|ed|ing|ion))\b/giu],
-  ['layoff', /(?:裁员)|\b(?:lay(?:s|ing)?\s+off|laid\s+off|job\s+cuts?)\b/giu],
-  ['decide', /(?:决定)|\b(?:decid(?:e|es|ed|ing))\b/giu],
-  ['discuss', /(?:讨论|商议|磋商)|\b(?:discuss(?:es|ed|ing)?|deliberat(?:e|es|ed|ing))\b/giu],
-  ['deny', /(?:否认)|\b(?:den(?:y|ies|ied|ying))\b/giu],
-  ['open_access', /(?:开放)|\b(?:open(?:s|ed|ing)?\s+(?:access|service))\b/giu],
-  ['limit_scope', /(?:受限|限定|限于|限制(?:为|在)?)|\b(?:limit(?:s|ed|ing)?|restrict(?:s|ed|ing)?|(?:cover|support)(?:s|ed|ing)?\s+[^.;,]{0,60}(?:\bonly\b|\bsupported\s+(?:models?|products?)\b))/giu],
+type FactActionPattern = readonly [
+  action: FactAction,
+  pattern: RegExp,
+  englishFiniteHead: RegExp,
+];
+
+const FACT_ACTION_PATTERNS: ReadonlyArray<FactActionPattern> = [
+  ['apply_approval', /(?:申请(?:批准|审批)|寻求批准)|\b(?:appl(?:y|ies|ied)\s+for|seek(?:s|ing)?)\s+approval\b/giu, /^(?:appl(?:y|ies|ied)|seek(?:s|ing)?)/iu],
+  ['acquire', /(?:收购|并购)|\b(?:acquir(?:e|es|ed)|buy(?:s|ing)?|bought)\b/giu, /^(?:acquir(?:ed|es|e)|buy(?:ing|s)?|bought)\b/iu],
+  ['sell', /(?:出售|售出)|\b(?:sell(?:s|ing)?|sold|divest(?:s|ed)?)\b/giu, /^(?:sell(?:s|ing)?|sold|divest(?:s|ed)?)/iu],
+  ['expand', /(?:扩大|扩展|拓展)|\b(?:expand(?:s|ed)?|extend(?:s|ed)?)\b/giu, /^(?:expand(?:s|ed)?|extend(?:s|ed)?)/iu],
+  ['exit', /(?:退出|撤出)|\b(?:exit(?:s|ed)?|withdraw(?:s|n)?)\b/giu, /^(?:exit(?:s|ed)?|withdraw(?:s|n)?)/iu],
+  ['add', /(?:加入|添加|新增|增加|带有)|\b(?:add(?:s|ed|ing)?|includ(?:e|es|ed)|attach(?:es|ed)?)\b/giu, /^(?:add(?:ing|ed|s)?|includ(?:ed|es|e)|attach(?:es|ed)?)\b/iu],
+  ['remove', /(?:移除|删除|撤下)|\b(?:remov(?:e|es|ed)|delet(?:e|es|ed))\b/giu, /^(?:remov(?:ed|es|e)|delet(?:ed|es|e))\b/iu],
+  ['support', /(?:支持|提供)|\b(?:support(?:s|ed)?|provid(?:e|es|ed))\b/giu, /^(?:support(?:ed|s)?|provid(?:ed|es|e))\b/iu],
+  ['approve', /(?:获批|批准|通过(?:审核|审批|批准))|\b(?:approv(?:e|es|ed)|gain(?:s|ed)?\s+approval)\b/giu, /^(?:approv(?:ed|es|e)|gain(?:ed|s)?)\b/iu],
+  ['reject', /(?:拒绝|否决)|\b(?:reject(?:s|ed)?|refus(?:e|es|ed))\b/giu, /^(?:reject(?:ed|s)?|refus(?:ed|es|e))\b/iu],
+  ['disclose', /(?:披露|说明|文档)|\b(?:disclos(?:e|es|ed)|document(?:s|ed|ation)?|state(?:s|d))\b/giu, /^(?:disclos(?:ed|es|e)|document(?:ation|ed|s)?|state(?:s|d)?)\b/iu],
+  ['release', /(?:发布|推出|上线)|\b(?:releas(?:e|es|ed)|launch(?:es|ed)?)\b/giu, /^(?:releas(?:ed|es|e)|launch(?:es|ed)?)\b/iu],
+  ['request', /(?:请求|呼吁|建议|敦促)|\b(?:request(?:s|ed)?|recommend(?:s|ed)?|urge(?:s|d)?|call(?:s|ed)?\s+for)\b/giu, /^(?:request(?:s|ed)?|recommend(?:s|ed)?|urge(?:s|d)?|call(?:s|ed)?)/iu],
+  ['regulatory_require', /(?:法规要求|法案要求|监管要求|要求)|\brequir(?:e|es|ed)\b/giu, /^requir(?:ed|es|e)\b/iu],
+  ['mandate', /(?:强制|必须)|\b(?:mandat(?:e|es|ed)|must)\b/giu, /^(?:mandat(?:ed|es|e)|must)\b/iu],
+  ['order', /(?:下令|命令)|\b(?:order(?:s|ed))\b/giu, /^order(?:s|ed)/iu],
+  ['pause', /(?:停止|暂停)|\b(?:stop(?:s|ped|ping)?|paus(?:e|es|ed|ing))\b/giu, /^(?:stop(?:ping|ped|s)?|paus(?:ing|ed|es|e))\b/iu],
+  ['invest', /(?:投资)|\b(?:invest(?:s|ed|ing|ment)?)\b/giu, /^invest(?:s|ed|ing|ment)?/iu],
+  ['finance', /(?:融资)|\b(?:financ(?:e|es|ed|ing)|fundrais(?:e|es|ing)|raised?\s+funding)\b/giu, /^(?:financ(?:ing|ed|es|e)|fundrais(?:ing|es|e)|rais(?:ed|e))\b/iu],
+  ['sign', /(?:签署|签订|签约)|\b(?:sign(?:s|ed|ing))\b/giu, /^sign(?:s|ed|ing)/iu],
+  ['sue', /(?:起诉|提起诉讼)|\b(?:su(?:e|es|ed|ing)|file(?:s|d)?\s+(?:a\s+)?lawsuit)\b/giu, /^(?:su(?:ing|ed|es|e)|file(?:s|d)?)\b/iu],
+  ['ban', /(?:禁止|禁用)|\b(?:ban(?:s|ned|ning)?|prohibit(?:s|ed|ing)?)\b/giu, /^(?:ban(?:s|ned|ning)?|prohibit(?:s|ed|ing)?)/iu],
+  ['open_source', /(?:开源)|\b(?:open[ -]?sourc(?:e|es|ed|ing))\b/giu, /^open[ -]?sourc(?:ing|ed|es|e)\b/iu],
+  ['train', /(?:训练)|\b(?:train(?:s|ed|ing))\b/giu, /^train(?:s|ed|ing)/iu],
+  ['partner', /(?:合作)|\b(?:partner(?:s|ed|ing)?|collaborat(?:e|es|ed|ing|ion))\b/giu, /^(?:partner(?:ing|ed|s)?|collaborat(?:ion|ing|ed|es|e))\b/iu],
+  ['layoff', /(?:裁员)|\b(?:lay(?:s|ing)?\s+off|laid\s+off|job\s+cuts?)\b/giu, /^(?:lay(?:s|ing)?|laid|job)/iu],
+  ['decide', /(?:决定)|\b(?:decid(?:e|es|ed|ing))\b/giu, /^decid(?:ing|ed|es|e)\b/iu],
+  ['discuss', /(?:讨论|商议|磋商)|\b(?:discuss(?:es|ed|ing)?|deliberat(?:e|es|ed|ing))\b/giu, /^(?:discuss(?:ing|ed|es)?|deliberat(?:ing|ed|es|e))\b/iu],
+  ['deny', /(?:否认)|\b(?:den(?:y|ies|ied|ying))\b/giu, /^den(?:y|ies|ied|ying)/iu],
+  ['open_access', /(?:开放)|\b(?:open(?:s|ed|ing)?\s+(?:access|service))\b/giu, /^open(?:ing|ed|s)?\b/iu],
+  ['limit_scope', /(?:受限|限定|限于|限制(?:为|在)?)|\b(?:limit(?:s|ed|ing)?|restrict(?:s|ed|ing)?|(?:cover|support)(?:s|ed|ing)?\s+[^.;,]{0,60}(?:\bonly\b|\bsupported\s+(?:models?|products?)\b))/giu, /^(?:limit(?:s|ed|ing)?|restrict(?:s|ed|ing)?|cover(?:s|ed|ing)?|support(?:s|ed|ing)?)/iu],
 ];
 
 function factActions(value: string): Set<FactAction> {
@@ -2300,15 +2311,17 @@ function actionModality(value: string, index: number, surface: string): FactActi
 
 function factActionOccurrences(value: string): FactActionOccurrence[] {
   const occurrences: FactActionOccurrence[] = [];
-  for (const [action, pattern] of FACT_ACTION_PATTERNS) {
+  for (const [action, pattern, englishFiniteHead] of FACT_ACTION_PATTERNS) {
     for (const match of value.matchAll(pattern)) {
       const index = match.index;
       if (index === undefined) continue;
+      const finiteSurface = englishFiniteHead.exec(match[0])?.[0] || null;
       occurrences.push({
         action,
         index,
         end: index + match[0].length,
         surface: match[0],
+        finite_surface: finiteSurface,
         negated: actionIsNegated(value, index),
         modality: actionModality(value, index, match[0]),
       });
@@ -3441,6 +3454,19 @@ function factUnitNegated(
   return /(?:不含|不包含|不支持|排除|没有)|\b(?:without|excluding|but\s+not)\b/iu.test(tail);
 }
 
+function structuredQuotePredicatePrefix(value: string): string {
+  const normalized = value.normalize('NFKC').trim();
+  if (!/\p{Script=Han}/u.test(normalized)) return normalized;
+  const modifier = '(?:据报道|报道称|消息称|据称|涉嫌|被指|遭指控|可能|或许|也许|预计|计划|准备|必须|需要|正在|仍在|继续|已经|正式|完成|并未|并不|没有|从未|尚未|未能|不再|不会|绝非|并非|曾|将|被|已|拟|未|不|无)';
+  const trailing = new RegExp(`((?:\\s*${modifier})*)\\s*$`, 'u').exec(normalized);
+  const predicateModifiers = trailing?.[1]?.trim() || '';
+  const context = normalized.slice(0, trailing?.index ?? normalized.length).trim();
+  if (!context || /^(?:在|于)(?:\s*[^，,。.!！？?；;:：—–\u2028\u2029]+)?$/u.test(context)) {
+    return predicateModifiers;
+  }
+  return normalized;
+}
+
 function structuredFactUnits(value: string): StructuredFactUnit[] {
   const actions = factActionOccurrences(value);
   const units: StructuredFactUnit[] = [];
@@ -3458,8 +3484,9 @@ function structuredFactUnits(value: string): StructuredFactUnit[] {
         value.slice(unitStart, occurrence.index),
       ));
       const escapedSubject = subject.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&').replace(/\s+/gu, '\\s+');
-      const predicatePrefix = rawPrefix.replace(new RegExp(`^\\s*${escapedSubject}`, 'iu'), '')
-        .replace(/^\s*(?:(?:在|于)|\b(?:on|at)\b)\s*/iu, '');
+      const predicatePrefix = structuredQuotePredicatePrefix(
+        rawPrefix.replace(new RegExp(`^\\s*${escapedSubject}`, 'iu'), ''),
+      );
       const predicate = `${predicatePrefix}${occurrence.surface}`.trim();
       const localIndex = predicate.toLowerCase().lastIndexOf(occurrence.surface.toLowerCase());
       if (localIndex >= 0) {
@@ -3540,12 +3567,8 @@ function compareAtomicKnownFact(candidate: string, quote: string): string | null
   for (const unit of expected) {
     const sameIdentity = actual.filter((item) => sameFactUnitIdentity(unit, item));
     const samePolarity = sameIdentity.filter((item) => item.negated === unit.negated);
-    const observedSemantics = samePolarity
-      .map((item) => item.predicate_semantics)
-      .filter((item): item is ManualBilingualModalitySlots => !!item);
     const expectedSemantics = unit.predicate_semantics;
-    if (expectedSemantics
-      && (!isBarePredicateAssertion(expectedSemantics) || observedSemantics.length > 0)) {
+    if (expectedSemantics) {
       if (!samePolarity.some((item) => item.predicate_semantics
         && structuredPredicateSemanticsCompatible(expectedSemantics, item.predicate_semantics))) {
         if (samePolarity.length) return 'fact_verification_modality_mismatch';
