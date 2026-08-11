@@ -165,6 +165,36 @@ describe('manual lead evidence extraction', () => {
     expect((failure as Error).cause).toBeUndefined();
   });
 
+  test('redacts every provider URL while preserving the search stage and stable gateway status', async () => {
+    const statement = {
+      bind() { return statement; },
+      async all() { return { results: [] }; },
+    };
+    const adapters = createManualNewsLeadRuntimeAdapters({
+      DB: { prepare() { return statement; } },
+      MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
+      MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
+    } as never, {
+      researchFetcher: async () => {
+        throw new Error(
+          'trusted_gateway_http_502 fetching https://example.com/path?token=secret#frag '
+          + 'via https://provider.example/private/report?id=hidden',
+        );
+      },
+    });
+
+    let message = '';
+    try {
+      await adapters.search({ date: '2026-08-11', text: 'Anthropic watermark', note: '' });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toBe('search_public:trusted_gateway_http_502 fetching [url] via [url]');
+    for (const leaked of ['example.com', '/path', 'token=secret', '#frag', 'provider.example', 'id=hidden']) {
+      expect(message).not.toContain(leaked);
+    }
+  });
+
   test('Bernie letter uses bounded trusted PDF text conversion and still needs an independent report', async () => {
     const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
       const target = JSON.parse(String(init?.body || '{}')).url as string;

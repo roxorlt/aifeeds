@@ -39,6 +39,7 @@ function compact(value: unknown, max: number): string {
 
 function safeSearchError(error: unknown, secrets: readonly string[] = []): string {
   let message = error instanceof Error ? error.message : String(error);
+  message = message.replace(/\bhttps?:\/\/[^\s<>"']+/gi, '[url]');
   for (const secret of secrets) {
     if (secret) message = message.split(secret).join('[redacted]');
   }

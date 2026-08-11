@@ -7,12 +7,20 @@ import { expect, test } from 'vitest';
 
 const workerRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
-test('the default document fetch reaches the trusted gateway in workerd', async () => {
+test('workerd rejects unsupported redirect before outbound and accepts the production manual redirect', async () => {
   const entry = `
     import { fetchPublicDocument } from './src/security/safe-url-fetch.ts';
     export default {
-      async fetch() {
+      async fetch(request) {
         try {
+          if (new URL(request.url).searchParams.get('redirect') === 'error') {
+            await fetch('https://research-gateway.example/v1/document', {
+              method: 'POST',
+              redirect: 'error',
+              body: '{}',
+            });
+            return Response.json({ ok: true });
+          }
           const document = await fetchPublicDocument('https://example.com/', {
             service: { origin: 'https://research-gateway.example', token: 'test-token' },
           });
@@ -89,6 +97,12 @@ test('the default document fetch reaches the trusted gateway in workerd', async 
 
   try {
     await miniflare.ready;
+    const rejectedResponse = await miniflare.dispatchFetch('http://local.test/?redirect=error');
+    const rejected = await rejectedResponse.json() as { ok: boolean; name?: string; message?: string };
+    expect(rejected).toMatchObject({ ok: false, name: 'TypeError' });
+    expect(rejected.message).toMatch(/redirect|invocation/i);
+    expect(gatewayCalls).toBe(0);
+
     const response = await miniflare.dispatchFetch('http://local.test/');
     expect(await response.json()).toEqual({
       ok: true,
