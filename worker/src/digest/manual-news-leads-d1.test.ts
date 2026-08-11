@@ -416,22 +416,27 @@ function verifyingAdapters(): ManualLeadProcessingAdapters {
     extract: async () => null, assess: async () => generatedAssessment(),
     verify: async (prompt) => {
       const body = JSON.parse(prompt.user) as {
-        facts: Array<{ fact_id: string; allowed_evidence: Array<{ id: string; excerpt: string }> }>;
+        untrusted_evidence: Array<{ id: string; excerpt: string }>;
+        facts: Array<{ fact_id: string; allowed_evidence_ids: string[] }>;
         projections?: Array<{ projection_id: string; source_fact_ids: string[] }>;
       };
+      const evidenceById = new Map(body.untrusted_evidence.map((item) => [item.id, item]));
       return {
         overall_verdict: 'supported',
-        fact_results: body.facts.map((fact) => ({
-          fact_id: fact.fact_id, supported: true, issue_code: 'none',
-          source_quotes: [{ evidence_id: fact.allowed_evidence[0].id, quote: fact.allowed_evidence[0].excerpt }],
-          ...(fact.fact_id === 'field:material_update' ? {
-            comparison_result: {
-              value: false, matched_event_key: null, prior_event_keys: [], reason_code: 'no_prior_match',
-              current_evidence_id: fact.allowed_evidence[0].id,
-              current_quote: fact.allowed_evidence[0].excerpt,
-            },
-          } : {}),
-        })),
+        fact_results: body.facts.map((fact) => {
+          const evidence = evidenceById.get(fact.allowed_evidence_ids[0])!;
+          return {
+            fact_id: fact.fact_id, supported: true, issue_code: 'none',
+            source_quotes: [{ evidence_id: evidence.id, quote: evidence.excerpt }],
+            ...(fact.fact_id === 'field:material_update' ? {
+              comparison_result: {
+                value: false, matched_event_key: null, prior_event_keys: [], reason_code: 'no_prior_match',
+                current_evidence_id: evidence.id,
+                current_quote: evidence.excerpt,
+              },
+            } : {}),
+          };
+        }),
         ...(body.projections?.length ? {
           projection_results: body.projections.map((projection) => ({
             projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,

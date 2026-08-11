@@ -1,7 +1,12 @@
 import { describe, expect, test, vi } from 'vitest';
 
 import { applyManualLeadEvidencePolicy, validateManualLeadAssessment } from './manual-news-leads';
-import { createManualNewsLeadRuntimeAdapters, extractManualNewsEvidence } from './manual-news-leads-runtime';
+import {
+  createManualNewsLeadRuntimeAdapters,
+  extractManualNewsEvidence,
+  MANUAL_NEWS_PROVIDER_PROMPT_MAX_CHARS,
+  MANUAL_NEWS_PROVIDER_TIMEOUT_MS,
+} from './manual-news-leads-runtime';
 import type { PublicDocument } from '../security/safe-url-fetch';
 import { callDeepSeekJson, DEEPSEEK_PRO } from '../hf-paper/llm';
 import { ManualNewsProviderError } from './manual-news-provider';
@@ -55,7 +60,7 @@ function documentFixture(
 }
 
 describe('manual lead evidence extraction', () => {
-  test('uses one 240-second provider call per assessment or verification invocation and records only safe metrics', async () => {
+  test('uses one 210-second provider call per assessment or verification invocation and records only safe metrics', async () => {
     const mockedCall = vi.mocked(callDeepSeekJson);
     mockedCall
       .mockResolvedValueOnce({ data: { event_key: 'safe-result' } })
@@ -79,7 +84,7 @@ describe('manual lead evidence extraction', () => {
       1,
       'test-key', DEEPSEEK_PRO, '{"evidence":"https://private.example/path"}',
       expect.objectContaining({
-        systemPrompt: 'assessment secret body', retries: 0, timeoutMs: 240_000,
+        systemPrompt: 'assessment secret body', retries: 0, timeoutMs: 210_000,
         requestId: 'ml-safe-request:p6:assessment:1',
       }),
     );
@@ -87,7 +92,7 @@ describe('manual lead evidence extraction', () => {
       2,
       'test-key', DEEPSEEK_PRO, '{"claims":[]}',
       expect.objectContaining({
-        systemPrompt: 'independent verifier', retries: 0, timeoutMs: 240_000,
+        systemPrompt: 'independent verifier', retries: 0, timeoutMs: 210_000,
         requestId: 'ml-safe-request:p6:verification:2',
       }),
     );
@@ -102,6 +107,34 @@ describe('manual lead evidence extraction', () => {
     expect(logs).not.toContain('private.example');
     expect(logs).not.toContain('test-key');
     mockedCall.mockReset();
+  });
+
+  test.each(['assessment', 'verification'] as const)(
+    'fails closed before the %s provider call when the fully serialized prompt exceeds its hard limit',
+    async (stage) => {
+      const mockedCall = vi.mocked(callDeepSeekJson);
+      const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+      const adapters = createManualNewsLeadRuntimeAdapters({
+        DB: {} as never, DEEPSEEK_API_KEY: 'test-key',
+      } as never, { modelContext: { leadId: 'ml-prompt-limit', processingAttempt: 3 } });
+      const invoke = stage === 'assessment' ? adapters.assess : adapters.verify;
+
+      const failure = await invoke(
+        { system: 'trusted-rules', user: 'x'.repeat(MANUAL_NEWS_PROVIDER_PROMPT_MAX_CHARS) },
+        { request_id: `ml-prompt-limit:p3:${stage}:1`, evidence_count: 6, attempt: 3 },
+      ).catch((error) => error);
+
+      expect(failure).toBeInstanceOf(ManualNewsProviderError);
+      expect(failure).toMatchObject({ stage, provider_error_code: 'provider_prompt_too_large' });
+      expect(mockedCall).not.toHaveBeenCalled();
+      expect(info.mock.calls.flat().join(' ')).not.toContain('xxxxxxxxxx');
+      mockedCall.mockReset();
+    },
+  );
+
+  test('exports the provider timeout and complete serialized prompt boundary', () => {
+    expect(MANUAL_NEWS_PROVIDER_TIMEOUT_MS).toBe(210_000);
+    expect(MANUAL_NEWS_PROVIDER_PROMPT_MAX_CHARS).toBe(64_000);
   });
 
   test.each([

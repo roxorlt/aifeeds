@@ -22,7 +22,8 @@ import {
   type ManualNewsProviderStage,
 } from './manual-news-provider';
 
-export const MANUAL_NEWS_PROVIDER_TIMEOUT_MS = 240_000;
+export const MANUAL_NEWS_PROVIDER_TIMEOUT_MS = 210_000;
+export const MANUAL_NEWS_PROVIDER_PROMPT_MAX_CHARS = 64_000;
 
 interface SearchRow {
   title: string | null;
@@ -274,6 +275,17 @@ export function createManualNewsLeadRuntimeAdapters(
       attempt: context?.attempt ?? fallbackAttempt,
     };
     console.info('[manual-news-provider-call]', JSON.stringify(metrics));
+    const serializedPromptChars = Array.from(JSON.stringify({
+      system: prompt.system,
+      user: prompt.user,
+    })).length;
+    if (serializedPromptChars > MANUAL_NEWS_PROVIDER_PROMPT_MAX_CHARS) {
+      throw new ManualNewsProviderError({
+        stage,
+        provider_error_code: 'provider_prompt_too_large',
+        metrics,
+      });
+    }
     const result = await callDeepSeekJson<unknown>(
       env.DEEPSEEK_API_KEY,
       DEEPSEEK_PRO,

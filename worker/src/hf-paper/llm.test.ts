@@ -88,8 +88,14 @@ describe("DeepSeek message roles", () => {
   });
 
   it("does not log an HTTP provider response body", async () => {
+    vi.useFakeTimers();
     const sentinel = "PROVIDER-RESPONSE-DO-NOT-LOG";
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(sentinel, { status: 503 })));
+    let signal: AbortSignal | undefined;
+    const readBody = vi.fn(async () => new Promise<string>(() => undefined));
+    vi.stubGlobal("fetch", vi.fn(async (_url, init?: RequestInit) => {
+      signal = init?.signal || undefined;
+      return { ok: false, status: 503, text: readBody } as unknown as Response;
+    }));
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     const result = await callDeepSeekJson("test-key", "test-model", "prompt", {
@@ -97,10 +103,40 @@ describe("DeepSeek message roles", () => {
     });
 
     expect(result).toMatchObject({ data: null, error: "HTTP 503" });
+    expect(readBody).not.toHaveBeenCalled();
+    expect(signal?.aborted).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(signal?.aborted).toBe(false);
     expect(errorSpy.mock.calls.flat().join(" ")).not.toContain(sentinel);
   });
 
-  it("allows one provider response after 120 seconds when the caller grants a 240-second budget", async () => {
+  it("keeps the timeout active until a successful response body is fully consumed", async () => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    const parseBody = vi.fn(async () => new Promise<never>((_resolve, reject) => {
+      signal?.addEventListener("abort", () => {
+        const error = new Error("body read aborted");
+        error.name = "AbortError";
+        reject(error);
+      }, { once: true });
+    }));
+    vi.stubGlobal("fetch", vi.fn(async (_url, init?: RequestInit) => {
+      signal = init?.signal || undefined;
+      return { ok: true, status: 200, json: parseBody } as unknown as Response;
+    }));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const pending = callDeepSeek("test-key", "test-model", "prompt", { timeoutMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(1_001);
+
+    await expect(pending).resolves.toMatchObject({ text: null, error: "AbortError" });
+    expect(parseBody).toHaveBeenCalledTimes(1);
+    expect(signal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("allows one provider response after 120 seconds when the caller grants a 210-second budget", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn(() => new Promise<Response>((resolve) => {
       setTimeout(() => resolve(okResponse()), 130_000);
@@ -108,7 +144,7 @@ describe("DeepSeek message roles", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const pending = callDeepSeekJson<{ ok: boolean }>("test-key", "test-model", "prompt", {
-      retries: 0, timeoutMs: 240_000,
+      retries: 0, timeoutMs: 210_000,
     });
     await vi.advanceTimersByTimeAsync(130_000);
 

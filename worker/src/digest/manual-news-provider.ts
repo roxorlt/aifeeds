@@ -26,7 +26,7 @@ interface ManualNewsProviderErrorInput {
   assessment_last_validation_code?: string;
 }
 
-const SAFE_PROVIDER_ERROR = /^provider_(?:timeout|transport_error|no_text|json_parse_fail|retry_exhausted|unknown_error|http_\d{3})$/;
+const SAFE_PROVIDER_ERROR = /^provider_(?:timeout|transport_error|no_text|json_parse_fail|prompt_too_large|retry_exhausted|unknown_error|http_\d{3})$/;
 const SAFE_REQUEST_ID = /^[A-Za-z0-9:_-]{1,240}$/;
 const SAFE_VALIDATION_CODE = /^[a-z0-9_]{1,80}$/;
 const PROVIDER_ERROR_PREFIX = 'manual_news_provider_error';
@@ -135,6 +135,13 @@ export function manualNewsProviderFailureAudit(
   } catch {
     return null;
   }
+}
+
+export function manualNewsProviderPublicErrorMessage(error: unknown): string | null {
+  const failure = manualNewsProviderFailureAudit(error);
+  return failure
+    ? `${PROVIDER_ERROR_PREFIX}:${failure.stage}:${failure.provider_error_code}`
+    : null;
 }
 
 export function withManualNewsAssessmentFailureContext(

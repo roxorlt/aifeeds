@@ -28,6 +28,7 @@ import {
   isManualNewsProviderJsonParseFailure,
   isTransientManualNewsProviderFailure,
   manualNewsProviderFailureAudit,
+  manualNewsProviderPublicErrorMessage,
   withManualNewsAssessmentFailureContext,
   type ManualNewsProviderCallContext,
   type ManualNewsProviderFailureAudit,
@@ -157,6 +158,18 @@ export function isTransientManualLeadError(error: unknown): boolean {
 function isDeterministicModelJsonError(error: unknown): boolean {
   return isManualNewsProviderJsonParseFailure(error)
     || /(?:^|_)json_parse_fail(?:$|_)/i.test(conciseError(error));
+}
+
+function deterministicJsonFailureMessage(
+  error: unknown,
+  stage: ManualNewsProviderStage,
+): string {
+  return manualNewsProviderPublicErrorMessage(error)
+    || `manual_news_provider_error:${stage}:provider_json_parse_fail`;
+}
+
+function safeProviderOrConciseError(error: unknown): string {
+  return manualNewsProviderPublicErrorMessage(error) || conciseError(error);
 }
 
 function auditMetadataWithProviderFailure(
@@ -351,7 +364,7 @@ export async function processManualNewsLead(
               await store.invalidateAssessment(leadId, lead.version, 'assessment_schema_invalid');
               await transition('needs_review', {
                 error_code: 'assessment_validation_failed',
-                error_message: 'invalid_assessment',
+                error_message: deterministicJsonFailureMessage(contextualError, 'assessment'),
                 audit_metadata: assessmentGenerationAudit,
               });
               return (await store.getLead(leadId))!;
@@ -364,7 +377,7 @@ export async function processManualNewsLead(
             );
             await transition('failed', {
               error_code: 'assessment_failed',
-              error_message: conciseError(contextualError),
+              error_message: safeProviderOrConciseError(contextualError),
               audit_metadata: assessmentGenerationAudit,
             });
             return (await store.getLead(leadId))!;
@@ -430,7 +443,7 @@ export async function processManualNewsLead(
             await store.invalidateAssessment(leadId, lead.version, 'fact_verification_schema_invalid');
             await transition('needs_review', {
               error_code: 'fact_verification_failed',
-              error_message: 'invalid_fact_verification',
+              error_message: deterministicJsonFailureMessage(error, 'verification'),
               ...(assessmentGenerationAudit ? {
                 audit_metadata: auditMetadataWithProviderFailure(assessmentGenerationAudit, error),
               } : {}),
@@ -441,7 +454,7 @@ export async function processManualNewsLead(
           await store.invalidateAssessment(leadId, lead.version, 'fact_verification_model_failed');
           await transition('failed', {
             error_code: 'fact_verification_failed',
-            error_message: conciseError(error),
+            error_message: safeProviderOrConciseError(error),
             ...(assessmentGenerationAudit ? {
               audit_metadata: auditMetadataWithProviderFailure(assessmentGenerationAudit, error),
             } : {}),

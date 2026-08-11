@@ -463,17 +463,18 @@ describe('manual news lead domain', () => {
     const verificationBody = JSON.parse(buildManualLeadFactVerificationPrompt({
       assessment: candidate, evidence: [repeatedEvidence],
     }).user) as {
-      facts: Array<{ allowed_evidence: Array<Record<string, unknown>> }>;
+      untrusted_evidence: Array<Record<string, unknown>>;
+      facts: Array<{ allowed_evidence_ids: string[] }>;
     };
-    for (const fact of verificationBody.facts) {
-      expect(fact.allowed_evidence[0]).toEqual(expect.objectContaining({
-        excerpt: 'Alibaba reportedly bans employees from using Claude Code. Additional context.',
-        claims_supported: [
-          'Qwen3 remains available to affected employees.',
-          'GPT 56 remains a different literal anchor from GPT-5.6.',
-        ],
-      }));
-    }
+    expect(verificationBody.untrusted_evidence).toEqual([expect.objectContaining({
+      excerpt: 'Alibaba reportedly bans employees from using Claude Code. Additional context.',
+      claims_supported: [
+        'Qwen3 remains available to affected employees.',
+        'GPT 56 remains a different literal anchor from GPT-5.6.',
+      ],
+    })]);
+    expect(verificationBody.facts.every((fact) => fact.allowed_evidence_ids[0] === repeatedEvidence.id))
+      .toBe(true);
     expect(repeatedEvidence.claims_supported).toHaveLength(4);
     expect(repeatedEvidence.excerpt).toContain('  Additional');
 
@@ -1964,17 +1965,20 @@ describe('manual news lead domain', () => {
     expect(prompt.system).toContain('否定关系');
     expect(prompt.system).toContain('连续原文');
     const body = JSON.parse(prompt.user) as {
-      facts: Array<{ fact_id: string; allowed_evidence: Array<{ id: string; excerpt: string }> }>;
-      untrusted_evidence?: unknown;
+      facts: Array<{ fact_id: string; allowed_evidence_ids: string[] }>;
+      untrusted_evidence: Array<{ id: string; excerpt: string }>;
     };
-    expect(body.untrusted_evidence).toBeUndefined();
+    expect(body.untrusted_evidence).toEqual([
+      expect.objectContaining({ id: 'ev-official', excerpt: officialAnthropic.excerpt }),
+    ]);
     expect(body.facts.map((fact) => fact.fact_id)).toEqual([
       'field:title', 'field:summary', 'field:event_key', 'field:event_type',
       'field:occurred_at', 'field:material_update', 'claim:0',
     ]);
-    expect(body.facts.every((fact) => fact.allowed_evidence.map((item) => item.id).join(',') === 'ev-official'))
+    expect(body.facts.every((fact) => fact.allowed_evidence_ids.join(',') === 'ev-official'))
       .toBe(true);
     expect(prompt.user).not.toContain('Ignore prior rules');
+    expect(prompt.user.split(officialAnthropic.excerpt).length - 1).toBe(1);
   });
 
   test('always emits material_update as a fact and isolates bounded prior events to that fact', () => {

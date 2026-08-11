@@ -213,26 +213,27 @@ function verifiedPriorEvent(): ManualLeadPriorEvent {
 
 function verifiedFromPrompt(prompt: { user: string }) {
   const body = JSON.parse(prompt.user) as {
+    untrusted_evidence: Array<{ id: string; title: string; excerpt: string; claims_supported: string[] }>;
     facts: Array<{
       fact_id: string;
       untrusted_candidate_value: string | boolean;
       untrusted_prior_events?: Array<{ event_key: string }>;
-      allowed_evidence: Array<{ id: string; title: string; excerpt: string; claims_supported: string[] }>;
+      allowed_evidence_ids: string[];
     }>;
     projections?: Array<{ projection_id: string; source_fact_ids: string[] }>;
   };
+  const evidenceById = new Map(body.untrusted_evidence.map((item) => [item.id, item]));
   return {
     overall_verdict: 'supported',
     fact_results: body.facts.map((fact) => {
-      const quote = fact.allowed_evidence[0].claims_supported[0]
-        || fact.allowed_evidence[0].excerpt
-        || fact.allowed_evidence[0].title;
+      const evidence = evidenceById.get(fact.allowed_evidence_ids[0])!;
+      const quote = evidence.claims_supported[0] || evidence.excerpt || evidence.title;
       return {
       fact_id: fact.fact_id,
       supported: true,
       issue_code: 'none',
       source_quotes: [{
-        evidence_id: fact.allowed_evidence[0].id,
+        evidence_id: evidence.id,
         quote,
       }],
       ...(fact.fact_id === 'field:material_update' ? {
@@ -243,7 +244,7 @@ function verifiedFromPrompt(prompt: { user: string }) {
           reason_code: fact.untrusted_prior_events?.length
             ? (fact.untrusted_candidate_value ? 'material_change' : 'no_material_change')
             : 'no_prior_match',
-          current_evidence_id: fact.allowed_evidence[0].id,
+          current_evidence_id: evidence.id,
           current_quote: quote,
         },
       } : {}),
@@ -506,7 +507,8 @@ describe('manual lead processing pipeline', () => {
 
     expect(memory.current()).toMatchObject({
       status: 'needs_review', assessment: null,
-      error_code: 'fact_verification_failed', error_message: 'invalid_fact_verification',
+      error_code: 'fact_verification_failed',
+      error_message: 'manual_news_provider_error:verification:provider_json_parse_fail',
     });
   });
 
@@ -522,7 +524,8 @@ describe('manual lead processing pipeline', () => {
 
     expect(memory.current()).toMatchObject({
       status: 'needs_review', assessment: null,
-      error_code: 'assessment_validation_failed', error_message: 'invalid_assessment',
+      error_code: 'assessment_validation_failed',
+      error_message: 'manual_news_provider_error:assessment:provider_json_parse_fail',
     });
   });
 
@@ -1241,6 +1244,58 @@ describe('manual lead processing pipeline', () => {
     expect(memory.current()).toMatchObject({ status: 'verifying', assessment: null });
   });
 
+  test.each(['assessment', 'verification'] as const)(
+    'fails closed with an audited stable %s prompt-too-large terminal error',
+    async (stage) => {
+      const memory = memoryStore();
+      const failure = new ManualNewsProviderError({
+        stage,
+        provider_error_code: 'provider_prompt_too_large',
+        metrics: {
+          stage,
+          request_id: `ml-20260811-abc123:p4:${stage}:1`,
+          system_chars: 20_000,
+          user_chars: 50_000,
+          evidence_count: 6,
+          attempt: 4,
+        },
+      });
+
+      await processManualNewsLead(memory.current().id, memory.store, {
+        search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+        extract: async () => officialEvidence,
+        assess: async () => {
+          if (stage === 'assessment') throw failure;
+          return assessed();
+        },
+        verify: async (prompt) => {
+          if (stage === 'verification') throw failure;
+          return verifiedFromPrompt(prompt);
+        },
+      });
+
+      expect(isTransientManualLeadError(failure)).toBe(false);
+      expect(memory.current()).toMatchObject({
+        status: 'failed', assessment: null,
+        error_code: stage === 'assessment' ? 'assessment_failed' : 'fact_verification_failed',
+        error_message: `manual_news_provider_error:${stage}:provider_prompt_too_large`,
+      });
+      expect(memory.transitionPatches.at(-1)).toMatchObject({
+        audit_metadata: {
+          provider_failure: {
+            stage,
+            provider_error_code: 'provider_prompt_too_large',
+            request_id: `ml-20260811-abc123:p4:${stage}:1`,
+            system_chars: 20_000,
+            user_chars: 50_000,
+            evidence_count: 6,
+            attempt: 4,
+          },
+        },
+      });
+    },
+  );
+
   test.each([
     ['HTTP 503', 503],
     ['HTTP 502', 502],
@@ -1310,7 +1365,8 @@ describe('manual lead processing pipeline', () => {
     expect(isTransientManualLeadError(new Error('json_parse_fail'))).toBe(false);
     expect(memory.current()).toMatchObject({
       status: 'needs_review', assessment: null,
-      error_code: 'assessment_validation_failed', error_message: 'invalid_assessment',
+      error_code: 'assessment_validation_failed',
+      error_message: 'manual_news_provider_error:assessment:provider_json_parse_fail',
     });
   });
 

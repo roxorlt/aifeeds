@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 vi.mock('cloudflare:workers', () => ({ WorkflowEntrypoint: class {} }));
 vi.mock('./manual-news-leads-runtime', () => ({
   processManualNewsLeadWithEnv: vi.fn(async () => undefined),
+  MANUAL_NEWS_PROVIDER_TIMEOUT_MS: 210_000,
 }));
 vi.mock('./manual-news-leads-store', () => ({
   claimManualNewsLeadProcessing: vi.fn(async () => 1),
@@ -11,12 +12,29 @@ vi.mock('./manual-news-leads-store', () => ({
 
 import { processManualNewsLeadWithEnv } from './manual-news-leads-runtime';
 import { claimManualNewsLeadProcessing, failManualNewsLeadAfterExhaustion } from './manual-news-leads-store';
-import { runManualNewsLeadWorkflow } from './manual-news-leads-workflow';
+import {
+  MANUAL_NEWS_MAX_PROVIDER_CALLS_PER_STEP,
+  MANUAL_NEWS_NON_PROVIDER_BUDGET_MS,
+  MANUAL_NEWS_WORKFLOW_BUDGET_MS,
+  MANUAL_NEWS_WORKFLOW_SAFETY_MARGIN_MS,
+  MANUAL_NEWS_WORKFLOW_STEP_TIMEOUT_MS,
+  runManualNewsLeadWorkflow,
+} from './manual-news-leads-workflow';
+import { MANUAL_NEWS_PROVIDER_TIMEOUT_MS } from './manual-news-leads-runtime';
 
 describe('manual news lead workflow', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(claimManualNewsLeadProcessing).mockResolvedValue(1);
+  });
+  test('keeps the complete provider budget strictly below the durable step timeout', () => {
+    expect(MANUAL_NEWS_MAX_PROVIDER_CALLS_PER_STEP).toBe(3);
+    expect(MANUAL_NEWS_NON_PROVIDER_BUDGET_MS).toBe(180_000);
+    expect(MANUAL_NEWS_WORKFLOW_BUDGET_MS).toBe(810_000);
+    expect(MANUAL_NEWS_WORKFLOW_STEP_TIMEOUT_MS).toBe(900_000);
+    expect(MANUAL_NEWS_WORKFLOW_SAFETY_MARGIN_MS).toBe(90_000);
+    expect(MANUAL_NEWS_PROVIDER_TIMEOUT_MS).toBeLessThan(MANUAL_NEWS_WORKFLOW_STEP_TIMEOUT_MS);
+    expect(MANUAL_NEWS_WORKFLOW_BUDGET_MS).toBeLessThan(MANUAL_NEWS_WORKFLOW_STEP_TIMEOUT_MS);
   });
   test('a permanent pipeline result completes in one attempt without exhaustion handling', async () => {
     const step = { do: vi.fn(async (_name, _options, callback: () => Promise<void>) => callback()) };
