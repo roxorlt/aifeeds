@@ -2274,7 +2274,20 @@ function aggregateWholeEvidenceRelations(
   return 'unrelated';
 }
 
-function isRedundantContextExpansion(
+const EVIDENCE_EXTRACTION_CHROME_TOKENS: ReadonlySet<string> = new Set([
+  'advertise', 'advertisement', 'ai', 'apps', 'categories', 'enterprise', 'event', 'events',
+  'home', 'latest', 'menu', 'navigation', 'news', 'newsletter', 'newsletters', 'podcast',
+  'podcasts', 'register', 'related', 'search', 'security', 'share', 'startup', 'startups',
+  'subscribe', 'techcrunch', 'topics', 'transportation',
+]);
+const EVIDENCE_EXTRACTION_CHROME_MARKERS: ReadonlySet<string> = new Set([
+  'advertise', 'advertisement', 'categories', 'event', 'events', 'menu', 'navigation',
+  'newsletter', 'newsletters', 'podcast', 'podcasts', 'register', 'search', 'subscribe', 'topics',
+]);
+
+const EVIDENCE_EQUIVALENT_EVENT_CONTEXT = /^(?:in|under|within|as\s+part\s+of)\s+(?:(?:an?|the)\s+)?(?:(?:internal|company|corporate|organizational)\s+){1,3}(?:policy|restriction)$/iu;
+
+function isProvenExtractionChromeExpansion(
   supportingClause: string,
   candidateClause: string,
 ): boolean {
@@ -2282,17 +2295,21 @@ function isRedundantContextExpansion(
   const candidate = normalizedSourceText(candidateClause).replace(/[.!。！]+$/u, '');
   if (!support || !candidate.startsWith(support)) return false;
   const residual = candidate.slice(support.length).trim();
-  if (!/^(?:in|under|within|as\s+part\s+of)\b/iu.test(residual)) return false;
-  if (new RegExp(EVIDENCE_RELATION_LINK_SOURCE, 'iu').test(residual)
-    || EVIDENCE_RELATION_DENIAL_SIGNAL.test(residual)
-    || EVIDENCE_RELATION_STATUS_SIGNAL.test(residual)
-    || EVIDENCE_RELATION_SCOPE_SIGNAL.test(residual)
-    || factActionOccurrences(residual).length
-    || normalizedFactDates(residual).length
-    || normalizedFactInstants(residual).length
-    || relativeFactTimeSpans(residual).length) return false;
-  const supportEntities = registeredEntityIdentities(support);
-  return [...registeredEntityIdentities(residual)].every((entity) => supportEntities.has(entity));
+  if (!residual || Array.from(residual).length > 240 || /\p{Script=Han}|\d/u.test(residual)) return false;
+  const tokens = residual.toLocaleLowerCase('en-US').match(/[a-z]+/gu) || [];
+  return tokens.length >= 2
+    && tokens.every((token) => EVIDENCE_EXTRACTION_CHROME_TOKENS.has(token))
+    && tokens.some((token) => EVIDENCE_EXTRACTION_CHROME_MARKERS.has(token));
+}
+
+function isProvenEquivalentEventContextExpansion(
+  supportingClause: string,
+  candidateClause: string,
+): boolean {
+  const support = normalizedSourceText(supportingClause).replace(/[.!。！]+$/u, '');
+  const candidate = normalizedSourceText(candidateClause).replace(/[.!。！]+$/u, '');
+  if (!support || !candidate.startsWith(support)) return false;
+  return EVIDENCE_EQUIVALENT_EVENT_CONTEXT.test(candidate.slice(support.length).trim());
 }
 
 function deterministicEvidenceRelation(
@@ -2308,7 +2325,8 @@ function deterministicEvidenceRelation(
   const effectiveRelations = relations.filter((relation, index) =>
     (relation !== 'uncertain' && relation !== 'blocking_uncertain')
     || !supportingClauses.some((supporting) =>
-      isRedundantContextExpansion(supporting.text, clauses[index].text)));
+      isProvenExtractionChromeExpansion(supporting.text, clauses[index].text)
+      || isProvenEquivalentEventContextExpansion(supporting.text, clauses[index].text)));
   return aggregateWholeEvidenceRelations(effectiveRelations);
 }
 
