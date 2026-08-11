@@ -311,6 +311,7 @@ async function createMaliciouslySupportedAlibabaProjectionProof(input: {
 async function createMaliciouslySupportedGeneratedProjectionProof(
   rawAssessment: unknown,
   quote: string,
+  factQuote = quote,
 ) {
   const generatedInput = structuredClone(rawAssessment) as Record<string, any>;
   const sourceAtomic = generatedInput.source_facts?.[0]?.atomic_fact as Record<string, string> | undefined;
@@ -348,7 +349,7 @@ async function createMaliciouslySupportedGeneratedProjectionProof(
   };
   const verification = validateManualLeadFactVerification({
     overall_verdict: 'supported',
-    fact_results: prompt.facts.map((fact) => supportedFactResult(fact.fact_id, evidence[0].id, quote)),
+    fact_results: prompt.facts.map((fact) => supportedFactResult(fact.fact_id, evidence[0].id, factQuote)),
     projection_results: prompt.projections.map((projection) => ({
       projection_id: projection.projection_id,
       source_fact_ids: projection.source_fact_ids,
@@ -366,6 +367,70 @@ async function createMaliciouslySupportedGeneratedProjectionProof(
   const proofInput = {
     lead_id: 'ml-20260811-malicious-projection',
     assessment_version: 8,
+    assessment: candidate,
+    evidence,
+    verification,
+  };
+  const secret = 'a'.repeat(64);
+  const proof = await createManualLeadVerificationProof(proofInput, secret);
+  return isCurrentManualLeadVerification(proofInput, proof, secret);
+}
+
+async function createMaliciouslySupportedControllerUpdateProof(quote: string) {
+  const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+  const sourceQuote = techCrunchAlibabaBan.claims_supported[0];
+  const evidence: ManualNewsEvidence[] = [{
+    ...officialAlibabaDenial,
+    id: 'ev-role-controller-update',
+    title: sourceQuote,
+    excerpt: `${sourceQuote} ${quote}`,
+    claims_supported: [sourceQuote, quote],
+  }];
+  raw.recommendation = 'needs_review';
+  raw.uncertainties = ['该证据可能包含后续状态变化。'];
+  raw.source_facts[0].evidence_ids = [evidence[0].id];
+  raw.evidence_dispositions = [{
+    evidence_id: evidence[0].id,
+    disposition: 'contradicts_core',
+    source_fact_refs: ['fact-01'],
+    reason_code: null,
+  }];
+  const generated = validateManualLeadGeneratedAssessment(raw, evidence);
+  const candidate: ManualNewsProcessedAssessment = {
+    ...applyManualLeadEvidencePolicy(generated, evidence),
+    duplicate_scope: null,
+    matched_lead_id: null,
+  };
+  const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({
+    assessment: candidate,
+    evidence,
+  }).user) as {
+    facts: Array<{ fact_id: string }>;
+    projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+    evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
+  };
+  const verification = validateManualLeadFactVerification({
+    overall_verdict: 'conflicted',
+    fact_results: prompt.facts.map((fact) => supportedFactResult(
+      fact.fact_id, evidence[0].id, sourceQuote,
+    )),
+    projection_results: prompt.projections.map((projection) => ({
+      projection_id: projection.projection_id,
+      source_fact_ids: projection.source_fact_ids,
+      supported: true,
+      issue_code: 'none',
+    })),
+    disposition_results: prompt.evidence_dispositions.map((disposition) => ({
+      evidence_id: disposition.evidence_id,
+      disposition: disposition.disposition,
+      supported: true,
+      issue_code: 'none',
+      source_quotes: [{ evidence_id: evidence[0].id, quote }],
+    })),
+  }, candidate, evidence);
+  const proofInput = {
+    lead_id: 'ml-20260811-role-controller-update',
+    assessment_version: 9,
     assessment: candidate,
     evidence,
     verification,
@@ -734,6 +799,26 @@ describe('manual news lead domain', () => {
     )).toThrow(/evidence_disposition_classification_uncertain/);
   });
 
+  test.each([
+    'Alibaba reportedly bans employees from using Claude Code despite calling reports of the ban false.',
+    'Alibaba reportedly bans employees from using Claude Code notwithstanding its denial of the restriction.',
+    'Alibaba reportedly bans employees from using Claude Code although it denied the report.',
+    'Alibaba reportedly bans employees from using Claude Code alongside an Alibaba cloud price increase.',
+    'Alibaba reportedly bans employees from using Claude Code, not to mention Alibaba layoffs.',
+    'Alibaba reportedly bans employees from using Claude Code while Alibaba customer service remains available.',
+    'Alibaba reportedly bans employees from using Claude Code whereas Alibaba customer service remains available.',
+    'Alibaba reportedly bans employees from using Claude Code，但阿里巴巴否认相关报道。',
+    'Alibaba reportedly bans employees from using Claude Code，尽管阿里巴巴否认相关报道。',
+    'Alibaba reportedly bans employees from using Claude Code，虽然阿里巴巴否认相关报道。',
+    'Alibaba reportedly bans employees from using Claude Code，以及客服仍可用。',
+  ])('blocks an additive or concessive support unit before a malicious verifier can mint a current v9 proof: %s', async (quote) => {
+    await expect(createMaliciouslySupportedGeneratedProjectionProof(
+      alibabaBanGeneratedAssessment(),
+      quote,
+      techCrunchAlibabaBan.claims_supported[0],
+    )).rejects.toThrow(/evidence_disposition|verification_semantics/);
+  });
+
   test('gives a reliable direct denial precedence over a supporting clause in the same evidence and proof', async () => {
     const mixedOfficial: ManualNewsEvidence = {
       ...officialAlibabaDenial,
@@ -811,6 +896,56 @@ describe('manual news lead domain', () => {
       .toMatchObject({ evidence_completeness: expect.arrayContaining([
         { evidence_id: unrelatedController.id, relation: 'unrelated' },
       ]) });
+  });
+
+  test.each([
+    'Alibaba partner OpenAI cancelled its Claude Code restriction.',
+    'Alibaba investor Microsoft withdrew its Claude Code restriction.',
+    'Alibaba customer OpenAI cancelled its Claude Code restriction.',
+    'Alibaba supplier Microsoft withdrew its Claude Code restriction.',
+    '阿里巴巴的合作伙伴OpenAI取消了Claude Code限制。',
+    '阿里巴巴的投资方Microsoft撤回了Claude Code限制。',
+  ])('does not mint a current v9 update proof when a role noun phrase makes the second organization the controller: %s', async (statement) => {
+    await expect(createMaliciouslySupportedControllerUpdateProof(statement))
+      .rejects.toThrow(/evidence_disposition|verification_semantics/);
+  });
+
+  test.each([
+    'Alibaba partner OpenAI cancelled its integration with Claude Code.',
+    'Alibaba investor Microsoft withdrew its plugin for Claude Code.',
+    'Alibaba customer OpenAI cancelled its Claude Code integration.',
+    'Alibaba supplier Microsoft withdrew its Claude Code plugin.',
+  ])('treats a role-linked second organization as controller or uncertain, never Alibaba: %s', (statement) => {
+    const roleControllerEvidence: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: `ev-role-controller-${statement.split(' ')[1]}`,
+      title: statement,
+      excerpt: statement,
+      claims_supported: [statement],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.uncertainties = ['角色名词短语的控制主体不是阿里巴巴。'];
+    raw.evidence_dispositions.push({
+      evidence_id: roleControllerEvidence.id,
+      disposition: 'background',
+      source_fact_refs: [],
+      reason_code: 'insufficient_overlap',
+    });
+    expect(validateManualLeadGeneratedAssessment(
+      raw, [techCrunchAlibabaBan, roleControllerEvidence],
+    )).toMatchObject({
+      evidence_completeness: expect.arrayContaining([
+        { evidence_id: roleControllerEvidence.id, relation: 'unrelated' },
+      ]),
+    });
+  });
+
+  test('does not misread ordinary Alibaba employees as a role-linked second controller', () => {
+    expect(validateManualLeadGeneratedAssessment(
+      alibabaBanGeneratedAssessment(), [techCrunchAlibabaBan],
+    )).toMatchObject({
+      evidence_completeness: [{ evidence_id: techCrunchAlibabaBan.id, relation: 'supports' }],
+    });
   });
 
   test.each([
@@ -1716,7 +1851,7 @@ describe('manual news lead domain', () => {
       source: { predicate: sourcePredicate },
       projection: { predicate: projectionPredicate },
       quote: `Alibaba ${quotePredicate} employees from using Claude Code.`,
-    })).rejects.toThrow(/fact_verification_modality_mismatch/);
+    })).rejects.toThrow(/fact_verification_modality_mismatch|evidence_disposition_classification_uncertain/);
   });
 
   test.each([
@@ -1733,7 +1868,7 @@ describe('manual news lead domain', () => {
       source: { predicate: 'bans' },
       projection: { predicate: '禁止' },
       quote: `Alibaba ${quotePredicate} employees from using Claude Code.`,
-    })).rejects.toThrow(/fact_verification_modality_mismatch/);
+    })).rejects.toThrow(/fact_verification_modality_mismatch|evidence_disposition_classification_uncertain/);
   });
 
   test.each([
@@ -1852,7 +1987,7 @@ describe('manual news lead domain', () => {
       source: { object: 'employees from using Claude Code Pro' },
       projection: { object: '员工使用Claude Code Pro' },
       quote: 'Alibaba reportedly bans employees from using Claude Pro Code.',
-    })).rejects.toThrow(/fact_verification_entity_slot_missing/);
+    })).rejects.toThrow(/fact_verification_entity_slot_missing|evidence_disposition_classification_uncertain/);
   });
 
   test.each([

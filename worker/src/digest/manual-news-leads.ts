@@ -1593,22 +1593,79 @@ type DeterministicEvidenceRelation = 'supports' | 'conflicts' | 'updates' | 'unc
 interface AtomicEvidenceClause {
   text: string;
   reliable: boolean;
+  linked_addition: boolean;
+}
+
+const EVIDENCE_RELATION_LINK_SOURCE = '(?:但|尽管|虽然|不过|然而|以及|而且)|\\b(?:and|but|while|whereas|alongside|as\\s+well\\s+as|despite|notwithstanding|although|though|not\\s+to\\s+mention)\\b|(?<![\\p{L}\\p{N}_+.-])plus(?![\\p{L}\\p{N}_+.-])';
+
+function relationAdditionHasSemanticContent(value: string): boolean {
+  const normalized = normalizedSourceText(value);
+  if (!normalized) return false;
+  if (factActionOccurrences(normalized).length
+    || EVIDENCE_RELATION_DENIAL_SIGNAL.test(normalized)
+    || EVIDENCE_RELATION_STATUS_SIGNAL.test(normalized)
+    || EVIDENCE_RELATION_SCOPE_SIGNAL.test(normalized)) return true;
+  const targetMask = new Array<boolean>(normalized.length).fill(false);
+  const productTargets = productTargetTuples(normalized);
+  for (const target of productTargets) {
+    for (let index = target.start; index < target.end; index += 1) targetMask[index] = true;
+  }
+  const targetResidue = normalized.split('').map((character, index) =>
+    targetMask[index] ? ' ' : character).join('')
+    .replace(/\b(?:the|a|an|its|their|of|with|to|for)\b/giu, ' ')
+    .replace(/[\p{P}\p{S}\s]+/gu, '');
+  if (productTargets.length && !targetResidue) return false;
+  let residue = normalized;
+  for (const aliases of [
+    ...Object.values(AUTHORITY_ENTITY_REGISTRY),
+    ...Object.values(ORGANIZATION_ENTITY_REGISTRY),
+    ...Object.values(PRODUCT_ENTITY_REGISTRY),
+  ]) {
+    for (const alias of aliases) residue = residue.replace(semanticAliasPattern(alias), ' ');
+  }
+  const semanticResidue = residue.replace(/\b(?:the|a|an|its|their|of|with|to|for)\b/giu, ' ')
+    .replace(/[\p{P}\p{S}\s]+/gu, '');
+  return semanticResidue.length > 0;
+}
+
+function evidenceRelationUnitClauses(value: string): AtomicEvidenceClause[] {
+  const normalized = normalizedSourceText(value);
+  if (!normalized) return [];
+  const linkedParts = normalized
+    .split(new RegExp(EVIDENCE_RELATION_LINK_SOURCE, 'giu'))
+    .map((part) => normalizedSourceText(part))
+    .filter(Boolean);
+  const hasLinkedAddition = linkedParts.length > 1
+    && Boolean(leadingControllerIdentity(linkedParts[0]).identity)
+    && factActionOccurrences(linkedParts[0]).length > 0
+    && linkedParts.slice(1).some(relationAdditionHasSemanticContent);
+  const units = hasLinkedAddition ? linkedParts : [normalized];
+  const clauses: AtomicEvidenceClause[] = [];
+  for (let unitIndex = 0; unitIndex < units.length; unitIndex += 1) {
+    const parsed = splitAtomicFactClauses(units[unitIndex]);
+    const parts = parsed.clauses.length ? parsed.clauses : [units[unitIndex]];
+    for (const part of parts) {
+      const text = normalizedSourceText(part);
+      if (!text) continue;
+      clauses.push({
+        text,
+        reliable: parsed.reliable && !parsed.has_unknown_compound,
+        linked_addition: hasLinkedAddition && unitIndex > 0,
+      });
+    }
+  }
+  return clauses;
 }
 
 function atomicEvidenceClauses(evidence: ManualNewsEvidence): AtomicEvidenceClause[] {
   const clauses = new Map<string, AtomicEvidenceClause>();
   for (const value of [evidence.title, evidence.excerpt, ...evidence.claims_supported]) {
-    const normalized = normalizedSourceText(value);
-    if (!normalized) continue;
-    const parsed = splitAtomicFactClauses(normalized);
-    const parts = parsed.clauses.length ? parsed.clauses : [normalized];
-    for (const part of parts) {
-      const text = normalizedSourceText(part);
-      if (!text) continue;
-      const existing = clauses.get(text);
-      clauses.set(text, {
-        text,
-        reliable: Boolean(existing?.reliable || (parsed.reliable && !parsed.has_unknown_compound)),
+    for (const clause of evidenceRelationUnitClauses(value)) {
+      const existing = clauses.get(clause.text);
+      clauses.set(clause.text, {
+        text: clause.text,
+        reliable: Boolean(existing?.reliable || clause.reliable),
+        linked_addition: Boolean(existing?.linked_addition || clause.linked_addition),
       });
     }
   }
@@ -1621,34 +1678,58 @@ function isQuestionFramedEvidenceClause(value: string): boolean {
     || /^(?:为何|为什么|是否|如何|怎么|难道)/u.test(value.trim());
 }
 
-function leadingRegisteredEntityIdentity(value: string): string | null {
-  const normalized = normalizedSourceText(value).replace(/^[\p{P}\p{S}]+/gu, '');
-  const entries = Object.entries({
-    ...AUTHORITY_ENTITY_REGISTRY,
-    ...ORGANIZATION_ENTITY_REGISTRY,
-    ...PRODUCT_ENTITY_REGISTRY,
-  }).flatMap(([identity, aliases]) => aliases.map((alias) => ({ identity, alias })))
+interface LeadingControllerIdentity {
+  identity: string | null;
+  role_linked: boolean;
+}
+
+function leadingRegisteredEntityMatch(
+  value: string,
+  registry: Readonly<Record<string, readonly string[]>>,
+): { identity: string; length: number } | null {
+  const entries = Object.entries(registry)
+    .flatMap(([identity, aliases]) => aliases.map((alias) => ({ identity, alias })))
     .sort((left, right) => right.alias.length - left.alias.length);
   for (const entry of entries) {
     const escaped = entry.alias.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&').replace(/\s+/gu, '\\s+');
     const latin = /[a-z0-9]/iu.test(entry.alias);
     const pattern = latin
       ? new RegExp(`^${escaped}(?=$|[^a-z0-9])`, 'iu')
-      : new RegExp(`^${escaped}(?=$|[\\s，,。.!！？?；;：:、“”‘’（）()])`, 'u');
-    if (pattern.test(normalized)) return entry.identity;
+      : new RegExp(`^${escaped}(?=$|[\\s，,。.!！？?；;：:、“”‘’（）()的])`, 'u');
+    const match = pattern.exec(value);
+    if (match) return { identity: entry.identity, length: match[0].length };
   }
   return null;
+}
+
+function leadingControllerIdentity(value: string): LeadingControllerIdentity {
+  const normalized = normalizedSourceText(value).replace(/^[\p{P}\p{S}]+/gu, '');
+  const first = leadingRegisteredEntityMatch(normalized, {
+    ...AUTHORITY_ENTITY_REGISTRY,
+    ...ORGANIZATION_ENTITY_REGISTRY,
+    ...PRODUCT_ENTITY_REGISTRY,
+  });
+  if (!first) return { identity: null, role_linked: false };
+  const remainder = normalized.slice(first.length);
+  const role = /^(?:\s*(?:'s\s+)?(?:partner|investor|customer|supplier|affiliate|vendor|client|distributor|reseller)\s+|\s*的?(?:合作伙伴|投资方|投资者|客户|供应商|关联方|附属机构|经销商|代理商)\s*)/iu.exec(remainder);
+  if (!role) return { identity: first.identity, role_linked: false };
+  const second = leadingRegisteredEntityMatch(
+    remainder.slice(role[0].length), ORGANIZATION_ENTITY_REGISTRY,
+  );
+  return { identity: second?.identity || null, role_linked: true };
 }
 
 function sourceFactSubjectMatchesClause(fact: ManualSourceAtomicFact, clause: string): boolean {
   const expected = canonicalSubjectIdentity(fact.atomic_fact.subject)
     || canonicalEntityRoleKey(fact.atomic_fact.subject);
   if (!expected) return false;
+  const controller = leadingControllerIdentity(clause);
+  if (controller.role_linked) return controller.identity === expected;
   const structuredMatch = structuredFactUnits(clause).some((unit) => {
     if (!unit.subject) return false;
     return (canonicalSubjectIdentity(unit.subject) || canonicalEntityRoleKey(unit.subject)) === expected;
   });
-  return structuredMatch || leadingRegisteredEntityIdentity(clause) === expected;
+  return structuredMatch || controller.identity === expected;
 }
 
 function sameStructuredEventTarget(fact: ManualSourceAtomicFact, clause: string): boolean {
@@ -1781,6 +1862,39 @@ function structurallyMatchesFactIgnoringAssertionStatus(
     && sameStructuredEventTarget(fact, clause);
 }
 
+const EVIDENCE_RELATION_SCOPE_SIGNAL = /(?:仅限|只适用|仅适用|部分适用|范围缩小|限于)|\b(?:only applies|limited to|restricted to|scope was narrowed)\b/iu;
+const EVIDENCE_RELATION_STATUS_SIGNAL = /(?:恢复|取消|撤回|收回|撤销|反转|改为|随后更新|后来更新|状态变化)|\b(?:revers(?:e|es|ed)|updated|resum(?:e|es|ed)|withdrawn|withdrew|withdraws?|retract(?:s|ed)?|rescind(?:s|ed)?|cancelled|canceled|subsequently changed)\b/iu;
+const EVIDENCE_RELATION_DENIAL_SIGNAL = /(?:否认|驳斥|反驳|质疑|拒绝承认|不实|虚假|误导)|\b(?:denial|den(?:y|ies|ied|ying)|refut(?:e|es|ed|ing)|disput(?:e|es|ed|ing)|reject(?:s|ed|ing)?\s+(?:the\s+)?reports?|call(?:s|ed|ing)?\s+(?:the\s+)?reports?\s+.*\s+(?:false|misleading))\b/iu;
+
+function relationClauseHasUnexpectedSignal(
+  fact: ManualSourceAtomicFact,
+  clause: string,
+): boolean {
+  const pairs: ReadonlyArray<readonly [RegExp, RegExp]> = [
+    [EVIDENCE_RELATION_SCOPE_SIGNAL, EVIDENCE_RELATION_SCOPE_SIGNAL],
+    [EVIDENCE_RELATION_STATUS_SIGNAL, EVIDENCE_RELATION_STATUS_SIGNAL],
+    [EVIDENCE_RELATION_DENIAL_SIGNAL, EVIDENCE_RELATION_DENIAL_SIGNAL],
+  ];
+  return pairs.some(([clausePattern, factPattern]) =>
+    clausePattern.test(clause) && !factPattern.test(fact.text));
+}
+
+function relationSupportFallbackSafe(
+  fact: ManualSourceAtomicFact,
+  clause: AtomicEvidenceClause,
+): boolean {
+  if (!clause.reliable || relationClauseHasUnexpectedSignal(fact, clause.text)) return false;
+  const parsed = splitAtomicFactClauses(clause.text);
+  if (!parsed.reliable || parsed.has_unknown_compound || parsed.clauses.length !== 1) return false;
+  const expectedPredicateActions = factActionOccurrences(fact.atomic_fact.predicate);
+  const expectedActions = factActionOccurrences(fact.text);
+  const actualActions = factActionOccurrences(clause.text);
+  return expectedPredicateActions.length === 1
+    && canonicalJson(actualActions.map((action) => action.action))
+      === canonicalJson(expectedActions.map((action) => action.action))
+    && structuredFactUnitVerificationError(fact.text, clause.text) === null;
+}
+
 function evidenceClauseRelation(
   clause: AtomicEvidenceClause,
   evidence: Pick<ManualNewsEvidence, 'source_type' | 'reliable' | 'published_at'>,
@@ -1802,7 +1916,11 @@ function evidenceClauseRelation(
     }
     const exactError = structuredFactUnitVerificationError(fact.text, clause.text);
     if (exactError === null) {
-      return evidence.reliable && clause.reliable ? 'supports' : 'uncertain';
+      if (!relationSupportFallbackSafe(fact, clause)) {
+        relatedButUnresolved = true;
+        continue;
+      }
+      return evidence.reliable ? 'supports' : 'uncertain';
     }
     if (targetMatches && exactError === 'fact_verification_polarity_mismatch') {
       return trustedRelationSource ? 'conflicts' : 'uncertain';
@@ -1811,11 +1929,11 @@ function evidenceClauseRelation(
     if (denial && denialTargetsCoreEvent(fact, denial)) {
       return trustedRelationSource ? 'conflicts' : 'uncertain';
     }
-    const scopeChange = /(?:仅限|只适用|仅适用|部分适用|范围缩小|限于)|\b(?:only applies|limited to|restricted to|scope was narrowed)\b/iu.test(clause.text);
+    const scopeChange = EVIDENCE_RELATION_SCOPE_SIGNAL.test(clause.text);
     if ((targetMatches || productTargetMatches) && scopeChange) {
       return trustedRelationSource ? 'conflicts' : 'uncertain';
     }
-    const statusChange = /(?:恢复|取消|撤回|收回|撤销|反转|改为|随后更新|后来更新|状态变化)|\b(?:revers(?:e|es|ed)|updated|resum(?:e|es|ed)|withdrawn|withdrew|withdraws?|retract(?:s|ed)?|rescind(?:s|ed)?|cancelled|canceled|subsequently changed)\b/iu.test(clause.text);
+    const statusChange = EVIDENCE_RELATION_STATUS_SIGNAL.test(clause.text);
     if ((targetMatches || productTargetMatches) && statusChange) {
       if (!trustedRelationSource) return 'uncertain';
       const citedTimes = sourceFacts.flatMap((sourceFact) => sourceFact.evidence_ids)
@@ -1835,8 +1953,10 @@ function evidenceClauseRelation(
     const expectedActions = factActionOccurrences(fact.atomic_fact.predicate);
     const actualActions = factActionOccurrences(clause.text);
     if (productTargetMatches && expectedActions.length === 1
-      && actualActions.some((action) => action.action === expectedActions[0].action)
-      && evidence.reliable) {
+      && actualActions.length === 1
+      && actualActions[0].action === expectedActions[0].action
+      && evidence.reliable
+      && relationSupportFallbackSafe(fact, clause)) {
       return 'supports';
     }
     if (!clause.reliable) {
@@ -1848,6 +1968,7 @@ function evidenceClauseRelation(
       relatedButUnresolved = true;
     }
   }
+  if (clause.linked_addition) return 'uncertain';
   return relatedButUnresolved ? 'uncertain' : 'unrelated';
 }
 
@@ -1861,6 +1982,27 @@ function aggregateEvidenceRelations(
   return 'unrelated';
 }
 
+function isRedundantContextExpansion(
+  supportingClause: string,
+  candidateClause: string,
+): boolean {
+  const support = normalizedSourceText(supportingClause).replace(/[.!。！]+$/u, '');
+  const candidate = normalizedSourceText(candidateClause).replace(/[.!。！]+$/u, '');
+  if (!support || !candidate.startsWith(support)) return false;
+  const residual = candidate.slice(support.length).trim();
+  if (!/^(?:in|under|within|as\s+part\s+of)\b/iu.test(residual)) return false;
+  if (new RegExp(EVIDENCE_RELATION_LINK_SOURCE, 'iu').test(residual)
+    || EVIDENCE_RELATION_DENIAL_SIGNAL.test(residual)
+    || EVIDENCE_RELATION_STATUS_SIGNAL.test(residual)
+    || EVIDENCE_RELATION_SCOPE_SIGNAL.test(residual)
+    || factActionOccurrences(residual).length
+    || normalizedFactDates(residual).length
+    || normalizedFactInstants(residual).length
+    || relativeFactTimeSpans(residual).length) return false;
+  const supportEntities = registeredEntityIdentities(support);
+  return [...registeredEntityIdentities(residual)].every((entity) => supportEntities.has(entity));
+}
+
 function deterministicEvidenceRelation(
   evidence: ManualNewsEvidence,
   sourceFacts: readonly ManualSourceAtomicFact[],
@@ -1868,8 +2010,13 @@ function deterministicEvidenceRelation(
 ): DeterministicEvidenceRelation {
   const clauses = atomicEvidenceClauses(evidence);
   if (!clauses.length) return 'uncertain';
-  return aggregateEvidenceRelations(clauses.map((clause) =>
-    evidenceClauseRelation(clause, evidence, sourceFacts, evidenceById)));
+  const relations = clauses.map((clause) =>
+    evidenceClauseRelation(clause, evidence, sourceFacts, evidenceById));
+  const supportingClauses = clauses.filter((_, index) => relations[index] === 'supports');
+  const effectiveRelations = relations.filter((relation, index) => relation !== 'uncertain'
+    || !supportingClauses.some((supporting) =>
+      isRedundantContextExpansion(supporting.text, clauses[index].text)));
+  return aggregateEvidenceRelations(effectiveRelations);
 }
 
 function deterministicDispositionQuoteRelations(
@@ -1878,13 +2025,7 @@ function deterministicDispositionQuoteRelations(
   sourceFacts: readonly ManualSourceAtomicFact[],
   evidenceById: ReadonlyMap<string, ManualNewsEvidence>,
 ): DeterministicEvidenceRelation[] {
-  const parsed = splitAtomicFactClauses(normalizedSourceText(quote));
-  const clauses = (parsed.clauses.length ? parsed.clauses : [normalizedSourceText(quote)])
-    .filter(Boolean)
-    .map((text) => ({
-      text,
-      reliable: parsed.reliable && !parsed.has_unknown_compound,
-    }));
+  const clauses = evidenceRelationUnitClauses(quote);
   if (!clauses.length) return ['uncertain'];
   return clauses.map((clause) => evidenceClauseRelation(clause, evidence, sourceFacts, evidenceById));
 }
@@ -2921,7 +3062,7 @@ const FACT_ACTION_PATTERNS: ReadonlyArray<FactActionPattern> = [
   ['discuss', /(?:讨论|商议|磋商)|\b(?:discuss(?:es|ed|ing)?|deliberat(?:e|es|ed|ing))\b/giu, /^(?:discuss(?:ing|ed|es)?|deliberat(?:ing|ed|es|e))\b/iu],
   ['deny', /(?:否认)|\b(?:den(?:y|ies|ied|ying))\b/giu, /^den(?:y|ies|ied|ying)/iu],
   ['open_access', /(?:开放)|\b(?:open(?:s|ed|ing)?\s+(?:access|service))\b/giu, /^open(?:ing|ed|s)?\b/iu],
-  ['limit_scope', /(?:受限|限定|限于|限制(?:为|在)?)|\b(?:limit(?:s|ed|ing)?|restrict(?:s|ed|ing)?|(?:cover|support)(?:s|ed|ing)?\s+[^.;,]{0,60}(?:\bonly\b|\bsupported\s+(?:models?|products?)\b))/giu, /^(?:limit(?:s|ed|ing)?|restrict(?:s|ed|ing)?|cover(?:s|ed|ing)?|support(?:s|ed|ing)?)/iu],
+  ['limit_scope', /(?:受限|限定|限于|限制(?:为|在)?)|\b(?:limit(?:s|ed|ing)?\b|restrict(?:s|ed|ing)?\b|(?:cover|support)(?:s|ed|ing)?\s+[^.;,]{0,60}(?:\bonly\b|\bsupported\s+(?:models?|products?)\b))/giu, /^(?:limit(?:s|ed|ing)?|restrict(?:s|ed|ing)?|cover(?:s|ed|ing)?|support(?:s|ed|ing)?)/iu],
 ];
 
 function factActions(value: string): Set<FactAction> {
