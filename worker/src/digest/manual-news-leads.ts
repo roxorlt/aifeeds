@@ -254,6 +254,7 @@ export interface ManualLeadFactVerification {
     supported: boolean;
     issue_code: 'none' | 'misclassified' | 'conflict_ignored' | 'update_ignored' | 'not_found';
     source_quotes: Array<{ evidence_id: string; quote: string }>;
+    quote_relation: DeterministicEvidenceRelation;
   }>;
   completeness_results?: ManualEvidenceCompletenessResult[];
   prior_context: ManualLeadVerifiedPriorContext[];
@@ -1589,12 +1590,192 @@ function validatedProjectionSentence(
 
 type DeterministicEvidenceRelation = 'supports' | 'conflicts' | 'updates' | 'uncertain' | 'unrelated';
 
-function normalizedEvidenceDispositionText(evidence: ManualNewsEvidence): string {
-  return [evidence.publisher, evidence.title, evidence.excerpt, ...evidence.claims_supported]
-    .join(' ')
-    .normalize('NFKC')
-    .replace(/\s+/gu, ' ')
-    .trim();
+interface AtomicEvidenceClause {
+  text: string;
+  reliable: boolean;
+}
+
+function atomicEvidenceClauses(evidence: ManualNewsEvidence): AtomicEvidenceClause[] {
+  const clauses = new Map<string, AtomicEvidenceClause>();
+  for (const value of [evidence.title, evidence.excerpt, ...evidence.claims_supported]) {
+    const normalized = normalizedSourceText(value);
+    if (!normalized) continue;
+    const parsed = splitAtomicFactClauses(normalized);
+    const parts = parsed.clauses.length ? parsed.clauses : [normalized];
+    for (const part of parts) {
+      const text = normalizedSourceText(part);
+      if (!text) continue;
+      const existing = clauses.get(text);
+      clauses.set(text, {
+        text,
+        reliable: Boolean(existing?.reliable || (parsed.reliable && !parsed.has_unknown_compound)),
+      });
+    }
+  }
+  return [...clauses.values()];
+}
+
+function isQuestionFramedEvidenceClause(value: string): boolean {
+  return /[?？]\s*$/u.test(value)
+    || /^(?:why|how|what|whether|is|are|was|were|could|would|can|did)\b/iu.test(value.trim())
+    || /^(?:为何|为什么|是否|如何|怎么|难道)/u.test(value.trim());
+}
+
+function sourceFactSubjectMatchesClause(fact: ManualSourceAtomicFact, clause: string): boolean {
+  const expected = canonicalSubjectIdentity(fact.atomic_fact.subject)
+    || canonicalEntityRoleKey(fact.atomic_fact.subject);
+  if (!expected) return false;
+  return structuredFactUnits(clause).some((unit) => {
+    if (!unit.subject) return false;
+    return (canonicalSubjectIdentity(unit.subject) || canonicalEntityRoleKey(unit.subject)) === expected;
+  }) || registeredEntityIdentities(clause).has(expected);
+}
+
+function sameStructuredEventTarget(fact: ManualSourceAtomicFact, clause: string): boolean {
+  let source: ManualBilingualSemanticSlots;
+  try {
+    source = bilingualSemanticSlots(fact.atomic_fact);
+  } catch {
+    return false;
+  }
+  const productTargets = productTargetTuples(clause).map((target) => ({
+    entity: target.entity, components: target.components,
+  }));
+  const participantRoles = bilingualParticipantRoles(clause);
+  const objectRelations = canonicalObjectRelations(clause);
+  const qualifiers = bilingualTargetQualifiers(clause);
+  const versions = bilingualFactVersions(clause);
+  const regions = bilingualFactRegions(clause);
+  const requiredArrays: Array<[readonly unknown[], readonly unknown[]]> = [
+    [source.product_targets, productTargets],
+    [source.participant_roles, participantRoles],
+    [source.object_relations, objectRelations],
+    [source.target_qualifiers, qualifiers],
+    [source.versions, versions],
+    [source.regions, regions],
+    [source.dates, normalizedFactDates(clause).sort()],
+    [source.instants, normalizedFactInstants(clause).sort()],
+    [source.relative_times, [...new Set(relativeFactTimeSpans(clause).map((span) => span.value))].sort()],
+  ];
+  if (requiredArrays.some(([expected, actual]) => expected.length > 0
+    && canonicalJson(expected) !== canonicalJson(actual))) return false;
+  if (source.participant_quantifier !== null
+    && source.participant_quantifier !== bilingualParticipantQuantifier(clause)) return false;
+  if (source.scope !== null && source.scope !== dominantFactScope(clause)) return false;
+  if (source.object_polarity !== bilingualObjectPolarity(clause)) return false;
+  if (canonicalJson(source.object_modality) !== canonicalJson(bilingualModalitySlots(clause, null))) return false;
+  if (source.reason !== null && source.reason !== canonicalFactReason(clause).canonical) return false;
+  const sourceAnchors = highConfidenceLeadAnchors(fact.atomic_fact.object);
+  return sourceAnchors.every((anchor) => exactStructuredAnchorPresent(anchor, clause));
+}
+
+function sameCoreProductAndSubject(fact: ManualSourceAtomicFact, clause: string): boolean {
+  if (!sourceFactSubjectMatchesClause(fact, clause)) return false;
+  const expectedEntities = registeredEntityIdentities(fact.atomic_fact.object);
+  const actualEntities = registeredEntityIdentities(clause);
+  if (expectedEntities.size > 0
+    && [...expectedEntities].every((entity) => actualEntities.has(entity))) {
+    let source: ManualBilingualSemanticSlots;
+    try {
+      source = bilingualSemanticSlots(fact.atomic_fact);
+    } catch {
+      return false;
+    }
+    return canonicalJson(source.target_qualifiers) === canonicalJson(bilingualTargetQualifiers(clause))
+      && canonicalJson(source.versions) === canonicalJson(bilingualFactVersions(clause));
+  }
+  const anchors = highConfidenceLeadAnchors(fact.atomic_fact.object);
+  return anchors.length > 0 && anchors.every((anchor) => exactStructuredAnchorPresent(anchor, clause));
+}
+
+function directDenialEmbeddedClause(value: string, fact: ManualSourceAtomicFact): string | null {
+  if (isQuestionFramedEvidenceClause(value)) return null;
+  const normalized = normalizedSourceText(value);
+  const english = /^(.*?)\b(?:den(?:y|ies|ied)|refut(?:e|es|ed)|disput(?:e|es|ed)|reject(?:s|ed)?\s+(?:the\s+)?reports?|call(?:s|ed)?\s+(?:the\s+)?reports?)\b\s*(?:that\s+)?(.+?)(?:\s+(?:false|misleading))?[.!]?$/iu.exec(normalized);
+  if (english) {
+    const subject = english[1].trim();
+    const embedded = english[2].trim()
+      .replace(/^(?:the\s+)?(?:reports?|claims?)\s+(?:that\s+)?/iu, '')
+      .replace(/^(?:it|the company)\b/iu, subject);
+    return `${subject} ${embedded}`.trim();
+  }
+  const chinese = /^(.*?)(?:否认|驳斥|反驳|质疑|拒绝承认|称(?:相关)?(?:报道|消息|传闻)(?:为|是)?(?:虚假|不实|错误|误导))\s*(?:有关|关于)?(.+?)(?:的)?(?:报道|消息|传闻)?(?:不实|错误|虚假|误导)?[。！]?$/u.exec(normalized);
+  if (chinese) return `${chinese[1].trim()}${chinese[2].trim()}`;
+  const sourceSubject = fact.atomic_fact.subject.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const callFalse = new RegExp(`^(${sourceSubject})\\s+call(?:s|ed)?\\s+(?:the\\s+)?reports?\\s+(?:that\\s+)?(.+?)\\s+(?:false|misleading)[.!]?$`, 'iu')
+    .exec(normalized);
+  return callFalse ? `${callFalse[1]} ${callFalse[2].replace(/^(?:it|the company)\b/iu, callFalse[1])}` : null;
+}
+
+function structurallyMatchesFactIgnoringAssertionStatus(
+  fact: ManualSourceAtomicFact,
+  clause: string,
+): boolean {
+  const expectedActions = factActionOccurrences(fact.atomic_fact.predicate);
+  const actualActions = factActionOccurrences(clause);
+  if (expectedActions.length !== 1
+    || !actualActions.some((actual) => actual.action === expectedActions[0].action)) return false;
+  return sourceFactSubjectMatchesClause(fact, clause)
+    && sameStructuredEventTarget(fact, clause);
+}
+
+function evidenceClauseRelation(
+  clause: AtomicEvidenceClause,
+  evidence: Pick<ManualNewsEvidence, 'source_type' | 'reliable' | 'published_at'>,
+  sourceFacts: readonly ManualSourceAtomicFact[],
+  evidenceById: ReadonlyMap<string, ManualNewsEvidence>,
+): DeterministicEvidenceRelation {
+  let relatedButUnresolved = false;
+  for (const fact of sourceFacts) {
+    const subjectMatches = sourceFactSubjectMatchesClause(fact, clause.text);
+    const targetMatches = subjectMatches && sameStructuredEventTarget(fact, clause.text);
+    const productTargetMatches = sameCoreProductAndSubject(fact, clause.text);
+    const questionFramed = isQuestionFramedEvidenceClause(clause.text);
+    if (questionFramed) {
+      if (targetMatches || productTargetMatches) relatedButUnresolved = true;
+      continue;
+    }
+    const exactError = structuredFactUnitVerificationError(fact.text, clause.text);
+    if (exactError === null) {
+      return evidence.reliable ? 'supports' : 'uncertain';
+    }
+    if (targetMatches && exactError === 'fact_verification_polarity_mismatch') return 'conflicts';
+    const embedded = directDenialEmbeddedClause(clause.text, fact);
+    if (embedded && structurallyMatchesFactIgnoringAssertionStatus(fact, embedded)) return 'conflicts';
+    const scopeChange = /(?:仅限|只适用|仅适用|部分适用|范围缩小|限于)|\b(?:only applies|limited to|restricted to|scope was narrowed)\b/iu.test(clause.text);
+    if ((targetMatches || productTargetMatches) && scopeChange) return 'conflicts';
+    const statusChange = /(?:恢复|取消|撤回|收回|撤销|反转|改为|随后更新|后来更新|状态变化)|\b(?:revers(?:e|es|ed)|updated|resum(?:e|es|ed)|withdrawn|withdrew|withdraws?|retract(?:s|ed)?|rescind(?:s|ed)?|cancelled|canceled|subsequently changed)\b/iu.test(clause.text);
+    if ((targetMatches || productTargetMatches) && statusChange) {
+      const citedTimes = sourceFacts.flatMap((sourceFact) => sourceFact.evidence_ids)
+        .map((id) => evidenceById.get(id)?.published_at || '')
+        .map((value) => Date.parse(value))
+        .filter(Number.isFinite);
+      const currentTime = Date.parse(evidence.published_at || '');
+      if (Number.isFinite(currentTime) && (!citedTimes.length || currentTime > Math.max(...citedTimes))) {
+        return 'updates';
+      }
+      return 'conflicts';
+    }
+    if (!clause.reliable) {
+      if (targetMatches || productTargetMatches) relatedButUnresolved = true;
+      continue;
+    }
+    if (targetMatches || productTargetMatches || (subjectMatches && highConfidenceLeadAnchors(fact.atomic_fact.object)
+      .some((anchor) => exactStructuredAnchorPresent(anchor, clause.text)))) {
+      relatedButUnresolved = true;
+    }
+  }
+  return relatedButUnresolved ? 'uncertain' : 'unrelated';
+}
+
+function aggregateEvidenceRelations(
+  relations: readonly DeterministicEvidenceRelation[],
+): DeterministicEvidenceRelation {
+  if (relations.includes('updates')) return 'updates';
+  if (relations.includes('conflicts')) return 'conflicts';
+  if (relations.includes('supports')) return 'supports';
+  if (relations.includes('uncertain')) return 'uncertain';
+  return 'unrelated';
 }
 
 function deterministicEvidenceRelation(
@@ -1602,46 +1783,28 @@ function deterministicEvidenceRelation(
   sourceFacts: readonly ManualSourceAtomicFact[],
   evidenceById: ReadonlyMap<string, ManualNewsEvidence>,
 ): DeterministicEvidenceRelation {
-  const text = normalizedEvidenceDispositionText(evidence);
-  const normalizedText = text.toLowerCase();
-  const sourceText = sourceFacts.map((fact) => fact.text).join(' ');
-  const sourceSubjects = sourceFacts.flatMap((fact) => [
-    fact.atomic_fact.subject.toLowerCase(),
-    ...registeredEntityIdentities(fact.atomic_fact.subject),
-  ]).filter((value) => value.length >= 2);
-  const sourceAnchors = sourceFacts.flatMap((fact) => highConfidenceLeadAnchors(
-    `${fact.atomic_fact.subject} ${fact.atomic_fact.object}`,
-  ));
-  const subjectShared = sourceSubjects.some((subject) => normalizedText.includes(subject.toLowerCase()));
-  const anchorShared = sourceAnchors.some((anchor) => exactStructuredAnchorPresent(anchor, text));
-  const sourceOccurrences = factActionOccurrences(sourceText);
-  const evidenceOccurrences = factActionOccurrences(text);
-  const actionShared = sourceOccurrences.some((source) => evidenceOccurrences.some((candidate) =>
-    candidate.action === source.action));
-  const opposite = hasOpposingFactActions(sourceText, text);
-  const polarityConflict = sourceOccurrences.some((source) => evidenceOccurrences.some((candidate) =>
-    candidate.action === source.action && candidate.negated !== source.negated));
-  const explicitDenial = evidenceOccurrences.some((candidate) => candidate.action === 'deny')
-    || /(?:否认|并未|并不|从未|不再|更正)|\b(?:den(?:y|ies|ied)|retract(?:s|ed)?|rescind(?:s|ed)?|not|never|no longer)\b/iu.test(text);
-  const scopeChange = /(?:仅限|只适用|仅适用|部分适用|范围缩小|限于)|\b(?:only applies|limited to|restricted to|scope was narrowed)\b/iu.test(text);
-  const statusChange = /(?:恢复|取消|撤回|收回|改为|随后更新|后来更新|状态变化)|\b(?:reversed|updated|resumed|withdrawn|withdrew|withdraws?|cancelled|canceled|subsequently changed)\b/iu.test(text);
-  const related = (subjectShared || anchorShared)
-    && (actionShared || opposite || explicitDenial || scopeChange || statusChange);
-  if (!related) return subjectShared || anchorShared ? 'uncertain' : 'unrelated';
-  if (opposite || polarityConflict || explicitDenial || scopeChange) return 'conflicts';
-  if (actionShared) return 'supports';
-  if (statusChange) {
-    const citedTimes = sourceFacts.flatMap((fact) => fact.evidence_ids)
-      .map((id) => evidenceById.get(id)?.published_at || '')
-      .map((value) => Date.parse(value))
-      .filter(Number.isFinite);
-    const currentTime = Date.parse(evidence.published_at || '');
-    if (Number.isFinite(currentTime) && (!citedTimes.length || currentTime > Math.max(...citedTimes))) {
-      return 'updates';
-    }
-    return 'uncertain';
-  }
-  return 'uncertain';
+  const clauses = atomicEvidenceClauses(evidence);
+  if (!clauses.length) return 'uncertain';
+  return aggregateEvidenceRelations(clauses.map((clause) =>
+    evidenceClauseRelation(clause, evidence, sourceFacts, evidenceById)));
+}
+
+function deterministicDispositionQuoteRelation(
+  quote: string,
+  evidence: ManualNewsEvidence,
+  sourceFacts: readonly ManualSourceAtomicFact[],
+  evidenceById: ReadonlyMap<string, ManualNewsEvidence>,
+): DeterministicEvidenceRelation {
+  const parsed = splitAtomicFactClauses(normalizedSourceText(quote));
+  const clauses = (parsed.clauses.length ? parsed.clauses : [normalizedSourceText(quote)])
+    .filter(Boolean)
+    .map((text) => ({
+      text,
+      reliable: parsed.reliable && !parsed.has_unknown_compound,
+    }));
+  if (!clauses.length) return 'uncertain';
+  return aggregateEvidenceRelations(clauses.map((clause) =>
+    evidenceClauseRelation(clause, evidence, sourceFacts, evidenceById)));
 }
 
 function validateGeneratedEvidenceDispositions(
@@ -2485,6 +2648,9 @@ export function buildManualLeadFactVerificationPrompt(input: {
       '先逐字核验 source fact 与来源 quote；随后独立核验 projections。每个中文投影只能使用其 source_fact_ids 映射且已经 supported 的源事实，必须在主体角色、主体、动作数量、对象、版本、时间、地区、否定、情态和完成状态上语义等价。',
       '中文投影新增事实用 fact_expansion，遗漏源事实槽位用 fact_omission，翻译改变语义用 translation_mismatch。不得把中文投影自身当证据，也不得用未映射 source fact 补齐。',
       'disposition_results 必须覆盖顶层每个 evidence disposition 恰好一次，并用该 evidence 自身的一段连续原文核验其 supports_core、contradicts_core、material_update、background 或 irrelevant 分类。不得只核验支持证据而忽略官方否认、撤回、范围限制或更晚更新。',
+      '每个 disposition quote 必须先按原子子句拆分，再在同一子句内完整对齐 source_fact 的主体、动作、完整产品 target tuple、否定/情态、参与者/数量范围、状态与时间；只有公司名、任意 not/否认词或跨子句拼接都不构成支持、冲突或更新。',
+      'deny/refute/dispute/reject reports/call reports false 等否认只有在其被否认的内嵌事件完整对齐 source_fact 时才是冲突；Why/是否等疑问式 rumor is misleading 标题不得当作主体正式否认。',
+      '官方撤回、取消或反转同一限制即使缺少 published_at 也必须按冲突/不确定性阻断；无法可靠解析的 relation 必须 unsupported/needs_review，低可靠标题不得伪造 supports_core。',
       '只有所有 fact、projection 与 disposition 都 supported=true 且 issue_code=none 时才能形成有效结论；若存在已正确覆盖的 contradicts_core/material_update，overall_verdict 必须为 conflicted 且 assessment recommendation 必须为 needs_review，否则 overall_verdict 为 supported；任一未支持项则为 unsupported。',
     ].join('\n'),
     user: JSON.stringify({
@@ -4662,7 +4828,10 @@ export function validateManualLeadFactVerification(
       = raw.disposition_results.map((item) => {
       if (!isPlainObject(item)) throw new Error('invalid_disposition_verification_results');
       try {
-        strictKeys(item, ['evidence_id', 'disposition', 'supported', 'issue_code', 'source_quotes']);
+        strictKeys(item, [
+          'evidence_id', 'disposition', 'supported', 'issue_code', 'source_quotes',
+          ...(options.persisted ? ['quote_relation'] : []),
+        ]);
       } catch {
         throw new Error('invalid_disposition_verification_results');
       }
@@ -4696,12 +4865,26 @@ export function validateManualLeadFactVerification(
       if (factTokens(sourceQuotes.map((quote) => quote.quote).join(' ')).size < 2) {
         throw new Error('invalid_disposition_verification_quote');
       }
+      const referencedFacts = sourceFacts.filter((fact) => definition.source_fact_ids.includes(fact.fact_id));
+      const quoteRelations = sourceQuotes.map((quote) => deterministicDispositionQuoteRelation(
+        quote.quote,
+        source,
+        referencedFacts.length ? referencedFacts : sourceFacts,
+        byEvidenceId,
+      ));
+      const quoteRelation = aggregateEvidenceRelations(quoteRelations);
       if (item.supported) {
         const relation = deterministicEvidenceRelation(source, sourceFacts, byEvidenceId);
-        const referencedFacts = sourceFacts.filter((fact) => definition.source_fact_ids.includes(fact.fact_id));
         const referencedRelation = referencedFacts.length
           ? deterministicEvidenceRelation(source, referencedFacts, byEvidenceId)
           : null;
+        const quoteRelationMatches = definition.disposition === 'supports_core'
+          ? quoteRelations.includes('supports')
+          : definition.disposition === 'contradicts_core'
+            ? quoteRelations.includes('conflicts')
+            : definition.disposition === 'material_update'
+              ? quoteRelations.includes('updates')
+              : quoteRelations.every((quoteRelation) => ['unrelated', 'uncertain'].includes(quoteRelation));
         const locallyConsistent = (relation === 'supports'
           ? definition.disposition === 'supports_core'
           : relation === 'conflicts'
@@ -4711,6 +4894,7 @@ export function validateManualLeadFactVerification(
               : relation === 'unrelated'
                 ? ['background', 'irrelevant'].includes(definition.disposition)
                 : definition.disposition === 'background' && assessment.recommendation === 'needs_review')
+          && quoteRelationMatches
           && (definition.disposition === 'supports_core'
             ? referencedRelation === 'supports'
             : definition.disposition === 'contradicts_core'
@@ -4720,6 +4904,9 @@ export function validateManualLeadFactVerification(
                 : true);
         if (!locallyConsistent) throw new Error('invalid_disposition_verification_semantics');
       }
+      if (options.persisted && item.quote_relation !== quoteRelation) {
+        throw new Error('invalid_disposition_verification_semantics');
+      }
       seenEvidenceIds.add(evidenceId);
       return {
         evidence_id: evidenceId,
@@ -4727,6 +4914,7 @@ export function validateManualLeadFactVerification(
         supported: item.supported,
         issue_code: item.issue_code as NonNullable<ManualLeadFactVerification['disposition_results']>[number]['issue_code'],
         source_quotes: sourceQuotes,
+        quote_relation: quoteRelation,
       };
     });
     if (parsedDispositionResults.length !== dispositionDefinitions.length
@@ -4929,6 +5117,7 @@ function canonicalVerificationPayload(
           evidence_id: quote.evidence_id,
           quote: quote.quote,
         })),
+        quote_relation: item.quote_relation,
       })) ?? null,
       completeness_results: verification.completeness_results?.map((item) => ({ ...item })) ?? null,
       prior_context: verification.prior_context,

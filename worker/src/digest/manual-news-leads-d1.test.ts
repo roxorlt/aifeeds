@@ -54,7 +54,6 @@ class SqliteD1 {
         submit_idempotency_key TEXT NOT NULL, last_mutation_kind TEXT, last_mutation_idempotency_key TEXT,
         last_mutation_nonce TEXT,
         processing_owner TEXT, processing_attempt INTEGER NOT NULL DEFAULT 0, processing_lease_until INTEGER,
-        assessment_generation_cycle_id TEXT,
         confirmed_batch_id TEXT, confirmed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       );
       CREATE TABLE manual_news_evidence (
@@ -90,14 +89,20 @@ class SqliteD1 {
         last_validation_code TEXT, last_validation_path TEXT,
         regeneration_consumed INTEGER NOT NULL DEFAULT 0,
         validated_assessment_json TEXT, provider_failure_json TEXT,
-        superseded_by_processing_owner TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        superseded_by_processing_owner TEXT, is_current INTEGER NOT NULL DEFAULT 1,
+        start_nonce TEXT NOT NULL UNIQUE, last_result_nonce TEXT UNIQUE,
+        regeneration_nonce TEXT UNIQUE, supersede_nonce TEXT UNIQUE,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
         UNIQUE (lead_id, processing_owner, base_version)
       );
+      CREATE UNIQUE INDEX idx_manual_news_generation_one_current_lead
+        ON manual_news_assessment_generation_cycles(lead_id) WHERE is_current = 1;
       CREATE TABLE manual_news_assessment_generation_revisions (
         cycle_id TEXT NOT NULL, generation_revision INTEGER NOT NULL,
         call_kind TEXT NOT NULL, call_state TEXT NOT NULL,
         validation_code TEXT, validation_path TEXT, validated_assessment_json TEXT,
-        provider_failure_json TEXT, created_at INTEGER NOT NULL, completed_at INTEGER,
+        provider_failure_json TEXT, start_nonce TEXT NOT NULL UNIQUE, result_nonce TEXT UNIQUE,
+        created_at INTEGER NOT NULL, completed_at INTEGER,
         PRIMARY KEY (cycle_id, generation_revision), UNIQUE (cycle_id, call_kind)
       );
       CREATE TABLE manual_news_lead_audit (
@@ -542,6 +547,114 @@ describe('manual lead D1-backed dedupe', () => {
     ]);
   });
 
+  test('binds start, result, and regeneration audits to the exact concurrent mutation nonce', async () => {
+    const state = fixture('verifying', 4);
+    const firstStore = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    const secondStore = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+
+    const startBarrier = state.db.pauseNextFirstCalls('manual_generation:current_fenced', 2);
+    const startOne = firstStore.beginAssessmentGenerationCycle(state.leadId, 4);
+    const startTwo = secondStore.beginAssessmentGenerationCycle(state.leadId, 4);
+    await startBarrier.entered;
+    startBarrier.release();
+    const starts = await Promise.all([startOne, startTwo]);
+    expect(starts.filter((result) => result.acquired_call)).toHaveLength(1);
+
+    const cycleStart = state.db.sqlite.prepare(`SELECT start_nonce FROM manual_news_assessment_generation_cycles
+      WHERE lead_id = ? AND is_current = 1`).get(state.leadId) as { start_nonce: string };
+    const revisionStart = state.db.sqlite.prepare(`SELECT start_nonce FROM manual_news_assessment_generation_revisions
+      WHERE generation_revision = 1`).get() as { start_nonce: string };
+    const startAudits = state.db.sqlite.prepare(`SELECT mutation_nonce FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'assessment_generation_start_1'`).all(state.leadId) as Array<{ mutation_nonce: string }>;
+    expect(startAudits).toEqual([{ mutation_nonce: cycleStart.start_nonce }]);
+    expect(revisionStart.start_nonce).toBe(cycleStart.start_nonce);
+
+    const resultBarrier = state.db.pauseNextFirstCalls('manual_generation:current_fenced', 2);
+    const validation = {
+      generation_revision: 1 as const,
+      validation_code: 'non_atomic_source_object',
+      validation_path: 'source_facts[0].atomic_fact.object',
+      regeneratable: true,
+    };
+    const resultOne = firstStore.recordAssessmentGenerationValidation(state.leadId, 4, validation);
+    const resultTwo = secondStore.recordAssessmentGenerationValidation(state.leadId, 4, validation);
+    await resultBarrier.entered;
+    resultBarrier.release();
+    await expect(Promise.all([resultOne, resultTwo])).resolves.toHaveLength(2);
+
+    const cycleResult = state.db.sqlite.prepare(`SELECT last_result_nonce
+      FROM manual_news_assessment_generation_cycles WHERE lead_id = ? AND is_current = 1`)
+      .get(state.leadId) as { last_result_nonce: string };
+    const revisionResult = state.db.sqlite.prepare(`SELECT result_nonce
+      FROM manual_news_assessment_generation_revisions WHERE generation_revision = 1`)
+      .get() as { result_nonce: string };
+    const resultAudits = state.db.sqlite.prepare(`SELECT mutation_nonce FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'assessment_generation_result_1'`).all(state.leadId) as Array<{ mutation_nonce: string }>;
+    expect(resultAudits).toEqual([{ mutation_nonce: cycleResult.last_result_nonce }]);
+    expect(revisionResult.result_nonce).toBe(cycleResult.last_result_nonce);
+
+    const regenerationBarrier = state.db.pauseNextFirstCalls('manual_generation:current_fenced', 2);
+    const regenerationOne = firstStore.consumeAssessmentRegeneration(state.leadId, 4);
+    const regenerationTwo = secondStore.consumeAssessmentRegeneration(state.leadId, 4);
+    await regenerationBarrier.entered;
+    regenerationBarrier.release();
+    const regenerations = await Promise.all([regenerationOne, regenerationTwo]);
+    expect(regenerations.filter((result) => result.acquired_call)).toHaveLength(1);
+
+    const cycleRegeneration = state.db.sqlite.prepare(`SELECT regeneration_nonce
+      FROM manual_news_assessment_generation_cycles WHERE lead_id = ? AND is_current = 1`)
+      .get(state.leadId) as { regeneration_nonce: string };
+    const revisionRegeneration = state.db.sqlite.prepare(`SELECT start_nonce
+      FROM manual_news_assessment_generation_revisions WHERE generation_revision = 2`)
+      .get() as { start_nonce: string };
+    const regenerationAudits = state.db.sqlite.prepare(`SELECT mutation_nonce FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'assessment_generation_start_2'`).all(state.leadId) as Array<{ mutation_nonce: string }>;
+    expect(regenerationAudits).toEqual([{ mutation_nonce: cycleRegeneration.regeneration_nonce }]);
+    expect(revisionRegeneration.start_nonce).toBe(cycleRegeneration.regeneration_nonce);
+
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action IN (
+        'assessment_generation_start_1', 'assessment_generation_result_1', 'assessment_generation_start_2'
+      )`).get(state.leadId)).toEqual({ count: 3 });
+  });
+
+  test('an old generation nonce cannot mutate or audit a superseding current-cycle lineage', async () => {
+    const state = fixture('verifying', 4);
+    const oldStore = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    const oldCycle = await oldStore.beginAssessmentGenerationCycle(state.leadId, 4);
+    await oldStore.recordAssessmentGenerationValidation(state.leadId, 4, {
+      generation_revision: 1,
+      validation_code: 'non_atomic_source_object',
+      validation_path: 'source_facts[0].atomic_fact.object',
+      regeneratable: false,
+    });
+    state.db.sqlite.prepare(`UPDATE manual_news_leads SET status = 'needs_review', version = 5,
+      processing_owner = NULL, processing_lease_until = NULL WHERE id = ?`).run(state.leadId);
+
+    const retried = await retryManualNewsLead(state.env, state.leadId, 5, 'retry-generation-aba', 50);
+    expect(retried).toMatchObject({ ok: true, changed: true, lead: { version: 6 } });
+    if (!retried.ok) throw new Error('expected retry success');
+    state.db.sqlite.prepare(`UPDATE manual_news_leads SET status = 'verifying' WHERE id = ?`).run(state.leadId);
+    const nextOwner = `manual-news-${state.leadId}-v6`;
+    const nextStore = new D1ManualLeadProcessingStore(state.env, nextOwner, 1);
+    const nextCycle = await nextStore.beginAssessmentGenerationCycle(state.leadId, 6);
+    expect(nextCycle.cycle_id).not.toBe(oldCycle.cycle_id);
+
+    const auditsBefore = state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action LIKE 'assessment_generation_%'`).get(state.leadId);
+    await expect(oldStore.recordAssessmentGenerationValidation(state.leadId, 4, {
+      generation_revision: 1, validation_code: 'valid', regeneratable: false,
+      validated_assessment: processedAssessment(),
+    })).rejects.toThrow(/stale_processing_owner/);
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action LIKE 'assessment_generation_%'`).get(state.leadId)).toEqual(auditsBefore);
+    expect(state.db.sqlite.prepare(`SELECT cycle_id, is_current, call_state FROM manual_news_assessment_generation_cycles
+      WHERE lead_id = ? ORDER BY created_at, cycle_id`).all(state.leadId)).toEqual(expect.arrayContaining([
+        { cycle_id: oldCycle.cycle_id, is_current: 0, call_state: 'superseded' },
+        { cycle_id: nextCycle.cycle_id, is_current: 1, call_state: 'initial_started' },
+      ]));
+  });
+
   test('manual retry supersedes the old generation cycle and hides its diagnostics', async () => {
     const state = fixture('verifying', 4);
     const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
@@ -561,8 +674,8 @@ describe('manual lead D1-backed dedupe', () => {
       FROM manual_news_assessment_generation_cycles`).get()).toMatchObject({
       call_state: 'superseded',
     });
-    expect(state.db.sqlite.prepare(`SELECT assessment_generation_cycle_id FROM manual_news_leads
-      WHERE id = ?`).get(state.leadId)).toEqual({ assessment_generation_cycle_id: null });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_assessment_generation_cycles
+      WHERE lead_id = ? AND is_current = 1`).get(state.leadId)).toEqual({ count: 0 });
   });
 
   test('exposes generation diagnostics only for the lead row current cycle owner and base version', async () => {

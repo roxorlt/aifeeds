@@ -74,7 +74,6 @@ interface ManualLeadRow {
   processing_owner: string | null;
   processing_attempt: number;
   processing_lease_until: number | null;
-  assessment_generation_cycle_id: string | null;
   confirmed_batch_id: string | null;
   confirmed_at: number | null;
   created_at: number;
@@ -274,19 +273,16 @@ async function loadCurrentProviderFailure(
 
 async function loadCurrentAssessmentGenerationAudit(
   env: Env,
-  lead: Pick<ManualLeadRow,
-    'id' | 'status' | 'version' | 'processing_owner' | 'assessment_generation_cycle_id'>,
+  lead: Pick<ManualLeadRow, 'id' | 'status' | 'version' | 'processing_owner'>,
 ): Promise<ManualNewsAssessmentGenerationAudit | null> {
   const leadId = lead.id;
-  const cycleId = lead.assessment_generation_cycle_id;
-  if (!cycleId) return null;
   const row = await env.DB.prepare(
     `/* manual_generation:current_api */ SELECT first_validation_code, first_validation_path,
        last_validation_code, last_validation_path, regeneration_consumed,
        processing_owner, base_version, call_state
      FROM manual_news_assessment_generation_cycles
-     WHERE cycle_id = ? AND lead_id = ? AND call_state <> 'superseded'`,
-  ).bind(cycleId, leadId).first<{
+     WHERE lead_id = ? AND is_current = 1 AND call_state <> 'superseded'`,
+  ).bind(leadId).first<{
     first_validation_code: string | null;
     first_validation_path: string | null;
     last_validation_code: string | null;
@@ -480,28 +476,25 @@ export async function retryManualNewsLead(
   if (!['failed', 'needs_review', 'rejected'].includes(lead.status)) {
     return { ok: false, status: 409, error: 'lead_not_retryable', lead };
   }
-  const generationPointer = await env.DB.prepare(
-    `/* manual_generation:retry_pointer */ SELECT assessment_generation_cycle_id
-     FROM manual_news_leads WHERE id = ? AND version = ?`,
-  ).bind(id, expectedVersion).first<{ assessment_generation_cycle_id: string | null }>();
-  const previousGenerationCycleId = generationPointer?.assessment_generation_cycle_id || null;
+  const generationCycle = await env.DB.prepare(
+    `/* manual_generation:retry_current */ SELECT cycle_id
+     FROM manual_news_assessment_generation_cycles
+     WHERE lead_id = ? AND is_current = 1 AND call_state <> 'superseded'`,
+  ).bind(id).first<{ cycle_id: string }>();
+  const previousGenerationCycleId = generationCycle?.cycle_id || null;
   assertManualLeadTransition(lead.status, 'validating');
   const nextVersion = expectedVersion + 1;
   const processingOwner = manualNewsLeadProcessingOwner(id, nextVersion);
   const mutationNonce = createMutationNonce('retry');
   const invalidationNonce = createMutationNonce('assessment_invalidate');
+  const supersedeNonce = createMutationNonce('assessment_generation_supersede');
   const mutation = env.DB.prepare(
     `/* manual_lead:retry */ UPDATE manual_news_leads SET
        status = 'validating', version = version + 1, error_code = NULL, error_message = NULL,
        last_mutation_kind = 'retry', last_mutation_idempotency_key = ?,
        last_mutation_nonce = ?, processing_owner = ?, processing_lease_until = ?,
-       assessment_generation_cycle_id = NULL, updated_at = ?
-     WHERE id = ? AND version = ? AND status IN ('failed', 'needs_review', 'rejected')
-       AND (assessment_generation_cycle_id IS NULL OR EXISTS (
-         SELECT 1 FROM manual_news_assessment_generation_cycles cycle
-         WHERE cycle.cycle_id = manual_news_leads.assessment_generation_cycle_id
-           AND cycle.lead_id = manual_news_leads.id AND cycle.call_state <> 'superseded'
-       ))`,
+       updated_at = ?
+     WHERE id = ? AND version = ? AND status IN ('failed', 'needs_review', 'rejected')`,
   ).bind(idempotencyKey, mutationNonce, processingOwner, now + PROCESSING_LEASE_MS, now, id, expectedVersion);
   const retryAudit = auditMutationStatement(env, {
     leadId: id, action: 'retry', mutationKind: 'retry', mutationNonce,
@@ -554,11 +547,12 @@ export async function retryManualNewsLead(
     ),
     env.DB.prepare(
       `/* manual_generation:retry_supersede */ UPDATE manual_news_assessment_generation_cycles
-       SET call_state = 'superseded', superseded_by_processing_owner = ?, updated_at = ?
+       SET call_state = 'superseded', superseded_by_processing_owner = ?, is_current = 0,
+           supersede_nonce = ?, updated_at = ?
        WHERE cycle_id = ? AND lead_id = ? AND call_state <> 'superseded'
-         AND ${retryGuard}`,
+         AND is_current = 1 AND supersede_nonce IS NULL AND ${retryGuard}`,
     ).bind(
-      processingOwner, now, previousGenerationCycleId, id,
+      processingOwner, supersedeNonce, now, previousGenerationCycleId, id,
       id, nextVersion, idempotencyKey, mutationNonce,
     ),
     env.DB.prepare(
@@ -569,16 +563,16 @@ export async function retryManualNewsLead(
        WHERE ${retryGuard} AND EXISTS (
          SELECT 1 FROM manual_news_assessment_generation_cycles cycle
          WHERE cycle.cycle_id = ? AND cycle.lead_id = ? AND cycle.call_state = 'superseded'
-           AND cycle.superseded_by_processing_owner = ?
+           AND cycle.superseded_by_processing_owner = ? AND cycle.supersede_nonce = ?
        )`,
     ).bind(
-      id, createMutationNonce('assessment_generation_supersede'), nextVersion,
+      id, supersedeNonce, nextVersion,
       JSON.stringify({
         cycle_id: previousGenerationCycleId, superseded_by_processing_owner: processingOwner,
         previous_lead_version: expectedVersion, next_lead_version: nextVersion,
       }), now,
       id, nextVersion, idempotencyKey, mutationNonce,
-      previousGenerationCycleId, id, processingOwner,
+      previousGenerationCycleId, id, processingOwner, supersedeNonce,
     ),
   ]) as Array<{ meta?: { changes?: number } }>;
   const changed = auditedMutationChanges(results, 0, 1);
@@ -777,7 +771,7 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       `/* manual_generation:current_fenced */ SELECT cycle.*
        FROM manual_news_leads lead
        JOIN manual_news_assessment_generation_cycles cycle
-         ON cycle.cycle_id = lead.assessment_generation_cycle_id AND cycle.lead_id = lead.id
+         ON cycle.lead_id = lead.id AND cycle.is_current = 1
        WHERE lead.id = ? AND lead.version = ? AND lead.status = 'verifying'
          AND lead.processing_owner = ? AND lead.processing_attempt = ?
          AND cycle.processing_owner = ? AND cycle.base_version = ?
@@ -801,35 +795,31 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       SELECT 1 FROM manual_news_leads lead
       WHERE lead.id = ? AND lead.version = ? AND lead.status = 'verifying'
         AND lead.processing_owner = ? AND lead.processing_attempt = ?
-        AND lead.assessment_generation_cycle_id = ?
     )`;
     const statements = [
       this.env.DB.prepare(
-        `/* manual_generation:claim_cycle */ UPDATE manual_news_leads
-         SET assessment_generation_cycle_id = ?, updated_at = ?
-         WHERE id = ? AND version = ? AND status = 'verifying'
-           AND processing_owner = ? AND processing_attempt = ?
-           AND assessment_generation_cycle_id IS NULL`,
-      ).bind(cycleId, now, id, expectedVersion, owner, attempt),
-      this.env.DB.prepare(
         `/* manual_generation:insert_cycle */ INSERT OR IGNORE INTO manual_news_assessment_generation_cycles (
            cycle_id, lead_id, processing_owner, base_version, call_state,
-           regeneration_consumed, created_at, updated_at
-         ) SELECT ?, ?, ?, ?, 'initial_started', 0, ?, ? WHERE ${leadGuard}`,
+           regeneration_consumed, is_current, start_nonce, created_at, updated_at
+         ) SELECT ?, ?, ?, ?, 'initial_started', 0, 1, ?, ?, ? WHERE ${leadGuard}
+           AND NOT EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles current
+             WHERE current.lead_id = ? AND current.is_current = 1)`,
       ).bind(
-        cycleId, id, owner, expectedVersion, now, now,
-        id, expectedVersion, owner, attempt, cycleId,
+        cycleId, id, owner, expectedVersion, mutationNonce, now, now,
+        id, expectedVersion, owner, attempt,
+        id,
       ),
       this.env.DB.prepare(
         `/* manual_generation:insert_revision */ INSERT OR IGNORE INTO manual_news_assessment_generation_revisions (
-           cycle_id, generation_revision, call_kind, call_state, created_at
-         ) SELECT ?, 1, 'initial', 'started', ? WHERE ${leadGuard}
+           cycle_id, generation_revision, call_kind, call_state, start_nonce, created_at
+         ) SELECT ?, 1, 'initial', 'started', ?, ? WHERE ${leadGuard}
            AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles cycle
-             WHERE cycle.cycle_id = ? AND cycle.call_state = 'initial_started')`,
+             WHERE cycle.cycle_id = ? AND cycle.call_state = 'initial_started'
+               AND cycle.is_current = 1 AND cycle.start_nonce = ?)`,
       ).bind(
-        cycleId, now,
-        id, expectedVersion, owner, attempt, cycleId,
-        cycleId,
+        cycleId, mutationNonce, now,
+        id, expectedVersion, owner, attempt,
+        cycleId, mutationNonce,
       ),
       this.env.DB.prepare(
         `/* manual_generation:start_audit */ INSERT INTO manual_news_lead_audit (
@@ -839,28 +829,34 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
          WHERE ${leadGuard} AND EXISTS (
            SELECT 1 FROM manual_news_assessment_generation_revisions revision
            WHERE revision.cycle_id = ? AND revision.generation_revision = 1
-             AND revision.call_state = 'started'
+             AND revision.call_state = 'started' AND revision.start_nonce = ?
+         ) AND EXISTS (
+           SELECT 1 FROM manual_news_assessment_generation_cycles cycle
+           WHERE cycle.cycle_id = ? AND cycle.start_nonce = ? AND cycle.is_current = 1
          )`,
       ).bind(
         id, mutationNonce, expectedVersion, JSON.stringify({
           cycle_id: cycleId, generation_revision: 1, call_kind: 'initial',
           processing_owner: owner, processing_attempt: attempt, base_version: expectedVersion,
         }), now,
-        id, expectedVersion, owner, attempt, cycleId,
-        cycleId,
+        id, expectedVersion, owner, attempt,
+        cycleId, mutationNonce,
+        cycleId, mutationNonce,
       ),
     ];
     const results = await this.env.DB.batch(statements) as Array<{ meta?: { changes?: number } }>;
     const claimed = Number(results[0]?.meta?.changes || 0);
     if (claimed === 1) {
       if (Number(results[1]?.meta?.changes || 0) !== 1
-        || Number(results[2]?.meta?.changes || 0) !== 1
-        || Number(results[3]?.meta?.changes || 0) !== 1) {
+        || Number(results[2]?.meta?.changes || 0) !== 1) {
         throw new Error('assessment_generation_start_causality_mismatch');
       }
       const row = await this.currentAssessmentGenerationCycle(id, expectedVersion);
       if (!row) throw new Error('assessment_generation_state_missing');
       return { ...row, acquired_call: true };
+    }
+    if (results.some((entry) => Number(entry?.meta?.changes || 0) !== 0)) {
+      throw new Error('assessment_generation_start_causality_mismatch');
     }
     const winner = await this.currentAssessmentGenerationCycle(id, expectedVersion);
     if (winner) return winner;
@@ -910,19 +906,23 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       SELECT 1 FROM manual_news_leads lead
       WHERE lead.id = ? AND lead.version = ? AND lead.status = 'verifying'
         AND lead.processing_owner = ? AND lead.processing_attempt = ?
-        AND lead.assessment_generation_cycle_id = ?
     )`;
     const statements = [
       this.env.DB.prepare(
         `/* manual_generation:complete_revision */ UPDATE manual_news_assessment_generation_revisions
          SET call_state = ?, validation_code = ?, validation_path = ?,
-             validated_assessment_json = ?, provider_failure_json = ?, completed_at = ?
+             validated_assessment_json = ?, provider_failure_json = ?, result_nonce = ?, completed_at = ?
          WHERE cycle_id = ? AND generation_revision = ? AND call_state = 'started'
-           AND ${guard}`,
+           AND result_nonce IS NULL AND ${guard}
+           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles cycle
+             WHERE cycle.cycle_id = ? AND cycle.is_current = 1
+               AND cycle.processing_owner = ? AND cycle.base_version = ?)`,
       ).bind(
         revisionState, result.validation_code, result.validation_path || null,
-        assessmentJson, providerFailureJson, now, current.cycle_id, result.generation_revision,
-        id, expectedVersion, owner, attempt, current.cycle_id,
+        assessmentJson, providerFailureJson, mutationNonce, now,
+        current.cycle_id, result.generation_revision,
+        id, expectedVersion, owner, attempt,
+        current.cycle_id, owner, expectedVersion,
       ),
       this.env.DB.prepare(
         `/* manual_generation:update_cycle */ UPDATE manual_news_assessment_generation_cycles
@@ -930,29 +930,36 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
              first_validation_code = CASE WHEN ? = 1 THEN ? ELSE first_validation_code END,
              first_validation_path = CASE WHEN ? = 1 THEN ? ELSE first_validation_path END,
              last_validation_code = ?, last_validation_path = ?,
-             validated_assessment_json = ?, provider_failure_json = ?, updated_at = ?
-         WHERE cycle_id = ? AND call_state = ? AND ${guard}
+             validated_assessment_json = ?, provider_failure_json = ?,
+             last_result_nonce = ?, updated_at = ?
+         WHERE cycle_id = ? AND call_state = ? AND is_current = 1
+           AND processing_owner = ? AND base_version = ?
+           AND ${guard}
            AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_revisions revision
              WHERE revision.cycle_id = ? AND revision.generation_revision = ?
-               AND revision.call_state = ?)`,
+               AND revision.call_state = ? AND revision.result_nonce = ?)`,
       ).bind(
         nextState,
         result.generation_revision, result.validation_code,
         result.generation_revision, result.validation_path || null,
         result.validation_code, result.validation_path || null,
-        assessmentJson, providerFailureJson, now,
-        current.cycle_id, current.call_state,
-        id, expectedVersion, owner, attempt, current.cycle_id,
-        current.cycle_id, result.generation_revision, revisionState,
+        assessmentJson, providerFailureJson, mutationNonce, now,
+        current.cycle_id, current.call_state, owner, expectedVersion,
+        id, expectedVersion, owner, attempt,
+        current.cycle_id, result.generation_revision, revisionState, mutationNonce,
       ),
       this.env.DB.prepare(
         `/* manual_generation:result_audit */ INSERT INTO manual_news_lead_audit (
            lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
            resulting_version, metadata_json, created_at
          ) SELECT ?, ?, 'verifying', 'verifying', NULL, ?, ?, ?, ? WHERE ${guard}
+           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles cycle
+             WHERE cycle.cycle_id = ? AND cycle.is_current = 1
+               AND cycle.last_result_nonce = ?)
            AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_revisions revision
              WHERE revision.cycle_id = ? AND revision.generation_revision = ?
-               AND revision.call_state = ? AND revision.validation_code = ?)`,
+               AND revision.call_state = ? AND revision.validation_code = ?
+               AND revision.result_nonce = ?)`,
       ).bind(
         id, `assessment_generation_result_${result.generation_revision}`, mutationNonce,
         expectedVersion, JSON.stringify({
@@ -962,13 +969,21 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
           processing_owner: owner, processing_attempt: attempt, base_version: expectedVersion,
           ...(result.provider_failure ? { provider_failure: result.provider_failure } : {}),
         }), now,
-        id, expectedVersion, owner, attempt, current.cycle_id,
-        current.cycle_id, result.generation_revision, revisionState, result.validation_code,
+        id, expectedVersion, owner, attempt,
+        current.cycle_id, mutationNonce,
+        current.cycle_id, result.generation_revision, revisionState, result.validation_code, mutationNonce,
       ),
     ];
     const results = await this.env.DB.batch(statements) as Array<{ meta?: { changes?: number } }>;
-    if (results.some((entry) => Number(entry?.meta?.changes || 0) !== 1)) {
+    const changes = results.map((entry) => Number(entry?.meta?.changes || 0));
+    if (changes.every((value) => value === 0)) {
+      const winner = await this.currentAssessmentGenerationCycle(id, expectedVersion);
+      if (winner && winner.generation_revision === result.generation_revision
+        && winner.call_state === nextState) return winner;
       throw new Error('stale_processing_owner');
+    }
+    if (changes.some((value) => value !== 1)) {
+      throw new Error('assessment_generation_result_causality_mismatch');
     }
     const updated = await this.currentAssessmentGenerationCycle(id, expectedVersion);
     if (!updated) throw new Error('assessment_generation_state_missing');
@@ -989,26 +1004,28 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       SELECT 1 FROM manual_news_leads lead
       WHERE lead.id = ? AND lead.version = ? AND lead.status = 'verifying'
         AND lead.processing_owner = ? AND lead.processing_attempt = ?
-        AND lead.assessment_generation_cycle_id = ?
     )`;
     const statements = [
       this.env.DB.prepare(
         `/* manual_generation:consume_regeneration */ UPDATE manual_news_assessment_generation_cycles
-         SET regeneration_consumed = 1, call_state = 'regeneration_started', updated_at = ?
+         SET regeneration_consumed = 1, call_state = 'regeneration_started',
+             regeneration_nonce = ?, updated_at = ?
          WHERE cycle_id = ? AND call_state = 'regeneration_ready' AND regeneration_consumed = 0
-           AND ${guard}`,
-      ).bind(now, current.cycle_id, id, expectedVersion, owner, attempt, current.cycle_id),
+           AND is_current = 1 AND processing_owner = ? AND base_version = ?
+           AND regeneration_nonce IS NULL AND ${guard}`,
+      ).bind(mutationNonce, now, current.cycle_id, owner, expectedVersion, id, expectedVersion, owner, attempt),
       this.env.DB.prepare(
         `/* manual_generation:insert_regeneration_revision */ INSERT OR IGNORE INTO manual_news_assessment_generation_revisions (
-           cycle_id, generation_revision, call_kind, call_state, created_at
-         ) SELECT ?, 2, 'regeneration', 'started', ? WHERE ${guard}
+           cycle_id, generation_revision, call_kind, call_state, start_nonce, created_at
+         ) SELECT ?, 2, 'regeneration', 'started', ?, ? WHERE ${guard}
            AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles cycle
              WHERE cycle.cycle_id = ? AND cycle.call_state = 'regeneration_started'
-               AND cycle.regeneration_consumed = 1)`,
+               AND cycle.regeneration_consumed = 1 AND cycle.is_current = 1
+               AND cycle.regeneration_nonce = ?)`,
       ).bind(
-        current.cycle_id, now,
-        id, expectedVersion, owner, attempt, current.cycle_id,
-        current.cycle_id,
+        current.cycle_id, mutationNonce, now,
+        id, expectedVersion, owner, attempt,
+        current.cycle_id, mutationNonce,
       ),
       this.env.DB.prepare(
         `/* manual_generation:regeneration_audit */ INSERT INTO manual_news_lead_audit (
@@ -1018,15 +1035,19 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
          WHERE ${guard} AND EXISTS (
            SELECT 1 FROM manual_news_assessment_generation_revisions revision
            WHERE revision.cycle_id = ? AND revision.generation_revision = 2
-             AND revision.call_state = 'started'
+             AND revision.call_state = 'started' AND revision.start_nonce = ?
+         ) AND EXISTS (
+           SELECT 1 FROM manual_news_assessment_generation_cycles cycle
+           WHERE cycle.cycle_id = ? AND cycle.regeneration_nonce = ? AND cycle.is_current = 1
          )`,
       ).bind(
         id, mutationNonce, expectedVersion, JSON.stringify({
           cycle_id: current.cycle_id, generation_revision: 2, call_kind: 'regeneration',
           processing_owner: owner, processing_attempt: attempt, base_version: expectedVersion,
         }), now,
-        id, expectedVersion, owner, attempt, current.cycle_id,
-        current.cycle_id,
+        id, expectedVersion, owner, attempt,
+        current.cycle_id, mutationNonce,
+        current.cycle_id, mutationNonce,
       ),
     ];
     const results = await this.env.DB.batch(statements) as Array<{ meta?: { changes?: number } }>;
@@ -1039,6 +1060,9 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       const updated = await this.currentAssessmentGenerationCycle(id, expectedVersion);
       if (!updated) throw new Error('assessment_generation_state_missing');
       return { ...updated, acquired_call: true };
+    }
+    if (results.some((entry) => Number(entry?.meta?.changes || 0) !== 0)) {
+      throw new Error('assessment_regeneration_causality_mismatch');
     }
     const winner = await this.currentAssessmentGenerationCycle(id, expectedVersion);
     if (winner) return winner;

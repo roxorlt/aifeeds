@@ -31,7 +31,6 @@ describe('manual news lead migration', () => {
       'review_date', 'status', 'version', 'confirmed_batch_id', 'confirmed_at',
       'submit_idempotency_key', 'last_mutation_idempotency_key', 'last_mutation_nonce',
       'processing_owner', 'processing_attempt', 'processing_lease_until',
-      'assessment_generation_cycle_id',
     ]));
     expect(tableColumns(db, 'manual_news_evidence')).toEqual(expect.arrayContaining([
       'claims_supported_json', 'fetch_audit_json',
@@ -46,12 +45,14 @@ describe('manual news lead migration', () => {
       'cycle_id', 'lead_id', 'processing_owner', 'base_version', 'call_state',
       'first_validation_code', 'first_validation_path', 'last_validation_code',
       'last_validation_path', 'regeneration_consumed', 'validated_assessment_json',
-      'provider_failure_json', 'superseded_by_processing_owner', 'created_at', 'updated_at',
+      'provider_failure_json', 'superseded_by_processing_owner', 'is_current',
+      'start_nonce', 'last_result_nonce', 'regeneration_nonce', 'supersede_nonce',
+      'created_at', 'updated_at',
     ]));
     expect(tableColumns(db, 'manual_news_assessment_generation_revisions')).toEqual(expect.arrayContaining([
       'cycle_id', 'generation_revision', 'call_kind', 'call_state', 'validation_code',
       'validation_path', 'validated_assessment_json', 'provider_failure_json',
-      'created_at', 'completed_at',
+      'start_nonce', 'result_nonce', 'created_at', 'completed_at',
     ]));
     expect(tableColumns(db, 'manual_news_lead_audit')).toEqual(expect.arrayContaining([
       'metadata_json', 'resulting_version', 'mutation_nonce',
@@ -65,22 +66,72 @@ describe('manual news lead migration', () => {
 
     const insertCycle = db.prepare(`INSERT INTO manual_news_assessment_generation_cycles (
       cycle_id, lead_id, processing_owner, base_version, call_state,
-      regeneration_consumed, created_at, updated_at
-    ) VALUES (?, 'lead-cycle', 'owner-cycle', 7, 'initial_started', 0, 1, 1)`);
-    insertCycle.run('cycle-1');
-    expect(() => insertCycle.run('cycle-2')).toThrow(/UNIQUE constraint failed/);
+      regeneration_consumed, is_current, start_nonce, created_at, updated_at
+    ) VALUES (?, 'lead-cycle', 'owner-cycle', 7, 'initial_started', 0, ?, ?, 1, 1)`);
+    insertCycle.run('cycle-1', 1, 'start-nonce-1');
+    expect(() => insertCycle.run('cycle-2', 1, 'start-nonce-2')).toThrow(/UNIQUE constraint failed/);
+    db.prepare(`INSERT INTO manual_news_assessment_generation_cycles (
+      cycle_id, lead_id, processing_owner, base_version, call_state,
+      regeneration_consumed, is_current, start_nonce, created_at, updated_at
+    ) VALUES ('cycle-2', 'lead-cycle', 'owner-cycle-2', 8, 'initial_started', 0, 0,
+      'start-nonce-2', 1, 1)`).run();
     expect(() => db.prepare(`INSERT INTO manual_news_assessment_generation_cycles (
       cycle_id, lead_id, processing_owner, base_version, call_state,
-      regeneration_consumed, created_at, updated_at
-    ) VALUES ('cycle-bad', 'lead-bad', 'owner-bad', 1, 'superseded', 0, 1, 1)`).run())
+      regeneration_consumed, is_current, start_nonce, created_at, updated_at
+    ) VALUES ('cycle-bad', 'lead-bad', 'owner-bad', 1, 'superseded', 0, 1, 'start-bad', 1, 1)`).run())
       .toThrow(/CHECK constraint failed/);
 
     const insertRevision = db.prepare(`INSERT INTO manual_news_assessment_generation_revisions (
-      cycle_id, generation_revision, call_kind, call_state, created_at
-    ) VALUES ('cycle-1', ?, ?, 'started', 1)`);
-    insertRevision.run(1, 'initial');
-    insertRevision.run(2, 'regeneration');
-    expect(() => insertRevision.run(2, 'regeneration')).toThrow(/UNIQUE constraint failed/);
+      cycle_id, generation_revision, call_kind, call_state, start_nonce, created_at
+    ) VALUES ('cycle-1', ?, ?, 'started', ?, 1)`);
+    insertRevision.run(1, 'initial', 'revision-start-1');
+    insertRevision.run(2, 'regeneration', 'revision-start-2');
+    expect(() => insertRevision.run(2, 'regeneration', 'revision-start-3')).toThrow(/UNIQUE constraint failed/);
+  });
+
+  test('migration 035 is replayable and does not alter the legacy lead table', () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec('CREATE TABLE items (id TEXT PRIMARY KEY, extra TEXT)');
+    db.exec(fs.readFileSync(path.join(migrations, '032-daily-news-review.sql'), 'utf8'));
+    db.exec(fs.readFileSync(path.join(migrations, '033-manual-news-leads.sql'), 'utf8'));
+    db.exec(fs.readFileSync(path.join(migrations, '034-manual-news-assessment-verifications.sql'), 'utf8'));
+    const migration = fs.readFileSync(path.join(migrations, '035-manual-news-assessment-generation-cycles.sql'), 'utf8');
+
+    expect(() => db.exec(migration)).not.toThrow();
+    expect(() => db.exec(migration)).not.toThrow();
+    expect(tableColumns(db, 'manual_news_leads')).not.toContain('assessment_generation_cycle_id');
+    expect(db.prepare(`SELECT COUNT(*) AS count FROM sqlite_master
+      WHERE type = 'index' AND name = 'idx_manual_news_generation_one_current_lead'`).get())
+      .toEqual({ count: 1 });
+  });
+
+  test('migration 035 recovers when the complete cycle table already exists but later objects do not', () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec('CREATE TABLE items (id TEXT PRIMARY KEY, extra TEXT)');
+    db.exec(fs.readFileSync(path.join(migrations, '032-daily-news-review.sql'), 'utf8'));
+    db.exec(fs.readFileSync(path.join(migrations, '033-manual-news-leads.sql'), 'utf8'));
+    db.exec(fs.readFileSync(path.join(migrations, '034-manual-news-assessment-verifications.sql'), 'utf8'));
+    db.exec(`CREATE TABLE manual_news_assessment_generation_cycles (
+      cycle_id TEXT PRIMARY KEY, lead_id TEXT NOT NULL, processing_owner TEXT NOT NULL,
+      base_version INTEGER NOT NULL, call_state TEXT NOT NULL,
+      first_validation_code TEXT, first_validation_path TEXT,
+      last_validation_code TEXT, last_validation_path TEXT,
+      regeneration_consumed INTEGER NOT NULL DEFAULT 0,
+      validated_assessment_json TEXT, provider_failure_json TEXT,
+      superseded_by_processing_owner TEXT, is_current INTEGER NOT NULL DEFAULT 1,
+      start_nonce TEXT NOT NULL UNIQUE, last_result_nonce TEXT UNIQUE,
+      regeneration_nonce TEXT UNIQUE, supersede_nonce TEXT UNIQUE,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      UNIQUE (lead_id, processing_owner, base_version)
+    )`);
+    const migration = fs.readFileSync(path.join(migrations, '035-manual-news-assessment-generation-cycles.sql'), 'utf8');
+
+    expect(() => db.exec(migration)).not.toThrow();
+    expect(tableColumns(db, 'manual_news_assessment_generation_revisions'))
+      .toEqual(expect.arrayContaining(['start_nonce', 'result_nonce']));
+    expect(db.prepare(`SELECT COUNT(*) AS count FROM sqlite_master
+      WHERE type = 'index' AND name = 'idx_manual_news_generation_one_current_lead'`).get())
+      .toEqual({ count: 1 });
   });
 
   test('allows only one active verification per lead while retaining invalidated history', () => {
