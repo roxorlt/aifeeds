@@ -1,8 +1,11 @@
 import {
   applyManualLeadEvidencePolicy,
+  applyManualLeadRelevancePolicy,
   assertManualLeadTransition,
   buildManualLeadAssessmentPrompt,
+  buildManualLeadAssessmentRepairPrompt,
   classifyManualLeadDuplicate,
+  manualLeadAssessmentValidationErrorCode,
   validateManualLeadAssessment,
   validateManualNewsLeadInput,
   type ManualNewsEvidence,
@@ -67,7 +70,7 @@ export interface ManualLeadProcessingAdapters {
   search(input: { date: string; text: string; note: string }): Promise<ManualSearchResult[]>;
   fetch(url: string): Promise<PublicDocument>;
   extract(document: PublicDocument, hint?: ManualSearchResult): Promise<ManualNewsEvidence | null>;
-  assess(prompt: { system: string; user: string }): Promise<unknown>;
+  assess(prompt: { system: string; user: string }, options?: { schemaRepair?: boolean }): Promise<unknown>;
 }
 
 function conciseError(error: unknown): string {
@@ -176,16 +179,39 @@ export async function processManualNewsLead(
         });
         return (await store.getLead(leadId))!;
       }
+      const validate = (candidate: unknown) => applyManualLeadRelevancePolicy(
+        applyManualLeadEvidencePolicy(validateManualLeadAssessment(
+          candidate, evidence, priorEvents.map((event) => event.event_key),
+        ), evidence),
+        `${normalized.text} ${normalized.note}`,
+        evidence,
+      );
       try {
-        assessment = applyManualLeadEvidencePolicy(validateManualLeadAssessment(
-          raw, evidence, priorEvents.map((event) => event.event_key),
-        ), evidence);
-      } catch (error) {
-        await transition('failed', {
-          error_code: 'assessment_validation_failed',
-          error_message: conciseError(error),
-        });
-        return (await store.getLead(leadId))!;
+        assessment = validate(raw);
+      } catch (firstError) {
+        const firstCode = manualLeadAssessmentValidationErrorCode(firstError);
+        let repairedRaw: unknown;
+        try {
+          repairedRaw = await adapters.assess(
+            buildManualLeadAssessmentRepairPrompt(prompt, firstCode),
+            { schemaRepair: true },
+          );
+        } catch {
+          await transition('failed', {
+            error_code: 'assessment_validation_failed',
+            error_message: `schema_repair_failed:${firstCode}`,
+          });
+          return (await store.getLead(leadId))!;
+        }
+        try {
+          assessment = validate(repairedRaw);
+        } catch (repairError) {
+          await transition('failed', {
+            error_code: 'assessment_validation_failed',
+            error_message: `schema_repair_exhausted:${manualLeadAssessmentValidationErrorCode(repairError)}`,
+          });
+          return (await store.getLead(leadId))!;
+        }
       }
       await store.saveAssessment(leadId, assessment);
       await transition('clustering');

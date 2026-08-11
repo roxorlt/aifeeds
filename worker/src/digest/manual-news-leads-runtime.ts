@@ -248,13 +248,18 @@ export function createManualNewsLeadRuntimeAdapters(
     search: (input) => searchAllNews(env, input, deps.researchFetcher),
     fetch: (url) => fetchPublicDocument(url, { service: researchService(env, deps.researchFetcher) }),
     extract: (document, hint) => extractManualNewsEvidence(document, hint),
-    async assess(prompt) {
+    async assess(prompt, options) {
       if (!env.DEEPSEEK_API_KEY) throw new Error('no_deepseek_key');
       const result = await callDeepSeekJson<unknown>(
         env.DEEPSEEK_API_KEY,
         DEEPSEEK_PRO,
         prompt.user,
-        { systemPrompt: prompt.system, maxTokens: 3_500, timeoutMs: 120_000, retries: 1 },
+        {
+          systemPrompt: prompt.system,
+          maxTokens: 3_500,
+          timeoutMs: 120_000,
+          retries: options?.schemaRepair ? 0 : 1,
+        },
       );
       if (!result.data) throw new Error(result.error || 'empty_model_assessment');
       return result.data;

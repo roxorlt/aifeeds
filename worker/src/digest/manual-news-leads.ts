@@ -208,7 +208,12 @@ export function buildManualLeadAssessmentPrompt(input: {
       'occurred_at 只填写证据明确支持的事件发生时间（ISO-8601 日期或带时区时间）；来源发布时间不是事件发生时间，无法确认时必须为 null。',
       '产品公告可由官方一手公告或帮助文档单独支持，但只能陈述文档明确覆盖的模型、产品、地区和输出类型。',
       '政治或监管事件必须区分个人呼吁、公开信、机构提案、立法程序与有约束力决定；要建议加入，必须同时有原始文件/官方声明和可靠独立报道。',
-      'event_key 用规范化的“主体-动作-对象/版本-事件日期”表达现实事件，不得包含媒体名、标题修辞或抓取日期；同一事件的不同报道必须给相同 event_key。',
+      'event_key 用规范化的“主体-动作-对象或版本-事件日期”表达现实事件，不得包含媒体名、标题修辞或抓取日期；同一真实事件的不同报道和修复重试必须给相同 event_key。',
+      'event_key 必须严格匹配 ^[a-z0-9][a-z0-9:_-]{5,199}$：只能使用 ASCII 小写字母 a-z、数字 0-9、冒号、下划线、短横线，共 6 到 200 个字符，首字符必须是字母或数字。',
+      'event_key 合格示例：anthropic-adds-output-watermark-2026-08-11、openai:gpt-5-release-2026-08-07；不合格示例：Anthropic-Watermark（含大写）、anthropic 水印（含空格和中文）、abc（过短）、anthropic/watermark（含斜杠）。',
+      '必须逐项判断 evidence 是否直接支持用户线索的核心主体、对象、动作、版本和时间；仅同一公司、同一模型或旧背景新闻不构成直接支持，也不能推动 recommended。',
+      '若 evidence 与线索偏题、缺少核心专有词或不足以核实，仍须输出完整合法 schema：recommendation 只能为 needs_review 或 rejected，material_update=false，occurred_at=null，title 与 summary 明说“现有证据无法核实该线索”，uncertainties 说明缺口，claims 只陈述 evidence 实际支持的背景事实。',
+      '无法核实时 event_key 使用可重复的 ASCII 格式 unverified-<主体或主题>-<YYYY-MM-DD>，例如 unverified-anthropic-output-watermark-2026-08-11；主体或主题必须用简短 ASCII 小写词，不得把未证实线索写成已发生事实。',
       'matched_event_key 只能引用 prior_events 中实际存在且格式合法的 event_key；未命中必须为 null。',
       'material_update=true 仅限新版本正式发布、状态实质变化、官方确认/撤回、明确新增范围或时间等可验证进展；新增媒体转述、改标题或补背景不算重要更新。',
       '评分按事件重要性35、行业影响25、证据权威20、新鲜度20综合为0到100；证据不足不能靠高分变成 recommended。',
@@ -218,7 +223,8 @@ export function buildManualLeadAssessmentPrompt(input: {
     user: JSON.stringify({
       task: '核验证据、生成严肃媒体标题与摘要、识别同事件和跨日重复、评分并给出建议',
       output_schema: {
-        title: 'string', summary: 'string', event_key: 'lowercase slug',
+        title: 'string', summary: 'string',
+        event_key: 'ASCII lowercase, 6..200 chars, exactly ^[a-z0-9][a-z0-9:_-]{5,199}$',
         event_type: 'product_release|product_documentation|political_regulatory|industry_event|other',
         material_update: 'boolean', score: '0..100',
         recommendation: 'recommended|needs_review|duplicate|rejected',
@@ -228,6 +234,54 @@ export function buildManualLeadAssessmentPrompt(input: {
         matched_event_key: 'string|null',
       },
       untrusted_data: input,
+    }),
+  };
+}
+
+const ASSESSMENT_VALIDATION_ERROR_CODES = new Set([
+  'invalid_assessment',
+  'unexpected_assessment_field',
+  'missing_assessment_field',
+  'invalid_assessment_identity_type',
+  'invalid_assessment_identity',
+  'invalid_event_type',
+  'invalid_material_update',
+  'invalid_score',
+  'invalid_recommendation',
+  'invalid_occurred_at',
+  'invalid_uncertainties',
+  'invalid_claims',
+  'invalid_claim',
+  'invalid_claim_text',
+  'unknown_evidence_id',
+  'invalid_matched_event_key',
+  'unknown_matched_event_key',
+  'matched_event_key_mismatch',
+]);
+
+export function manualLeadAssessmentValidationErrorCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const code = message.split(':', 1)[0];
+  return ASSESSMENT_VALIDATION_ERROR_CODES.has(code) ? code : 'assessment_validation_failed';
+}
+
+export function buildManualLeadAssessmentRepairPrompt(
+  originalPrompt: { system: string; user: string },
+  validationErrorCode: string,
+): { system: string; user: string } {
+  const safeCode = ASSESSMENT_VALIDATION_ERROR_CODES.has(validationErrorCode)
+    ? validationErrorCode
+    : 'assessment_validation_failed';
+  return {
+    system: [
+      originalPrompt.system,
+      '你正在执行唯一一次 bounded schema repair。只根据原 prompt/schema 重新生成一份完整 JSON，不要修改 schema，不要省略字段。',
+      '不要引用、复述或推测上一次模型输出；只使用 validation_error_code 定位契约错误。仍须遵守证据、相关性、event_key 和 evidence_ids 的全部严格规则。',
+    ].join('\n'),
+    user: JSON.stringify({
+      task: 'schema repair：严格重新生成完整 assessment JSON',
+      validation_error_code: safeCode,
+      original_prompt: originalPrompt,
     }),
   };
 }
@@ -275,6 +329,46 @@ export function applyManualLeadEvidencePolicy(
       : assessment.recommendation,
     uncertainties,
     evidence_tier: sufficient ? evidenceTier : 'insufficient',
+  };
+}
+
+const GENERIC_ASCII_LEAD_TERMS = new Set([
+  'about', 'adds', 'added', 'announces', 'announced', 'for', 'from', 'into',
+  'launch', 'launched', 'launches', 'model', 'models', 'new', 'output', 'outputs',
+  'release', 'released', 'releases', 'system', 'the', 'update', 'updated', 'updates', 'with',
+]);
+
+function distinctiveAsciiLeadTerms(value: string): string[] {
+  const terms = new Map<string, string>();
+  for (const match of value.match(/[a-z][a-z0-9._+-]{2,}/gi) || []) {
+    const normalized = match.toLowerCase();
+    if (GENERIC_ASCII_LEAD_TERMS.has(normalized) || normalized === 'http' || normalized === 'https') continue;
+    if (!terms.has(normalized)) terms.set(normalized, match);
+    if (terms.size >= 12) break;
+  }
+  return [...terms.values()];
+}
+
+export function applyManualLeadRelevancePolicy<T extends ManualNewsLeadAssessment>(
+  assessment: T,
+  leadText: string,
+  evidence: readonly ManualNewsEvidence[],
+): T {
+  const terms = distinctiveAsciiLeadTerms(leadText);
+  if (!terms.length) return assessment;
+  const evidenceText = evidence.map((item) => [
+    item.publisher, item.title, item.excerpt, ...item.claims_supported,
+  ].join(' ')).join(' ').toLowerCase();
+  const missing = terms.filter((term) => !evidenceText.includes(term.toLowerCase()));
+  if (!missing.length) return assessment;
+  const uncertainty = `现有证据未直接出现线索中的关键专有词：${missing.join('、')}。`;
+  return {
+    ...assessment,
+    recommendation: assessment.recommendation === 'recommended' ? 'needs_review' : assessment.recommendation,
+    material_update: false,
+    uncertainties: assessment.uncertainties.some((item) => item.startsWith('现有证据未直接出现线索中的关键专有词：'))
+      ? assessment.uncertainties
+      : [...assessment.uncertainties, uncertainty],
   };
 }
 

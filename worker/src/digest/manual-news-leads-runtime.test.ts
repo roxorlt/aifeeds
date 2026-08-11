@@ -3,6 +3,12 @@ import { describe, expect, test, vi } from 'vitest';
 import { applyManualLeadEvidencePolicy, validateManualLeadAssessment } from './manual-news-leads';
 import { createManualNewsLeadRuntimeAdapters, extractManualNewsEvidence } from './manual-news-leads-runtime';
 import type { PublicDocument } from '../security/safe-url-fetch';
+import { callDeepSeekJson } from '../hf-paper/llm';
+
+vi.mock('../hf-paper/llm', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../hf-paper/llm')>();
+  return { ...actual, callDeepSeekJson: vi.fn() };
+});
 
 function auditObject(
   url: string,
@@ -48,6 +54,23 @@ function documentFixture(
 }
 
 describe('manual lead evidence extraction', () => {
+  test('disables lower-level JSON retries for the single schema-repair call', async () => {
+    const mockedCall = vi.mocked(callDeepSeekJson);
+    mockedCall.mockResolvedValueOnce({ data: { repaired: true } });
+    const adapters = createManualNewsLeadRuntimeAdapters({
+      DB: {} as never,
+      DEEPSEEK_API_KEY: 'test-key',
+    } as never);
+
+    await expect(adapters.assess(
+      { system: 'strict schema', user: '{"task":"repair"}' },
+      { schemaRepair: true },
+    )).resolves.toEqual({ repaired: true });
+    expect(mockedCall).toHaveBeenCalledTimes(1);
+    expect(mockedCall.mock.calls[0][3]).toMatchObject({ retries: 0 });
+    mockedCall.mockReset();
+  });
+
   test('keeps an explicit source publication time separate from retrieval time', async () => {
     const evidence = await extractManualNewsEvidence(documentFixture(
       'https://www.anthropic.com/news/example',

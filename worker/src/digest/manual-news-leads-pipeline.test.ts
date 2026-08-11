@@ -138,6 +138,61 @@ describe('manual lead processing pipeline', () => {
     });
   });
 
+  test('repairs one parsed but schema-invalid assessment without echoing the rejected output', async () => {
+    const memory = memoryStore();
+    const calls: Array<{
+      prompt: { system: string; user: string };
+      options?: { schemaRepair?: boolean };
+    }> = [];
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [],
+      fetch: async () => documentFixture(officialEvidence.url, '<p>doc</p>'),
+      extract: async () => officialEvidence,
+      assess: async (prompt, options?: { schemaRepair?: boolean }) => {
+        calls.push({ prompt, options });
+        return calls.length === 1
+          ? assessed({ event_key: 'Anthropic 水印 2026' })
+          : assessed({
+            event_key: 'unverified-anthropic-output-watermark-2026-08-11',
+            recommendation: 'needs_review',
+          });
+      },
+    });
+
+    expect(memory.current()).toMatchObject({ status: 'needs_review' });
+    expect(calls).toHaveLength(2);
+    expect(calls[1].options).toEqual({ schemaRepair: true });
+    const repairRequest = JSON.parse(calls[1].prompt.user) as {
+      validation_error_code: string;
+      original_prompt: { system: string; user: string };
+    };
+    expect(repairRequest.validation_error_code).toBe('invalid_assessment_identity');
+    expect(repairRequest.original_prompt).toEqual(calls[0].prompt);
+    expect(calls[1].prompt.system).toContain('schema repair');
+    expect(calls[1].prompt.user).not.toContain('Anthropic 水印 2026');
+  });
+
+  test('attempts schema repair only once before persisting validation failure', async () => {
+    const memory = memoryStore();
+    let calls = 0;
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [],
+      fetch: async () => documentFixture(officialEvidence.url, '<p>doc</p>'),
+      extract: async () => officialEvidence,
+      assess: async () => {
+        calls += 1;
+        return assessed({ event_key: '非法事件身份' });
+      },
+    });
+
+    expect(calls).toBe(2);
+    expect(memory.current()).toMatchObject({
+      status: 'failed',
+      error_code: 'assessment_validation_failed',
+      error_message: 'schema_repair_exhausted:invalid_assessment_identity',
+    });
+  });
+
   test('does not promote an unsupported political claim and surfaces uncertainty', async () => {
     const memory = memoryStore(lead({
       input_url: 'https://www.sanders.senate.gov/example.pdf',
@@ -165,6 +220,42 @@ describe('manual lead processing pipeline', () => {
     });
     expect(memory.current()).toMatchObject({ status: 'needs_review' });
     expect(memory.current().assessment).toMatchObject({ recommendation: 'needs_review', evidence_tier: 'insufficient' });
+  });
+
+  test('does not recommend same-company background evidence missing the lead proprietary terms', async () => {
+    const memory = memoryStore(lead({
+      input_type: 'text_url',
+      input_text: 'Anthropic Claude C2PA provenance watermark',
+    }));
+    const backgroundEvidence: ManualNewsEvidence = {
+      ...officialEvidence,
+      title: 'Anthropic updates Claude availability',
+      excerpt: 'An older Claude product availability update with no output provenance announcement.',
+      claims_supported: ['Anthropic previously updated Claude availability.'],
+    };
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [],
+      fetch: async () => documentFixture(backgroundEvidence.url, '<p>old Claude availability news</p>'),
+      extract: async () => backgroundEvidence,
+      assess: async () => assessed({
+        title: 'Anthropic更新Claude可用范围',
+        summary: '旧资料说明Claude产品可用范围发生调整。',
+        event_key: 'anthropic-updates-claude-availability-2026-07-01',
+        occurred_at: null,
+        claims: [{
+          text: 'Anthropic此前更新了Claude的产品可用范围。',
+          evidence_ids: [backgroundEvidence.id],
+        }],
+      }),
+    });
+
+    expect(memory.current()).toMatchObject({ status: 'needs_review' });
+    expect(memory.current().assessment).toMatchObject({
+      recommendation: 'needs_review',
+      uncertainties: expect.arrayContaining([
+        expect.stringMatching(/C2PA.*watermark|watermark.*C2PA/i),
+      ]),
+    });
   });
 
   test('marks same-event cross-day evidence as duplicate unless it is a material update', async () => {
