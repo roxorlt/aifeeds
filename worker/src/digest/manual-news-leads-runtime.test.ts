@@ -233,6 +233,74 @@ describe('manual lead evidence extraction', () => {
     expect(evidence?.excerpt).not.toContain('Related denial');
   });
 
+  test.each([
+    '<template><template>nested placeholder</template><script type="application/ld+json">JSON_LD</script></template>',
+    '<template><noscript><template>mixed placeholder</template></noscript><script type="application/ld+json">JSON_LD</script></template>',
+    '<TeMpLaTe data-label="outer > value"><TeMpLaTe>nested placeholder</TeMpLaTe><ScRiPt TyPe="application/ld+json">JSON_LD</ScRiPt></TeMpLaTe>',
+    '<template/><script type="application/ld+json">JSON_LD</script></template>',
+    '<noscript/><script type="application/ld+json">JSON_LD</script></noscript>',
+  ])('does not let nested hidden JSON-LD override a visible article blocker: %s', async (hiddenMarkup) => {
+    const hiddenJson = JSON.stringify({
+      '@type': 'NewsArticle', articleBody: alibabaSupport,
+    });
+    const blocker = 'Alibaba withdrew the restriction on employees using Claude Code.';
+    const html = `<html><head><title>Visible conflict</title></head><body>
+      ${hiddenMarkup.replace('JSON_LD', hiddenJson)}
+      <article><p>${alibabaSupport}</p><p>${blocker}</p></article>
+    </body></html>`;
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://www.axios.com/nested-hidden-json-ld', html,
+    ));
+
+    expect(evidence?.excerpt).toBe(`${alibabaSupport} ${blocker}`);
+    expect(() => validateManualLeadGeneratedAssessment(
+      alibabaGeneratedAssessment(evidence!.id), [evidence!],
+    )).toThrow(/evidence_disposition/);
+  });
+
+  test('excludes article and main candidates nested under hidden ancestors', async () => {
+    const html = `<html><head>
+      <template><title>Hidden template title</title></template>
+      <title>Visible article</title>
+    </head><body>
+      <template data-label="hidden > article">
+        <template>nested</template>
+        <article>Hidden article candidate with Alibaba denial, withdrawal, and contractor scope.</article>
+        <main>Hidden main candidate with related advertising and navigation.</main>
+      </template>
+      <article><p>${alibabaSupport}</p></article>
+    </body></html>`;
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://www.axios.com/hidden-containers', html,
+    ));
+
+    expect(evidence?.excerpt).toBe(alibabaSupport);
+    expect(evidence?.title).toBe('Visible article');
+  });
+
+  test.each([
+    '<template><script type="application/ld+json">{"@type":"NewsArticle","articleBody":"hidden"}</script><article>hidden article',
+    `<article><p>${alibabaSupport}</p>`,
+    '<!-- unclosed comment <article>hidden article',
+    '<template data-label="unterminated > <article>hidden article</article>',
+  ])('fails safely on an unterminated structural construct: %s', async (malformedBody) => {
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://www.axios.com/malformed-hidden-structure',
+      `<html><head><title>Malformed</title></head><body>${malformedBody}</body></html>`,
+    ));
+    expect(evidence).toBeNull();
+  });
+
+  test.each([
+    `${'<template>'.repeat(129)}hidden${'</template>'.repeat(129)}`,
+    `${'<article>'.repeat(17)}visible${'</article>'.repeat(17)}`,
+  ])('fails safely when structural depth exceeds a bounded parser limit', async (body) => {
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://www.axios.com/excessive-html-depth', `<html><body>${body}</body></html>`,
+    ));
+    expect(evidence).toBeNull();
+  });
+
   test('ignores invalid, malicious, empty, and overlong JSON-LD before using the article body', async () => {
     const overlong = JSON.stringify({
       '@type': 'NewsArticle', articleBody: 'x'.repeat(120_000),
@@ -276,6 +344,21 @@ describe('manual lead evidence extraction', () => {
     </body></html>`;
     const evidence = await extractManualNewsEvidence(documentFixture(
       'https://www.axios.com/conflicted-article', html,
+    ));
+
+    expect(evidence?.excerpt).toContain(blocker);
+    expect(() => validateManualLeadGeneratedAssessment(
+      alibabaGeneratedAssessment(evidence!.id), [evidence!],
+    )).toThrow(/evidence_disposition/);
+  });
+
+  test('does not erase visible blocker text that uses entity-escaped tag-shaped delimiters', async () => {
+    const blocker = 'Alibaba withdrew the restriction on employees using Claude Code.';
+    const html = `<html><head><title>Escaped visible text</title></head><body>
+      <article><p>${alibabaSupport}</p><p>&lt;script&gt;${blocker}&lt;/script&gt;</p></article>
+    </body></html>`;
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://www.axios.com/entity-escaped-visible-blocker', html,
     ));
 
     expect(evidence?.excerpt).toContain(blocker);
