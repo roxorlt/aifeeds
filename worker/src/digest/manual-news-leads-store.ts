@@ -576,36 +576,39 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
          WHERE id = ? AND version = ? AND processing_owner = ? AND processing_attempt = ?
            AND status = 'extracting'`,
       ).bind(id, expectedVersion, owner, attempt);
+    const invalidationStatement = this.env.DB.prepare(
+        `/* manual_verification:invalidate_for_evidence */ UPDATE manual_news_assessment_verifications
+         SET status = 'invalidated', reason = 'evidence_replaced', invalidated_at = ?,
+             invalidation_nonce = ?
+         WHERE lead_id = ? AND status = 'active' AND ${leadGuard}`,
+      ).bind(now, invalidationNonce, id, id, expectedVersion, owner, attempt);
     const invalidationAuditStatement = this.env.DB.prepare(
         `/* manual_verification:invalidate_audit */ INSERT INTO manual_news_lead_audit (
            lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
            resulting_version, metadata_json, created_at
          ) SELECT ?, 'assessment_invalidate', 'extracting', 'extracting', NULL, ?, ?, ?, ?
          WHERE ${leadGuard} AND EXISTS (
-           SELECT 1 FROM manual_news_assessment_verifications
-           WHERE lead_id = ? AND status = 'active'
+           SELECT 1 FROM manual_news_assessment_verifications v
+           WHERE v.lead_id = ? AND v.status = 'invalidated'
+             AND v.reason = 'evidence_replaced' AND v.invalidation_nonce = ?
          )`,
       ).bind(
         id, invalidationNonce, expectedVersion, JSON.stringify({
           reason: 'evidence_replaced', processing_owner: owner,
           processing_attempt: attempt, lead_version: expectedVersion,
+          mutation_nonce: invalidationNonce,
         }), now,
-        id, expectedVersion, owner, attempt, id,
+        id, expectedVersion, owner, attempt, id, invalidationNonce,
       );
-    const invalidationStatement = this.env.DB.prepare(
-        `/* manual_verification:invalidate_for_evidence */ UPDATE manual_news_assessment_verifications
-         SET status = 'invalidated', reason = 'evidence_replaced', invalidated_at = ?
-         WHERE lead_id = ? AND status = 'active' AND ${leadGuard}`,
-      ).bind(now, id, id, expectedVersion, owner, attempt);
     const quarantineStatement = this.env.DB.prepare(
         `/* manual_verification:evidence_quarantine_item */ UPDATE items SET deleted_at = ?
          WHERE id = ? AND deleted_at IS NULL AND EXISTS (
            SELECT 1 FROM manual_news_assessment_verifications v
            WHERE v.lead_id = ? AND v.status = 'invalidated'
-             AND v.reason = 'evidence_replaced' AND v.invalidated_at = ?
+             AND v.reason = 'evidence_replaced' AND v.invalidation_nonce = ?
          ) AND ${leadGuard}`,
       ).bind(
-        new Date(now).toISOString(), `blog:manual:${id}`, id, now,
+        new Date(now).toISOString(), `blog:manual:${id}`, id, invalidationNonce,
         id, expectedVersion, owner, attempt,
       );
     const deleteEvidenceStatement = this.env.DB.prepare(
@@ -643,8 +646,8 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       );
     const statements = [
       ownerGuardStatement,
-      invalidationAuditStatement,
       invalidationStatement,
+      invalidationAuditStatement,
       quarantineStatement,
       deleteEvidenceStatement,
       ...insertEvidenceStatements,
@@ -653,8 +656,8 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     const results = await this.env.DB.batch(statements) as Array<{ meta?: { changes?: number } }>;
     const resultIndex = {
       ownerGuard: 0,
-      invalidationAudit: 1,
-      invalidation: 2,
+      invalidation: 1,
+      invalidationAudit: 2,
       quarantine: 3,
       evidenceDelete: 4,
       evidenceInsertStart: 5,
