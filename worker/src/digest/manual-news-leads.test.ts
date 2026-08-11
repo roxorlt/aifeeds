@@ -684,6 +684,57 @@ describe('manual news lead domain', () => {
   });
 
   test.each([
+    'OpenAI发布芯片设计模型。',
+    'OpenAI发布多模态推理系统。',
+    'OpenAI发布推理模型。',
+    'OpenAI发布图像生成模型。',
+    'OpenAI发布语音模型。',
+    'OpenAI发布端侧视觉语言模型。',
+    '法院命令OpenAI停止发布芯片设计模型。',
+  ])('accepts an open Chinese domain noun phrase ending in one explicit noun head: %s', (text) => {
+    const fixture = supportedTextVerification(text, text);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    'OpenAI发布芯片设计模型百度升级系统。',
+    '法院命令OpenAI停止发布多模态推理系统腾讯改平台。',
+    'OpenAI发布图像生成模型Acme造工具。',
+    'OpenAI发布语音模型并训练GPT 6。',
+  ])('keeps a second entity, predicate, or event outside an open Chinese nominal phrase: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
+  test.each([
+    'Anthropic发布Claude Sonnet 5推理模型。',
+    'Google发布Gemini 2.5 Flash多模态推理系统。',
+    '阿里发布Qwen3-235B芯片设计模型。',
+    '深度求索发布DeepSeek V3.2-Exp推理模型。',
+    'OpenAI发布GPT-5.6-Pro图像生成模型。',
+  ])('accepts a bounded subfamily or compound version after a registered product alias: %s', (text) => {
+    const fixture = supportedTextVerification(text, text);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    'OpenAI发布Acme Sonnet 5推理模型。',
+    'OpenAI发布Nimbus 2.5 Flash模型。',
+    '法院命令OpenAI停止发布Acme V3.2-Exp推理模型。',
+    'Anthropic发布Claude Sonnet推理模型。',
+    'Google发布Gemini 2.5 Flash Extra模型。',
+  ])('does not extend registered version grammar to unknown families or malformed descriptors: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
+  test.each([
     'OpenAI发布 百度投资分析工具。',
     'OpenAI发布\u2003腾讯融资服务。',
   ])('does not extend a release object noun phrase across a second subject and predicate: %s', (text) => {

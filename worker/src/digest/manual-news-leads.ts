@@ -836,6 +836,14 @@ function canonicalEntityRoleKey(value: string): string {
     .trim();
 }
 
+function canonicalProductKey(value: string): string {
+  return value.normalize('NFKC').toLowerCase()
+    .replace(/_/gu, '-')
+    .replace(/\s*([.-])\s*/gu, '$1')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
 const AUTHORITY_ENTITY_REGISTRY: Readonly<Record<string, readonly string[]>> = {
   court: ['法院', '最高法院', 'the court', 'court'],
   regulator: ['监管机构', '监管部门', '管理部门', '执法机构', 'the regulator', 'regulator', 'regulators'],
@@ -863,25 +871,40 @@ function canonicalRegistryAliases(registry: Readonly<Record<string, readonly str
 
 const AUTHORITY_ENTITY_ALIASES = canonicalRegistryAliases(AUTHORITY_ENTITY_REGISTRY);
 const ORGANIZATION_ENTITY_ALIASES = canonicalRegistryAliases(ORGANIZATION_ENTITY_REGISTRY);
-const PRODUCT_ENTITY_ALIASES = canonicalRegistryAliases(PRODUCT_ENTITY_REGISTRY);
+const PRODUCT_ENTITY_ALIASES = Object.values(PRODUCT_ENTITY_REGISTRY)
+  .flat().map(canonicalProductKey);
 const PRODUCT_ENTITY_ALIASES_BY_LENGTH = [...PRODUCT_ENTITY_ALIASES]
   .sort((left, right) => right.length - left.length);
+const PRODUCT_DESCRIPTOR_WORDS: ReadonlySet<string> = new Set([
+  'base', 'chat', 'coder', 'codex', 'exp', 'flash', 'haiku', 'instruct', 'large', 'lite',
+  'max', 'medium', 'mini', 'nano', 'omni', 'opus', 'plus', 'preview', 'pro', 'reasoner',
+  'small', 'sonnet', 'thinking', 'turbo', 'ultra', 'vl',
+]);
+
+function isRegisteredProductDescriptor(value: string): boolean {
+  if (!value || value.length > 48) return false;
+  const tokens = value.split(/\s+/u);
+  return tokens.length <= 2
+    && tokens.every((token) => /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/iu.test(token))
+    && tokens.every((token) => /\d/u.test(token)
+      || token.split(/[.-]/u).every((part) => PRODUCT_DESCRIPTOR_WORDS.has(part.toLowerCase())))
+    && tokens.some((token) => /\d/u.test(token));
+}
 
 function isCanonicalProduct(value: string): boolean {
-  const key = canonicalEntityRoleKey(value);
+  const key = canonicalProductKey(value);
   if (!key) return false;
   if (PRODUCT_ENTITY_ALIASES.includes(key)) return true;
-  const productFamily = PRODUCT_ENTITY_ALIASES_BY_LENGTH.find((alias) =>
-    key.startsWith(`${alias} `)
-    || key.startsWith(`${alias}v`)
-    || new RegExp(`^${alias}\\d`, 'u').test(key));
-  if (productFamily) {
-    const version = key.slice(productFamily.length).trim();
-    if (/^(?:v(?:ersion)?\s*)?[a-z]?\d+(?:\.\d+)*(?:\s+(?:preview|pro|mini|lite|turbo))?$/iu.test(version)) {
-      return true;
-    }
+  for (const alias of PRODUCT_ENTITY_ALIASES_BY_LENGTH) {
+    if (!key.startsWith(alias)) continue;
+    const rawDescriptor = key.slice(alias.length);
+    if (!rawDescriptor) return true;
+    const separated = /^[\s-]/u.test(rawDescriptor);
+    const descriptor = rawDescriptor.replace(/^[\s-]+/u, '');
+    if (!separated && !/^(?:\d|[a-z]\d)/iu.test(descriptor)) continue;
+    if (isRegisteredProductDescriptor(descriptor)) return true;
   }
-  return /^[a-z][a-z0-9+.-]{1,30}\s+(?:model|模型)\s+(?:v(?:ersion)?\s*)?[a-z]?\d+(?:\.\d+)*$/iu.test(key);
+  return /^[a-z][a-z0-9+.-]{1,30}\s+(?:model|模型)\s+[a-z0-9]+(?:[.-][a-z0-9]+)*$/iu.test(key);
 }
 
 function canonicalEntityRole(value: string): CanonicalEntityRole {
@@ -1061,18 +1084,32 @@ function controlSubjectSegmentFullyConsumed(
   return allowedRoles.includes(canonicalEntityRole(subject));
 }
 
-const CHINESE_NOMINAL_MODIFIER_SOURCE = '(?:人工智能|大语言|语言|基础|生成式|多模态|企业|技术|客户|开发者|核心|智能|数据|新型|最新|大型|通用|开源|融资|合作|投资|支持|训练|命令行|向量|伙伴|分析|模型|新|大|AI)';
 const CHINESE_ALLOWED_MULTI_HEAD_NOMINALS: ReadonlySet<string> = new Set([
   '模型训练工具',
 ]);
 const ENGLISH_NOMINAL_MODIFIER_SOURCE = '(?:artificial\\s+intelligence|large\\s+language|foundation|generative|multimodal|enterprise|technical|customer|developer|core|smart|data|new|open[ -]source|training|investment|analysis|support|vector|command[ -]line|partner(?:ship)?)';
 
+function containsRegisteredOrganization(value: string): boolean {
+  const source = canonicalEntityRoleKey(value).replace(/\s+/gu, '');
+  return ORGANIZATION_ENTITY_ALIASES.some((alias) =>
+    source.includes(alias.replace(/\s+/gu, '')));
+}
+
 function isAllowedChineseNominalComponent(value: string): boolean {
   const phrase = value.normalize('NFKC').replace(/\s+/gu, '');
   if (!phrase || Array.from(phrase).length > 48) return false;
+  if (containsRegisteredOrganization(phrase)) return false;
+  const latinTokens = phrase.match(/[A-Za-z0-9][A-Za-z0-9.+-]*/gu) || [];
+  if (latinTokens.some((token) => !/^\d+$/u.test(token)
+    && !/^(?:[A-Z]{2,12}|[A-Z0-9]*\d[A-Z0-9.-]*)$/u.test(token))) return false;
   const heads = [...phrase.matchAll(new RegExp(CONTROL_OBJECT_NOUN_HEAD, 'gu'))];
+  const finalHead = phrase.match(new RegExp(`${CONTROL_OBJECT_NOUN_HEAD}$`, 'u'));
+  if (!finalHead || finalHead.index === undefined) return false;
   if (heads.length > 1 && !CHINESE_ALLOWED_MULTI_HEAD_NOMINALS.has(phrase)) return false;
-  return new RegExp(`^(?:${CHINESE_NOMINAL_MODIFIER_SOURCE}){0,4}${CONTROL_OBJECT_NOUN_HEAD}$`, 'iu').test(phrase);
+  const prefix = phrase.slice(0, finalHead.index);
+  if (/^[\p{Script=Han}·]{2,16}[推造改做发建]$/u.test(prefix)
+    || /^[\p{Script=Han}·]{2,16}(?:升级|部署|重塑|商业化)$/u.test(prefix)) return false;
+  return /^[\p{Script=Han}A-Za-z0-9.+-]+$/u.test(phrase);
 }
 
 function isAllowedEnglishNominalComponent(value: string): boolean {
