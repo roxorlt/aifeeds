@@ -1,6 +1,12 @@
 import type { Env } from '../index';
 import { callDeepSeekJson, DEEPSEEK_PRO } from '../hf-paper/llm';
-import { fetchPublicDocument, type PublicDocument } from '../security/safe-url-fetch';
+import {
+  fetchPublicDocument,
+  searchPublicWeb,
+  type PublicDocument,
+  type TrustedGatewayFetcher,
+  type TrustedResearchService,
+} from '../security/safe-url-fetch';
 import type { ManualNewsEvidence, ManualEvidenceSourceType } from './manual-news-leads';
 import {
   processManualNewsLead,
@@ -44,6 +50,30 @@ function searchTerms(text: string): string[] {
   return [...terms];
 }
 
+const OFFICIAL_PRODUCT_DOMAINS = new Set([
+  'anthropic.com', 'claude.com', 'openai.com', 'deepmind.google', 'blog.google',
+  'meta.com', 'nvidia.com', 'microsoft.com', 'github.blog', 'huggingface.co',
+]);
+const ORIGINAL_DOCUMENT_DOMAINS = new Set([
+  'senate.gov', 'house.gov', 'congress.gov', 'whitehouse.gov', 'ftc.gov', 'justice.gov',
+]);
+const INDEPENDENT_MEDIA_DOMAINS = new Set([
+  'axios.com', 'reuters.com', 'apnews.com', 'theverge.com', 'techcrunch.com', 'bloomberg.com',
+  'wsj.com', 'nytimes.com', 'ft.com', 'jiqizhixin.com', 'qbitai.com', '36kr.com',
+]);
+
+function allowlistedRegistrableDomain(host: string, domains: ReadonlySet<string>): string | null {
+  for (const domain of domains) {
+    if (host === domain || host.endsWith(`.${domain}`)) return domain;
+  }
+  return null;
+}
+
+function displayRegistrableDomain(host: string): string {
+  const labels = host.split('.').filter(Boolean);
+  return labels.length > 1 ? labels.slice(-2).join('.') : host;
+}
+
 function sourceIdentity(urlValue: string): { source_type: ManualEvidenceSourceType; reliable: boolean; publisher: string } {
   let url: URL;
   try {
@@ -52,27 +82,17 @@ function sourceIdentity(urlValue: string): { source_type: ManualEvidenceSourceTy
     return { source_type: 'other', reliable: false, publisher: '' };
   }
   const host = url.hostname.toLowerCase().replace(/^www\./, '');
-  if (host.endsWith('.gov') || host.endsWith('.senate.gov') || host.endsWith('.house.gov')) {
-    return { source_type: 'original_document', reliable: true, publisher: host };
+  const original = allowlistedRegistrableDomain(host, ORIGINAL_DOCUMENT_DOMAINS);
+  if (original) return { source_type: 'original_document', reliable: true, publisher: original };
+  const official = allowlistedRegistrableDomain(host, OFFICIAL_PRODUCT_DOMAINS);
+  if (official) {
+    const prefix = host.slice(0, Math.max(0, host.length - official.length)).replace(/\.$/, '');
+    const help = prefix.split('.').some((label) => ['support', 'help', 'docs'].includes(label));
+    return { source_type: help ? 'official_help' : 'official_primary', reliable: true, publisher: official };
   }
-  if (/^(support|help|docs)\./.test(host) && /(claude|anthropic|openai|google|microsoft|meta|nvidia)/.test(host)) {
-    return { source_type: 'official_help', reliable: true, publisher: host };
-  }
-  const officialHosts = [
-    'anthropic.com', 'claude.com', 'openai.com', 'deepmind.google', 'blog.google', 'ai.meta.com',
-    'meta.com', 'nvidia.com', 'microsoft.com', 'github.blog', 'huggingface.co',
-  ];
-  if (officialHosts.some((domain) => host === domain || host.endsWith(`.${domain}`))) {
-    return { source_type: 'official_primary', reliable: true, publisher: host };
-  }
-  const independentHosts = [
-    'axios.com', 'reuters.com', 'apnews.com', 'theverge.com', 'techcrunch.com', 'bloomberg.com',
-    'wsj.com', 'nytimes.com', 'ft.com', 'jiqizhixin.com', 'qbitai.com', '36kr.com',
-  ];
-  if (independentHosts.some((domain) => host === domain || host.endsWith(`.${domain}`))) {
-    return { source_type: 'independent_media', reliable: true, publisher: host };
-  }
-  return { source_type: 'other', reliable: false, publisher: host };
+  const independent = allowlistedRegistrableDomain(host, INDEPENDENT_MEDIA_DOMAINS);
+  if (independent) return { source_type: 'independent_media', reliable: true, publisher: independent };
+  return { source_type: 'other', reliable: false, publisher: displayRegistrableDomain(host) };
 }
 
 function decodeHtml(value: string): string {
@@ -91,7 +111,7 @@ function decodeHtml(value: string): string {
 }
 
 function normalizedPublishedAt(body: string, hinted: string | null | undefined): string | null {
-  const candidates = [hinted || ''];
+  const candidates: string[] = [];
   for (const tag of body.match(/<meta\b[^>]*>/gi) || []) {
     const attributes = new Map<string, string>();
     for (const match of tag.matchAll(/([:\w-]+)\s*=\s*["']([^"']*)["']/g)) {
@@ -104,6 +124,7 @@ function normalizedPublishedAt(body: string, hinted: string | null | undefined):
   }
   const time = /<time\b[^>]*\bdatetime\s*=\s*["']([^"']+)["']/i.exec(body);
   if (time) candidates.push(time[1]);
+  if (hinted) candidates.push(hinted);
   for (const value of candidates) {
     if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
     if (!/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) continue;
@@ -125,21 +146,22 @@ export async function extractManualNewsEvidence(
   now = Date.now(),
 ): Promise<ManualNewsEvidence | null> {
   const identity = sourceIdentity(document.url);
-  const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(document.body);
+  const html = document.extraction === 'html';
+  const titleMatch = html ? /<title[^>]*>([\s\S]*?)<\/title>/i.exec(document.body) : null;
   const title = compact(hint?.title || (titleMatch ? decodeHtml(titleMatch[1]) : ''), 220);
-  const excerpt = compact(hint?.snippet || decodeHtml(document.body), 3_000);
+  const excerpt = compact(html ? decodeHtml(document.body) : document.body, 3_000);
   if (!title && !excerpt) return null;
   return {
     id: await evidenceId(document.url),
     url: document.url,
-    source_type: hint?.source_type || identity.source_type,
-    publisher: compact(hint?.publisher || identity.publisher, 120),
+    source_type: identity.source_type,
+    publisher: compact(identity.publisher, 120),
     published_at: normalizedPublishedAt(document.body, hint?.published_at),
     retrieved_at: now,
     title,
     excerpt,
     claims_supported: excerpt ? [excerpt] : [],
-    reliable: hint?.reliable ?? identity.reliable,
+    reliable: identity.reliable,
   };
 }
 
@@ -168,10 +190,37 @@ async function searchExistingNews(env: Env, input: { text: string }): Promise<Ma
   });
 }
 
-export function createManualNewsLeadRuntimeAdapters(env: Env): ManualLeadProcessingAdapters {
+function researchService(env: Env, fetcher?: TrustedGatewayFetcher): TrustedResearchService | undefined {
+  if (!env.MANUAL_NEWS_RESEARCH_ORIGIN || !env.MANUAL_NEWS_RESEARCH_TOKEN) return undefined;
   return {
-    search: (input) => searchExistingNews(env, input),
-    fetch: (url) => fetchPublicDocument(url),
+    origin: env.MANUAL_NEWS_RESEARCH_ORIGIN,
+    token: env.MANUAL_NEWS_RESEARCH_TOKEN,
+    ...(fetcher ? { fetcher } : {}),
+  };
+}
+
+async function searchAllNews(
+  env: Env,
+  input: { date: string; text: string },
+  fetcher?: TrustedGatewayFetcher,
+): Promise<ManualSearchResult[]> {
+  // Open-web research is mandatory for text clues. D1 is useful context but is
+  // not treated as proof that broader research completed.
+  const [existing, openWeb] = await Promise.all([
+    searchExistingNews(env, input),
+    searchPublicWeb(input, { service: researchService(env, fetcher) }),
+  ]);
+  const combined: ManualSearchResult[] = [...existing, ...openWeb];
+  return combined.filter((item, index) => combined.findIndex((candidate) => candidate.url === item.url) === index).slice(0, 8);
+}
+
+export function createManualNewsLeadRuntimeAdapters(
+  env: Env,
+  deps: { researchFetcher?: TrustedGatewayFetcher } = {},
+): ManualLeadProcessingAdapters {
+  return {
+    search: (input) => searchAllNews(env, input, deps.researchFetcher),
+    fetch: (url) => fetchPublicDocument(url, { service: researchService(env, deps.researchFetcher) }),
     extract: (document, hint) => extractManualNewsEvidence(document, hint),
     async assess(prompt) {
       if (!env.DEEPSEEK_API_KEY) throw new Error('no_deepseek_key');

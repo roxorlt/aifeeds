@@ -39,6 +39,8 @@ export interface NewsReviewBatch {
   batch_revision: number;
   supersedes_batch_id: string | null;
   revision_origin: 'scheduled_freeze' | 'manual_lead';
+  lineage_id: string;
+  is_current: boolean;
   created_at: number;
   expires_at: number;
 }
@@ -63,6 +65,8 @@ interface NewsReviewBatchRow {
   batch_revision?: number;
   supersedes_batch_id?: string | null;
   revision_origin?: NewsReviewBatch['revision_origin'];
+  lineage_id?: string;
+  is_current?: number;
   created_at: number;
   expires_at: number;
 }
@@ -103,6 +107,8 @@ function toBatch(row: NewsReviewBatchRow): NewsReviewBatch {
     batch_revision: Number(row.batch_revision || 1),
     supersedes_batch_id: row.supersedes_batch_id || null,
     revision_origin: row.revision_origin || 'scheduled_freeze',
+    lineage_id: row.lineage_id || row.review_date,
+    is_current: row.is_current === undefined ? !row.superseded_by : row.is_current === 1,
     candidate_ids: parseStringArray(row.candidate_ids),
     candidates: parseCandidates(row.candidates_json),
     default_selected_ids: parseStringArray(row.default_selected_ids),
@@ -242,9 +248,9 @@ export async function getNewsReviewBatch(
 export async function getActiveNewsReviewBatch(env: Env, date: string): Promise<NewsReviewBatch | null> {
   const row = await env.DB.prepare(
     `SELECT * FROM daily_news_review_batches
-     WHERE review_date = ? AND superseded_by IS NULL
+     WHERE review_date = ? AND lineage_id = ? AND is_current = 1
      ORDER BY created_at DESC LIMIT 1`,
-  ).bind(date).first<NewsReviewBatchRow>();
+  ).bind(date, date).first<NewsReviewBatchRow>();
   return row ? toBatch(row) : null;
 }
 
@@ -324,13 +330,16 @@ export async function freezeNewsReviewBatch(
   if (!validatedDefault.ok) throw new Error(`invalid_default_selection:${validatedDefault.error}`);
   const batchId = await buildNewsReviewBatchId(date, candidates);
   const existing = await getNewsReviewBatch(env, date, batchId);
-  if (existing) return {
-    batch: existing,
-    created: false,
-    superseded_batch_id: null,
-    auto_repaired: !!existing.auto_repaired_from_batch,
-    auto_repaired_invalid_ids: existing.auto_repaired_invalid_ids,
-  };
+  if (existing) {
+    const current = existing.is_current ? existing : await getActiveNewsReviewBatch(env, date);
+    if (current) return {
+      batch: current,
+      created: false,
+      superseded_batch_id: null,
+      auto_repaired: !!current.auto_repaired_from_batch,
+      auto_repaired_invalid_ids: current.auto_repaired_invalid_ids,
+    };
+  }
   const previous = await getActiveNewsReviewBatch(env, date);
   const batchRevision = (previous?.batch_revision || 0) + 1;
   const previousPublishedIds = previous
@@ -339,62 +348,56 @@ export async function freezeNewsReviewBatch(
   const repair = previous
     ? repairInvalidNewsReviewSelection(previousPublishedIds, candidateIds)
     : { required: false, invalid_ids: [], selected_ids: [] };
-  if (repair.required) {
-    const selectionHash = await newsReviewSelectionHash(repair.selected_ids);
-    await env.DB.prepare(
-      `INSERT INTO daily_news_review_batches (
-         review_date, batch_id, candidate_ids, candidates_json, default_selected_ids,
-         applied_selected_ids, selection_hash, edit_revision, publish_status,
-         auto_repaired_from_batch, auto_repaired_invalid_ids, created_at, expires_at,
-         batch_revision, supersedes_batch_id, revision_origin
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'pending', ?, ?, ?, ?, ?, ?, 'scheduled_freeze')`,
-    ).bind(
-      date,
-      batchId,
-      JSON.stringify(candidateIds),
-      JSON.stringify(candidates),
-      JSON.stringify(validatedDefault.selected_ids),
-      JSON.stringify(repair.selected_ids),
-      selectionHash,
-      previous!.batch_id,
-      JSON.stringify(repair.invalid_ids),
-      now,
-      newsReviewExpiresAt(date),
-      batchRevision,
-      previous?.batch_id || null,
-    ).run();
-  } else {
-    await env.DB.prepare(
-      `INSERT INTO daily_news_review_batches (
-         review_date, batch_id, candidate_ids, candidates_json, default_selected_ids,
-         created_at, expires_at, batch_revision, supersedes_batch_id, revision_origin
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled_freeze')`,
-    ).bind(
-      date,
-      batchId,
-      JSON.stringify(candidateIds),
-      JSON.stringify(candidates),
-      JSON.stringify(validatedDefault.selected_ids),
-      now,
-      newsReviewExpiresAt(date),
-      batchRevision,
-      previous?.batch_id || null,
-    ).run();
+  const selectionHash = repair.required ? await newsReviewSelectionHash(repair.selected_ids) : null;
+  const insert = env.DB.prepare(
+    `/* news_review:insert_revision_cas */ INSERT INTO daily_news_review_batches (
+       review_date, batch_id, candidate_ids, candidates_json, default_selected_ids,
+       applied_selected_ids, selection_hash, edit_revision, publish_status,
+       auto_repaired_from_batch, auto_repaired_invalid_ids, created_at, expires_at,
+       batch_revision, supersedes_batch_id, revision_origin, lineage_id, is_current
+     ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled_freeze', ?, ?
+     WHERE ${previous
+       ? `EXISTS (SELECT 1 FROM daily_news_review_batches
+            WHERE review_date = ? AND lineage_id = ? AND batch_id = ? AND batch_revision = ? AND is_current = 1)`
+       : `NOT EXISTS (SELECT 1 FROM daily_news_review_batches
+            WHERE review_date = ? AND lineage_id = ? AND is_current = 1)`}
+     ON CONFLICT(review_date, batch_id) DO NOTHING`,
+  ).bind(
+    date, batchId, JSON.stringify(candidateIds), JSON.stringify(candidates),
+    JSON.stringify(validatedDefault.selected_ids), repair.required ? JSON.stringify(repair.selected_ids) : null,
+    selectionHash, repair.required ? 1 : 0, repair.required ? 'pending' : 'not_requested',
+    repair.required ? previous!.batch_id : null, repair.required ? JSON.stringify(repair.invalid_ids) : null,
+    now, newsReviewExpiresAt(date), batchRevision, previous?.batch_id || null, date, previous ? 0 : 1,
+    date, date, ...(previous ? [previous.batch_id, previous.batch_revision] : []),
+  );
+  const statements: D1PreparedStatement[] = [insert];
+  if (previous) {
+    statements.push(
+      env.DB.prepare(
+        `/* news_review:supersede_revision_cas */ UPDATE daily_news_review_batches
+         SET superseded_by = ?, is_current = 0
+         WHERE review_date = ? AND lineage_id = ? AND batch_id = ? AND batch_revision = ? AND is_current = 1
+           AND EXISTS (SELECT 1 FROM daily_news_review_batches
+             WHERE review_date = ? AND batch_id = ? AND is_current = 0)`,
+      ).bind(batchId, date, date, previous.batch_id, previous.batch_revision, date, batchId),
+      env.DB.prepare(
+        `/* news_review:activate_revision_cas */ UPDATE daily_news_review_batches SET is_current = 1
+         WHERE review_date = ? AND lineage_id = ? AND batch_id = ? AND is_current = 0
+           AND EXISTS (SELECT 1 FROM daily_news_review_batches
+             WHERE review_date = ? AND batch_id = ? AND superseded_by = ?)`,
+      ).bind(date, date, batchId, date, previous.batch_id, batchId),
+    );
   }
-  if (previous && previous.batch_id !== batchId) {
-    await env.DB.prepare(
-      `UPDATE daily_news_review_batches SET superseded_by = ?
-       WHERE review_date = ? AND batch_id <> ? AND superseded_by IS NULL`,
-    ).bind(batchId, date, batchId).run();
-  }
-  const batch = await getNewsReviewBatch(env, date, batchId);
-  if (!batch) throw new Error('news_review_batch_insert_failed');
+  await env.DB.batch(statements);
+  const inserted = await getNewsReviewBatch(env, date, batchId);
+  const active = inserted?.is_current ? inserted : await getActiveNewsReviewBatch(env, date);
+  if (!active) throw new Error('news_review_batch_cas_failed');
   return {
-    batch,
-    created: true,
-    superseded_batch_id: previous?.batch_id || null,
-    auto_repaired: repair.required,
-    auto_repaired_invalid_ids: repair.invalid_ids,
+    batch: active,
+    created: active.batch_id === batchId && !existing,
+    superseded_batch_id: active.batch_id === batchId ? previous?.batch_id || null : null,
+    auto_repaired: active.batch_id === batchId && repair.required,
+    auto_repaired_invalid_ids: active.batch_id === batchId ? repair.invalid_ids : active.auto_repaired_invalid_ids,
   };
 }
 

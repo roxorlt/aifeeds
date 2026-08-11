@@ -55,7 +55,8 @@ export interface ManualLeadProcessingStore {
     patch?: Partial<Pick<ManualNewsLeadRecord, 'error_code' | 'error_message'>>,
   ): Promise<ManualNewsLeadRecord>;
   replaceEvidence(id: string, evidence: readonly ManualNewsEvidence[]): Promise<void>;
-  listPriorEvents(date: string, eventKey?: string): Promise<Array<{ event_key: string; review_date: string; lead_id: string }>>;
+  listRecentPriorEvents(date: string, excludeLeadId: string): Promise<Array<{ event_key: string; review_date: string; lead_id: string }>>;
+  findPriorEventsByEventKey(eventKey: string, excludeLeadId: string): Promise<Array<{ event_key: string; review_date: string; lead_id: string }>>;
   saveAssessment(id: string, assessment: ProcessedManualLeadAssessment): Promise<void>;
 }
 
@@ -144,7 +145,7 @@ export async function processManualNewsLead(
         });
         return (await store.getLead(leadId))!;
       }
-      const priorEvents = await store.listPriorEvents(normalized.date);
+      const priorEvents = await store.listRecentPriorEvents(normalized.date, leadId);
       const prompt = buildManualLeadAssessmentPrompt({
         date: normalized.date,
         text: normalized.text,
@@ -154,7 +155,9 @@ export async function processManualNewsLead(
       });
       try {
         const raw = await adapters.assess(prompt);
-        assessment = applyManualLeadEvidencePolicy(validateManualLeadAssessment(raw, evidence), evidence);
+        assessment = applyManualLeadEvidencePolicy(validateManualLeadAssessment(
+          raw, evidence, priorEvents.map((event) => event.event_key),
+        ), evidence);
       } catch (error) {
         await transition('failed', {
           error_code: 'assessment_validation_failed',
@@ -168,7 +171,7 @@ export async function processManualNewsLead(
 
     if (!assessment) throw new Error(`assessment_missing:${status}`);
     if (status === 'clustering') {
-      const priorEvents = await store.listPriorEvents(normalized.date);
+      const priorEvents = await store.findPriorEventsByEventKey(assessment.event_key, leadId);
       const duplicate = classifyManualLeadDuplicate(assessment, priorEvents, normalized.date);
       if (duplicate.duplicate || assessment.recommendation === 'duplicate') {
         assessment = {
@@ -176,6 +179,7 @@ export async function processManualNewsLead(
           recommendation: 'duplicate',
           duplicate_scope: duplicate.scope,
           matched_lead_id: duplicate.matched_lead_id,
+          matched_event_key: duplicate.matched_lead_id ? assessment.event_key : assessment.matched_event_key,
         };
         await store.saveAssessment(leadId, assessment);
         await transition('duplicate');
@@ -186,6 +190,7 @@ export async function processManualNewsLead(
         ...assessment,
         duplicate_scope: null,
         matched_lead_id: duplicate.matched_lead_id,
+        matched_event_key: duplicate.matched_lead_id ? assessment.event_key : assessment.matched_event_key,
       };
       await store.saveAssessment(leadId, assessment);
       await transition('scored');

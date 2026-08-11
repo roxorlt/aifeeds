@@ -32,7 +32,8 @@ function fakeConfirmationEnv() {
     title: 'Anthropic披露部分Claude输出的水印与来源标记',
     summary: '官方文档将范围限定为受支持的模型与产品。',
     event_key: 'anthropic-output-provenance-2026-08', event_type: 'product_documentation',
-    material_update: false, score: 82, recommendation: 'recommended', uncertainties: [],
+    material_update: false, score: 82, recommendation: 'recommended',
+    occurred_at: '2026-08-10T00:00:00.000Z', uncertainties: [],
     claims: [{ text: '范围受限。', evidence_ids: ['ev-1'] }], matched_event_key: null,
     evidence_tier: 'official_primary', duplicate_scope: null, matched_lead_id: null,
   };

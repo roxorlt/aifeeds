@@ -37,6 +37,7 @@ export interface ManualNewsLeadAssessment {
   material_update: boolean;
   score: number;
   recommendation: ManualNewsRecommendation;
+  occurred_at: string | null;
   uncertainties: string[];
   claims: Array<{ text: string; evidence_ids: string[] }>;
   matched_event_key: string | null;
@@ -119,28 +120,44 @@ function strictKeys(value: Record<string, unknown>, allowed: readonly string[]):
 export function validateManualLeadAssessment(
   raw: unknown,
   evidence: readonly ManualNewsEvidence[],
+  priorEventKeys?: readonly string[],
 ): ManualNewsLeadAssessment {
   if (!isPlainObject(raw)) throw new Error('invalid_assessment');
   strictKeys(raw, [
     'title', 'summary', 'event_key', 'event_type', 'material_update', 'score',
-    'recommendation', 'uncertainties', 'claims', 'matched_event_key',
+    'recommendation', 'occurred_at', 'uncertainties', 'claims', 'matched_event_key',
   ]);
   const eventTypes: ManualNewsEventType[] = ['product_release', 'product_documentation', 'political_regulatory', 'industry_event', 'other'];
   const recommendations: ManualNewsRecommendation[] = ['recommended', 'needs_review', 'duplicate', 'rejected'];
+  if (typeof raw.title !== 'string' || typeof raw.summary !== 'string' || typeof raw.event_key !== 'string') {
+    throw new Error('invalid_assessment_identity_type');
+  }
   const title = compact(raw.title, 160);
   const summary = compact(raw.summary, 800);
   const eventKey = compact(raw.event_key, 200).toLowerCase();
-  if (!title || !summary || !/^[a-z0-9][a-z0-9:_-]{5,199}$/.test(eventKey)) throw new Error('invalid_assessment_identity');
+  const eventKeyPattern = /^[a-z0-9][a-z0-9:_-]{5,199}$/;
+  if (!title || !summary || !eventKeyPattern.test(eventKey)) throw new Error('invalid_assessment_identity');
   if (!eventTypes.includes(raw.event_type as ManualNewsEventType)) throw new Error('invalid_event_type');
   if (typeof raw.material_update !== 'boolean') throw new Error('invalid_material_update');
   if (typeof raw.score !== 'number' || !Number.isFinite(raw.score) || raw.score < 0 || raw.score > 100) throw new Error('invalid_score');
   if (!recommendations.includes(raw.recommendation as ManualNewsRecommendation)) throw new Error('invalid_recommendation');
+  let occurredAt: string | null = null;
+  if (raw.occurred_at !== null) {
+    if (typeof raw.occurred_at !== 'string') throw new Error('invalid_occurred_at');
+    const value = raw.occurred_at.trim();
+    const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(value);
+    const timestamp = /^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)
+      && Number.isFinite(Date.parse(value));
+    if ((!dateOnly || !validCalendarDate(value)) && !timestamp) throw new Error('invalid_occurred_at');
+    occurredAt = dateOnly ? value : new Date(Date.parse(value)).toISOString();
+  }
   if (!Array.isArray(raw.uncertainties) || raw.uncertainties.some((item) => typeof item !== 'string')) throw new Error('invalid_uncertainties');
   if (!Array.isArray(raw.claims) || !raw.claims.length) throw new Error('invalid_claims');
   const evidenceIds = new Set(evidence.map((item) => item.id));
   const claims = raw.claims.map((claim) => {
     if (!isPlainObject(claim)) throw new Error('invalid_claim');
     strictKeys(claim, ['text', 'evidence_ids']);
+    if (typeof claim.text !== 'string') throw new Error('invalid_claim_text');
     const text = compact(claim.text, 500);
     const ids = Array.isArray(claim.evidence_ids)
       ? claim.evidence_ids.filter((id): id is string => typeof id === 'string' && !!id)
@@ -150,6 +167,13 @@ export function validateManualLeadAssessment(
     if (unknown) throw new Error(`unknown_evidence_id:${unknown}`);
     return { text, evidence_ids: [...new Set(ids)] };
   });
+  let matchedEventKey: string | null = null;
+  if (raw.matched_event_key !== null) {
+    if (typeof raw.matched_event_key !== 'string') throw new Error('invalid_matched_event_key');
+    matchedEventKey = raw.matched_event_key.trim().toLowerCase();
+    if (!eventKeyPattern.test(matchedEventKey)) throw new Error('invalid_matched_event_key');
+    if (priorEventKeys && !priorEventKeys.includes(matchedEventKey)) throw new Error('unknown_matched_event_key');
+  }
   return {
     title,
     summary,
@@ -158,9 +182,10 @@ export function validateManualLeadAssessment(
     material_update: raw.material_update,
     score: raw.score,
     recommendation: raw.recommendation as ManualNewsRecommendation,
+    occurred_at: occurredAt,
     uncertainties: (raw.uncertainties as string[]).map((item) => compact(item, 300)).filter(Boolean),
     claims,
-    matched_event_key: raw.matched_event_key === null ? null : compact(raw.matched_event_key, 200).toLowerCase(),
+    matched_event_key: matchedEventKey,
   };
 }
 
@@ -178,9 +203,11 @@ export function buildManualLeadAssessmentPrompt(input: {
       '只使用 evidence 中明确出现的事实；每条 claim 必须引用实际支持它的 evidence_ids，不能用常识、线索原话或搜索摘要补齐。',
       'title 与 summary 使用严肃行业媒体中文：准确写主体、动作、对象和必要范围，禁止标题党、模糊代词、把媒体名称误写成事件主体。',
       '主体、产品版本、发布时间、适用模型/产品、法律效力或请求对象缺失时，必须写入 uncertainties，禁止猜测日期与范围。',
+      'occurred_at 只填写证据明确支持的事件发生时间（ISO-8601 日期或带时区时间）；来源发布时间不是事件发生时间，无法确认时必须为 null。',
       '产品公告可由官方一手公告或帮助文档单独支持，但只能陈述文档明确覆盖的模型、产品、地区和输出类型。',
       '政治或监管事件必须区分个人呼吁、公开信、机构提案、立法程序与有约束力决定；要建议加入，必须同时有原始文件/官方声明和可靠独立报道。',
       'event_key 用规范化的“主体-动作-对象/版本-事件日期”表达现实事件，不得包含媒体名、标题修辞或抓取日期；同一事件的不同报道必须给相同 event_key。',
+      'matched_event_key 只能引用 prior_events 中实际存在且格式合法的 event_key；未命中必须为 null。',
       'material_update=true 仅限新版本正式发布、状态实质变化、官方确认/撤回、明确新增范围或时间等可验证进展；新增媒体转述、改标题或补背景不算重要更新。',
       '评分按事件重要性35、行业影响25、证据权威20、新鲜度20综合为0到100；证据不足不能靠高分变成 recommended。',
       'recommendation：证据充分且值得进入候选池为 recommended；事实可能成立但证据/范围仍缺为 needs_review；同事件无重要更新为 duplicate；已证伪、非新闻或与AI无关为 rejected。',
@@ -193,6 +220,7 @@ export function buildManualLeadAssessmentPrompt(input: {
         event_type: 'product_release|product_documentation|political_regulatory|industry_event|other',
         material_update: 'boolean', score: '0..100',
         recommendation: 'recommended|needs_review|duplicate|rejected',
+        occurred_at: 'source-supported ISO-8601 date/time|null',
         uncertainties: ['string'],
         claims: [{ text: 'string', evidence_ids: ['evidence id'] }],
         matched_event_key: 'string|null',

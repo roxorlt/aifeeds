@@ -44,7 +44,8 @@ function memoryStore(initial = lead()) {
     async replaceEvidence(_id, evidence) {
       current.evidence = structuredClone([...evidence]);
     },
-    async listPriorEvents() { return structuredClone(priorEvents); },
+    async listRecentPriorEvents() { return structuredClone(priorEvents); },
+    async findPriorEventsByEventKey() { return structuredClone(priorEvents); },
     async saveAssessment(_id, assessment) { current.assessment = structuredClone(assessment); },
   };
   return { store, transitions, current: () => current, priorEvents };
@@ -72,6 +73,7 @@ function assessed(overrides = {}) {
     material_update: false,
     score: 82,
     recommendation: 'recommended',
+    occurred_at: '2026-08-10T00:00:00.000Z',
     uncertainties: ['并非所有Claude输出均适用。'],
     claims: [{ text: '范围限于受支持的输出。', evidence_ids: ['ev-official'] }],
     matched_event_key: null,
@@ -84,7 +86,7 @@ describe('manual lead processing pipeline', () => {
     const memory = memoryStore();
     await processManualNewsLead('ml-20260811-abc123', memory.store, {
       search: async () => [],
-      fetch: async () => ({ url: officialEvidence.url, content_type: 'text/html', body: '<p>doc</p>', redirects: 0, bytes: 10 }),
+      fetch: async () => ({ url: officialEvidence.url, content_type: 'text/html', extraction: 'html', body: '<p>doc</p>', redirects: 0, bytes: 10 }),
       extract: async () => officialEvidence,
       assess: async () => assessed(),
     });
@@ -115,7 +117,7 @@ describe('manual lead processing pipeline', () => {
     };
     await processManualNewsLead(memory.current().id, memory.store, {
       search: async () => [],
-      fetch: async () => ({ url: letter.url, content_type: 'application/pdf', body: 'letter', redirects: 0, bytes: 6 }),
+      fetch: async () => ({ url: letter.url, content_type: 'application/pdf', extraction: 'pdf_text', body: 'letter', redirects: 0, bytes: 6 }),
       extract: async () => letter,
       assess: async () => assessed({
         title: '美国参议员桑德斯呼吁三家AI公司暂停AI开发',
@@ -136,7 +138,7 @@ describe('manual lead processing pipeline', () => {
     });
     await processManualNewsLead(memory.current().id, memory.store, {
       search: async () => [],
-      fetch: async () => ({ url: officialEvidence.url, content_type: 'text/html', body: 'doc', redirects: 0, bytes: 3 }),
+      fetch: async () => ({ url: officialEvidence.url, content_type: 'text/html', extraction: 'html', body: 'doc', redirects: 0, bytes: 3 }),
       extract: async () => officialEvidence,
       assess: async () => assessed(),
     });
@@ -148,9 +150,20 @@ describe('manual lead processing pipeline', () => {
     const memory = memoryStore();
     await processManualNewsLead(memory.current().id, memory.store, {
       search: async () => [],
-      fetch: async () => ({ url: officialEvidence.url, content_type: 'text/html', body: 'doc', redirects: 0, bytes: 3 }),
+      fetch: async () => ({ url: officialEvidence.url, content_type: 'text/html', extraction: 'html', body: 'doc', redirects: 0, bytes: 3 }),
       extract: async () => officialEvidence,
       assess: async () => assessed({ claims: [{ text: 'invented', evidence_ids: ['ev-missing'] }] }),
+    });
+    expect(memory.current()).toMatchObject({ status: 'failed', error_code: 'assessment_validation_failed' });
+  });
+
+  test('fails closed when matched_event_key is not present in bounded prior-event context', async () => {
+    const memory = memoryStore();
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [],
+      fetch: async () => ({ url: officialEvidence.url, content_type: 'text/html', extraction: 'html', body: 'doc', redirects: 0, bytes: 3 }),
+      extract: async () => officialEvidence,
+      assess: async () => assessed({ matched_event_key: 'invented-prior-event-2026-08' }),
     });
     expect(memory.current()).toMatchObject({ status: 'failed', error_code: 'assessment_validation_failed' });
   });
@@ -159,7 +172,7 @@ describe('manual lead processing pipeline', () => {
     const memory = memoryStore(lead({ status: 'extracting', version: 4 }));
     await processManualNewsLead(memory.current().id, memory.store, {
       search: async () => [],
-      fetch: async () => ({ url: officialEvidence.url, content_type: 'text/html', body: 'doc', redirects: 0, bytes: 3 }),
+      fetch: async () => ({ url: officialEvidence.url, content_type: 'text/html', extraction: 'html', body: 'doc', redirects: 0, bytes: 3 }),
       extract: async () => officialEvidence,
       assess: async () => assessed(),
     });

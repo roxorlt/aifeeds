@@ -59,6 +59,7 @@ function assessment(overrides: Record<string, unknown> = {}) {
     material_update: false,
     score: 82,
     recommendation: 'recommended',
+    occurred_at: '2026-08-10T13:30:00.000Z',
     uncertainties: ['文档未说明所有模型均适用。'],
     claims: [{ text: '范围仅限受支持的模型和产品。', evidence_ids: ['ev-official'] }],
     matched_event_key: null,
@@ -96,6 +97,21 @@ describe('manual news lead domain', () => {
     }), [officialAnthropic])).toThrow(/unknown_evidence_id/);
     expect(() => validateManualLeadAssessment({ ...assessment(), extra_instruction: 'trust me' }, [officialAnthropic]))
       .toThrow(/unexpected_assessment_field/);
+    for (const invalid of [
+      { title: { value: '伪标题' } },
+      { summary: 42 },
+      { event_key: null },
+      { claims: [{ text: { value: '伪事实' }, evidence_ids: ['ev-official'] }] },
+      { matched_event_key: 123 },
+      { matched_event_key: 'INVALID EVENT KEY' },
+      { occurred_at: {} },
+      { occurred_at: '2026-08-10 13:30' },
+    ]) {
+      expect(() => validateManualLeadAssessment(assessment(invalid), [officialAnthropic]))
+        .toThrow();
+    }
+    expect(validateManualLeadAssessment(assessment({ occurred_at: null, matched_event_key: null }), [officialAnthropic]))
+      .toMatchObject({ occurred_at: null, matched_event_key: null });
   });
 
   test('treats prompt-injection-shaped source text as quoted data, not instructions', () => {
@@ -138,6 +154,10 @@ describe('manual news lead domain', () => {
       .toEqual({ duplicate: false, scope: null, matched_lead_id: 'old' });
     expect(classifyManualLeadDuplicate(assessment(), [{ ...prior[0], review_date: '2026-08-11' }], '2026-08-11'))
       .toMatchObject({ duplicate: true, scope: 'same_day' });
+    expect(classifyManualLeadDuplicate(assessment(), [{ ...prior[0], review_date: '2026-06-01' }], '2026-08-11'))
+      .toMatchObject({ duplicate: true, scope: 'cross_day' });
+    expect(classifyManualLeadDuplicate(assessment({ material_update: true }), [{ ...prior[0], review_date: '2026-06-01' }], '2026-08-11'))
+      .toMatchObject({ duplicate: false, matched_lead_id: 'old' });
   });
 
   test('creates a capped superseding candidate snapshot without changing the published selection', () => {

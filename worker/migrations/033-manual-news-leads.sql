@@ -1,6 +1,18 @@
 ALTER TABLE daily_news_review_batches ADD COLUMN batch_revision INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE daily_news_review_batches ADD COLUMN supersedes_batch_id TEXT;
 ALTER TABLE daily_news_review_batches ADD COLUMN revision_origin TEXT NOT NULL DEFAULT 'scheduled_freeze';
+ALTER TABLE daily_news_review_batches ADD COLUMN lineage_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE daily_news_review_batches ADD COLUMN is_current INTEGER NOT NULL DEFAULT 0;
+
+UPDATE daily_news_review_batches SET lineage_id = review_date WHERE lineage_id = '';
+UPDATE daily_news_review_batches SET is_current = 1
+WHERE rowid IN (
+  SELECT MAX(rowid) FROM daily_news_review_batches
+  WHERE superseded_by IS NULL GROUP BY review_date
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_news_review_one_current
+  ON daily_news_review_batches(review_date, lineage_id) WHERE is_current = 1;
 
 CREATE TABLE IF NOT EXISTS manual_news_leads (
   id TEXT PRIMARY KEY,
@@ -61,6 +73,10 @@ CREATE TABLE IF NOT EXISTS manual_news_event_assessments (
 
 CREATE INDEX IF NOT EXISTS idx_manual_news_assessments_event
   ON manual_news_event_assessments(event_key, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_items_event_fingerprint
+  ON items(json_extract(extra, '$.event_fingerprint'))
+  WHERE json_extract(extra, '$.event_fingerprint') IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS manual_news_lead_audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

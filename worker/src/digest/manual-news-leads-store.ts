@@ -256,17 +256,40 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     await this.env.DB.batch(statements);
   }
 
-  async listPriorEvents(date: string): Promise<Array<{ event_key: string; review_date: string; lead_id: string }>> {
+  async listRecentPriorEvents(date: string, excludeLeadId: string): Promise<Array<{ event_key: string; review_date: string; lead_id: string }>> {
     const result = await this.env.DB.prepare(
-      `/* manual_assessment:prior_events */ SELECT a.event_key, l.review_date, l.id AS lead_id
+      `/* manual_assessment:recent_prior_events */ SELECT a.event_key, l.review_date, l.id AS lead_id
        FROM manual_news_event_assessments a JOIN manual_news_leads l ON l.id = a.lead_id
-       WHERE l.review_date BETWEEN date(?, '-14 days') AND ?
+       WHERE l.id <> ? AND l.review_date BETWEEN date(?, '-14 days') AND ?
+         AND a.assessment_version = (
+           SELECT MAX(latest.assessment_version) FROM manual_news_event_assessments latest
+           WHERE latest.lead_id = a.lead_id
+         )
        UNION ALL
        SELECT json_extract(extra, '$.event_fingerprint'), substr(COALESCE(published_at, scraped_at), 1, 10), id
        FROM items
-       WHERE json_extract(extra, '$.event_fingerprint') IS NOT NULL
+       WHERE id <> ? AND json_extract(extra, '$.event_fingerprint') IS NOT NULL
          AND substr(COALESCE(published_at, scraped_at), 1, 10) BETWEEN date(?, '-14 days') AND ?`,
-    ).bind(date, date, date, date).all<{ event_key: string; review_date: string; lead_id: string }>();
+    ).bind(excludeLeadId, date, date, `blog:manual:${excludeLeadId}`, date, date)
+      .all<{ event_key: string; review_date: string; lead_id: string }>();
+    return (result.results || []).filter((item) => !!item.event_key);
+  }
+
+  async findPriorEventsByEventKey(eventKey: string, excludeLeadId: string): Promise<Array<{ event_key: string; review_date: string; lead_id: string }>> {
+    const result = await this.env.DB.prepare(
+      `/* manual_assessment:exact_event_history */ SELECT a.event_key, l.review_date, l.id AS lead_id
+       FROM manual_news_event_assessments a JOIN manual_news_leads l ON l.id = a.lead_id
+       WHERE a.event_key = ? AND l.id <> ?
+         AND a.assessment_version = (
+           SELECT MAX(latest.assessment_version) FROM manual_news_event_assessments latest
+           WHERE latest.lead_id = a.lead_id
+         )
+       UNION ALL
+       SELECT json_extract(extra, '$.event_fingerprint'), substr(COALESCE(published_at, scraped_at), 1, 10), id
+       FROM items
+       WHERE json_extract(extra, '$.event_fingerprint') = ? AND id <> ?`,
+    ).bind(eventKey, excludeLeadId, eventKey, `blog:manual:${excludeLeadId}`)
+      .all<{ event_key: string; review_date: string; lead_id: string }>();
     return (result.results || []).filter((item) => !!item.event_key);
   }
 
@@ -416,29 +439,39 @@ export async function confirmManualNewsLeadCandidate(
     env.DB.prepare(
       `/* manual_lead:confirm_batch */ INSERT INTO daily_news_review_batches (
          review_date, batch_id, candidate_ids, candidates_json, default_selected_ids,
-         created_at, expires_at, batch_revision, supersedes_batch_id, revision_origin
-       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual_lead'
+         created_at, expires_at, batch_revision, supersedes_batch_id, revision_origin,
+         lineage_id, is_current
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual_lead', ?, 0
        WHERE EXISTS (SELECT 1 FROM manual_news_leads WHERE id = ? AND version = ?)
-         AND EXISTS (SELECT 1 FROM daily_news_review_batches
-           WHERE review_date = ? AND batch_id = ? AND batch_revision = ? AND superseded_by IS NULL)
+       AND EXISTS (SELECT 1 FROM daily_news_review_batches
+           WHERE review_date = ? AND lineage_id = ? AND batch_id = ? AND batch_revision = ? AND is_current = 1)
        ON CONFLICT(review_date, batch_id) DO NOTHING`,
     ).bind(
       lead.review_date, batchId, JSON.stringify(candidateIds), JSON.stringify(merged.candidates),
       JSON.stringify(merged.default_selected_ids), now, newsReviewExpiresAt(lead.review_date),
-      batchRevision, active.batch_id, lead.id, expectedVersion,
-      lead.review_date, active.batch_id, active.batch_revision,
+      batchRevision, active.batch_id, lead.review_date, lead.id, expectedVersion,
+      lead.review_date, lead.review_date, active.batch_id, active.batch_revision,
     ),
     env.DB.prepare(
-      `/* manual_lead:supersede_batch */ UPDATE daily_news_review_batches SET superseded_by = ?
-       WHERE review_date = ? AND batch_id = ? AND superseded_by IS NULL
-         AND EXISTS (SELECT 1 FROM daily_news_review_batches WHERE review_date = ? AND batch_id = ?)`,
-    ).bind(batchId, lead.review_date, active.batch_id, lead.review_date, batchId),
+      `/* manual_lead:supersede_batch */ UPDATE daily_news_review_batches SET superseded_by = ?, is_current = 0
+       WHERE review_date = ? AND lineage_id = ? AND batch_id = ? AND batch_revision = ? AND is_current = 1
+         AND EXISTS (SELECT 1 FROM daily_news_review_batches WHERE review_date = ? AND batch_id = ? AND is_current = 0)`,
+    ).bind(
+      batchId, lead.review_date, lead.review_date, active.batch_id, active.batch_revision,
+      lead.review_date, batchId,
+    ),
+    env.DB.prepare(
+      `/* manual_lead:activate_batch */ UPDATE daily_news_review_batches SET is_current = 1
+       WHERE review_date = ? AND lineage_id = ? AND batch_id = ? AND is_current = 0
+         AND EXISTS (SELECT 1 FROM daily_news_review_batches
+           WHERE review_date = ? AND batch_id = ? AND superseded_by = ?)`,
+    ).bind(lead.review_date, lead.review_date, batchId, lead.review_date, active.batch_id, batchId),
     env.DB.prepare(
       `/* manual_lead:confirm */ UPDATE manual_news_leads SET
          version = version + 1, confirmed_batch_id = ?, confirmed_at = ?,
          last_mutation_kind = 'confirm', last_mutation_idempotency_key = ?, updated_at = ?
        WHERE id = ? AND version = ? AND status IN ('recommended', 'needs_review')
-         AND EXISTS (SELECT 1 FROM daily_news_review_batches WHERE review_date = ? AND batch_id = ?)`,
+         AND EXISTS (SELECT 1 FROM daily_news_review_batches WHERE review_date = ? AND batch_id = ? AND is_current = 1)`,
     ).bind(batchId, now, idempotencyKey, now, lead.id, expectedVersion, lead.review_date, batchId),
     env.DB.prepare(
       `/* manual_audit:confirm */ INSERT INTO manual_news_lead_audit
@@ -485,7 +518,7 @@ function confirmedLeadItemStatement(
 ): D1PreparedStatement {
   const activeGuard = expectedActiveBatch
     ? ` AND EXISTS (SELECT 1 FROM daily_news_review_batches
-         WHERE review_date = ? AND batch_id = ? AND batch_revision = ? AND superseded_by IS NULL)`
+         WHERE review_date = ? AND lineage_id = ? AND batch_id = ? AND batch_revision = ? AND is_current = 1)`
     : '';
   const values: unknown[] = [
     candidate.item_id,
@@ -502,7 +535,7 @@ function confirmedLeadItemStatement(
     expectedVersion,
   ];
   if (expectedActiveBatch) {
-    values.push(lead.review_date, expectedActiveBatch.batch_id, expectedActiveBatch.batch_revision);
+    values.push(lead.review_date, lead.review_date, expectedActiveBatch.batch_id, expectedActiveBatch.batch_revision);
   }
   return env.DB.prepare(
     `/* manual_lead:confirm_item */ INSERT INTO items (

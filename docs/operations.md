@@ -3685,11 +3685,11 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
   - `GET /api/digest/daily-news-leads?date=YYYY-MM-DD` 与 `GET /api/digest/daily-news-leads/:id`：按日期/单条查询。
   - `POST /api/digest/daily-news-leads/:id/retry` 与 `/confirm-candidate`：必须同时带幂等键和 `expected_version`。
 - `manual-news-lead-workflow` 负责安全取证、严格 JSON 事实核验、事件聚类/跨日去重和评分；Workflow 中途重试可从持久状态继续。生产与 staging 使用独立 Workflow binding `MANUAL_NEWS_LEAD_WORKFLOW`。
-- migration `033-manual-news-leads.sql` 新增 `manual_news_leads`、`manual_news_evidence`、`manual_news_event_assessments`、`manual_news_lead_audit`，并给 `daily_news_review_batches` 增加不可变 revision / supersedes / origin 字段。
+- migration `033-manual-news-leads.sql` 新增 `manual_news_leads`、`manual_news_evidence`、`manual_news_event_assessments`、`manual_news_lead_audit`，并给 `daily_news_review_batches` 增加不可变 revision / supersedes / origin / lineage / current 字段及“每日期/lineage 仅一个 active revision”的部分唯一索引。
 - 确认线索只产生候选池 revision：冻结前进入当天首批候选，冻结后生成 V2+ 并标记旧批次被替代。它不会修改已发布 Top 5，也不会触发 HK 重渲染；仍须用户在原审核区选择 1–5 条、排序并显式重新生成。
-- URL 取证仅允许无凭据的标准端口 HTTP(S)，逐跳校验重定向和解析 IP，拒绝 localhost、私网、链路本地、metadata/ULA，最多 3 次跳转，并限制超时、类型和 2 MiB 响应体。
+- Worker 不直接 fetch 用户域名；URL 取证和开放网络搜索只调用 `MANUAL_NEWS_RESEARCH_ORIGIN` 固定 HTTPS 研究网关，并使用 secret `MANUAL_NEWS_RESEARCH_TOKEN`。网关必须逐跳 pin DNS 验证 IP 与实际连接 peer，返回审计元数据；Worker 校验公网且一致后才流式读取，deadline 覆盖正文、增量上限 2 MiB。PDF 只接受网关的 `pdf_text`，拒绝二进制冒充文本。
 - 发布顺序：先 staging 执行 migration 033 → 部署 Worker/Workflow → 验证提交/状态/确认不触发渲染 → 再部署 HK 代理与 latest 页面；production 重复同序。不得先发布 HK 表单后遗漏 CF migration。
-- 当前文本线索的检索 adapter 查询已入库新闻；URL 线索直接安全取证。若未来接开放互联网搜索，只替换 adapter，并沿用相同 SSRF、证据门槛和严格 JSON 校验，不能把搜索摘要直接当成事实。
+- 文字线索必须同时查询已入库 D1 与研究网关 `/v1/search`；搜索结果 URL 再走 `/v1/document` 取证。研究网关未配置或开放搜索失败时失败关闭，不能把 D1-only、搜索摘要或用户原话标成已完成研究。
 - **v2 契约**：`protocol_version=2`，含 `batch_id/stage/revision/content_hash/expected_stages/final_manifest`。每批 `digest.meta.source_order` 表示本批源，另固定带 `final_source_order=['news','x','ph','gh','hf-paper']`；每个 item 在早批即带由 `source+item_id` 派生的稳定 `segment_id` 和批内临时 `card_index`。finalize 按 `item_id` 重绑最终 `card_index`，`final_manifest.section_order` 是 `final_source_order` 过滤空栏目后的有序子集。
 - **hash / revision**：稳定 JSON（不含 `generated_at`）算完整 `sha256:`；同内容重放复用 revision/hash/render_key，内容变化 revision +1 并清除旧 `pushed_at`。finalize 会重新计算三批当前内容 hash，与已锁定 state 不一致则拒绝，防止 final manifest 引用旧批却夹带新条目。
 - **final manifest**：精确带三批 `revision/content_hash`，以及每条 `segment_id/item_id/source/card_index/stage/revision` 和自身 `manifest_hash`。相同 stage/revision/hash 的接收幂等、冲突 409 由 HK v2 ingest 状态机执行。

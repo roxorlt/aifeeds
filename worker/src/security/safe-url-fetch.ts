@@ -1,29 +1,51 @@
 const DEFAULT_TIMEOUT_MS = 12_000;
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MAX_REDIRECTS = 3;
+const DEFAULT_SEARCH_MAX_BYTES = 256 * 1024;
 
-const ALLOWED_CONTENT_TYPES = new Set([
-  'text/html',
-  'application/xhtml+xml',
-  'text/plain',
-  'application/json',
-  'application/pdf',
+const ALLOWED_SOURCE_TYPES = new Set([
+  'text/html', 'application/xhtml+xml', 'text/plain', 'application/json', 'application/pdf',
 ]);
 
-export type PublicHostResolver = (hostname: string) => Promise<string[]>;
-export type PublicDocumentFetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+export type TrustedGatewayFetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+export interface TrustedResearchService {
+  /** Exact HTTPS origin of the peer-pinning research gateway. Paths, query, and fragments are forbidden. */
+  origin: string;
+  /** Server-side token. It is never returned to or accepted from browser/user input. */
+  token: string;
+  fetcher?: TrustedGatewayFetcher;
+}
 
 export interface PublicDocument {
   url: string;
   content_type: string;
+  extraction: 'html' | 'text' | 'json' | 'pdf_text';
   body: string;
   redirects: number;
   bytes: number;
 }
 
-function unsafe(reason: string): Error {
-  return new Error(`unsafe_url:${reason}`);
+export interface PublicWebSearchResult {
+  url: string;
+  title: string;
+  snippet: string;
+  published_at: string | null;
 }
+
+interface FetchAuditHop {
+  url: string;
+  validated_ip: string;
+  connected_ip: string;
+}
+
+interface FetchAudit {
+  hops: FetchAuditHop[];
+  source_content_type: string;
+  extraction: PublicDocument['extraction'];
+}
+
+function unsafe(reason: string): Error { return new Error(`unsafe_url:${reason}`); }
 
 function normalizedHostname(hostname: string): string {
   return hostname.toLowerCase().replace(/^\[/, '').replace(/\]$/, '').replace(/\.+$/, '');
@@ -66,8 +88,7 @@ export function isPublicIpAddress(value: string): boolean {
       (a === 172 && b >= 16 && b <= 31) ||
       (a === 192 && (b === 0 || b === 168)) ||
       (a === 198 && (b === 18 || b === 19 || b === 51)) ||
-      (a === 203 && b === 0) ||
-      a >= 224
+      (a === 203 && b === 0) || a >= 224
     ) return false;
     return true;
   }
@@ -75,10 +96,10 @@ export function isPublicIpAddress(value: string): boolean {
   const ipv6 = parseIpv6(host);
   if (!ipv6) return false;
   if (ipv6.every((part) => part === 0) || (ipv6.slice(0, 7).every((part) => part === 0) && ipv6[7] === 1)) return false;
-  if ((ipv6[0] & 0xfe00) === 0xfc00) return false; // fc00::/7 ULA
-  if ((ipv6[0] & 0xffc0) === 0xfe80) return false; // fe80::/10 link-local
-  if ((ipv6[0] & 0xff00) === 0xff00) return false; // ff00::/8 multicast
-  if (ipv6[0] === 0x2001 && ipv6[1] === 0x0db8) return false; // documentation prefix
+  if ((ipv6[0] & 0xfe00) === 0xfc00) return false;
+  if ((ipv6[0] & 0xffc0) === 0xfe80) return false;
+  if ((ipv6[0] & 0xff00) === 0xff00) return false;
+  if (ipv6[0] === 0x2001 && ipv6[1] === 0x0db8) return false;
   const embeddedV4 = ipv6.slice(0, 5).every((part) => part === 0) && (ipv6[5] === 0 || ipv6[5] === 0xffff);
   if (embeddedV4) {
     return isPublicIpAddress(`${ipv6[6] >> 8}.${ipv6[6] & 255}.${ipv6[7] >> 8}.${ipv6[7] & 255}`);
@@ -88,11 +109,7 @@ export function isPublicIpAddress(value: string): boolean {
 
 export function validatePublicHttpUrl(input: string): URL {
   let url: URL;
-  try {
-    url = new URL(String(input || '').trim());
-  } catch {
-    throw unsafe('invalid');
-  }
+  try { url = new URL(String(input || '').trim()); } catch { throw unsafe('invalid'); }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw unsafe('protocol');
   if (url.username || url.password) throw unsafe('credentials');
   if (url.port && !((url.protocol === 'https:' && url.port === '443') || (url.protocol === 'http:' && url.port === '80'))) {
@@ -100,114 +117,238 @@ export function validatePublicHttpUrl(input: string): URL {
   }
   const hostname = normalizedHostname(url.hostname);
   if (!hostname || hostname === 'localhost' || hostname.endsWith('.localhost')) throw unsafe('host');
-  if (parseIpv4(hostname) || hostname.includes(':')) {
-    if (!isPublicIpAddress(hostname)) throw unsafe('literal_address');
-  }
+  if ((parseIpv4(hostname) || hostname.includes(':')) && !isPublicIpAddress(hostname)) throw unsafe('literal_address');
   url.hostname = url.hostname.replace(/\.+$/, '');
   return url;
 }
 
-function normalizedAddressSet(addresses: readonly string[]): string[] {
-  return [...new Set(addresses.map(normalizedHostname).filter(Boolean))].sort();
+function trustedEndpoint(service: TrustedResearchService | undefined, path: '/v1/document' | '/v1/search') {
+  if (!service) throw new Error('trusted_research_service_required');
+  let origin: URL;
+  try { origin = validatePublicHttpUrl(service.origin); } catch { throw new Error('invalid_trusted_research_origin'); }
+  if (
+    origin.protocol !== 'https:' || origin.username || origin.password || origin.port ||
+    (origin.pathname !== '/' && origin.pathname !== '') || origin.search || origin.hash
+  ) throw new Error('invalid_trusted_research_origin');
+  if (!service.token || service.token.length > 512) throw new Error('invalid_trusted_research_token');
+  return { url: new URL(path, origin), fetcher: service.fetcher ?? fetch, token: service.token };
 }
 
-async function assertStablePublicResolution(hostname: string, resolver: PublicHostResolver): Promise<string[]> {
-  const first = normalizedAddressSet(await resolver(hostname));
-  if (!first.length || first.some((address) => !isPublicIpAddress(address))) {
-    throw unsafe('unsafe_resolved_address');
-  }
-  const second = normalizedAddressSet(await resolver(hostname));
-  if (!second.length || second.some((address) => !isPublicIpAddress(address))) {
-    throw unsafe('unsafe_resolved_address');
-  }
-  if (first.length !== second.length || first.some((address, index) => address !== second[index])) {
-    throw unsafe('dns_rebinding_detected');
-  }
-  return first;
+function strictObject(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actual = Object.keys(value as Record<string, unknown>);
+  return actual.length === keys.length && actual.every((key) => keys.includes(key));
 }
 
-export async function resolveHostWithCloudflareDns(
-  hostname: string,
-  fetcher: PublicDocumentFetcher = fetch,
-): Promise<string[]> {
-  const answers: string[] = [];
-  for (const type of ['A', 'AAAA']) {
-    const endpoint = new URL('https://cloudflare-dns.com/dns-query');
-    endpoint.searchParams.set('name', hostname);
-    endpoint.searchParams.set('type', type);
-    const response = await fetcher(endpoint, {
-      headers: { Accept: 'application/dns-json' },
-      redirect: 'error',
-    });
-    if (!response.ok) continue;
-    const payload = await response.json() as { Answer?: Array<{ data?: unknown }> };
-    for (const answer of payload.Answer || []) {
-      if (typeof answer.data === 'string' && (parseIpv4(answer.data) || answer.data.includes(':'))) {
-        answers.push(answer.data);
-      }
+function parseFetchAudit(response: Response, requested: URL, maxRedirects: number): FetchAudit {
+  const encoded = response.headers.get('X-AIFeeds-Fetch-Audit') || '';
+  if (!encoded || encoded.length > 8_192) throw new Error('unsafe_gateway_audit:missing');
+  let raw: unknown;
+  try { raw = JSON.parse(decodeURIComponent(encoded)); } catch { throw new Error('unsafe_gateway_audit:invalid_json'); }
+  if (!strictObject(raw, ['hops', 'source_content_type', 'extraction']) || !Array.isArray(raw.hops)) {
+    throw new Error('unsafe_gateway_audit:invalid_schema');
+  }
+  if (raw.hops.length < 1) throw new Error('unsafe_gateway_audit:missing_hop');
+  if (raw.hops.length - 1 > maxRedirects) throw new Error('too_many_redirects');
+  const hops: FetchAuditHop[] = [];
+  for (const value of raw.hops) {
+    if (!strictObject(value, ['url', 'validated_ip', 'connected_ip'])
+      || typeof value.url !== 'string' || typeof value.validated_ip !== 'string' || typeof value.connected_ip !== 'string') {
+      throw new Error('unsafe_gateway_audit:invalid_hop');
     }
+    const url = validatePublicHttpUrl(value.url).toString();
+    const validated = normalizedHostname(value.validated_ip);
+    const connected = normalizedHostname(value.connected_ip);
+    if (!isPublicIpAddress(validated) || !isPublicIpAddress(connected) || validated !== connected) {
+      throw new Error('unsafe_gateway_audit:peer_mismatch');
+    }
+    hops.push({ url, validated_ip: validated, connected_ip: connected });
   }
-  return answers;
+  if (hops[0].url !== requested.toString()) throw new Error('unsafe_gateway_audit:request_mismatch');
+  if (typeof raw.source_content_type !== 'string' || !ALLOWED_SOURCE_TYPES.has(raw.source_content_type)) {
+    throw new Error('unsafe_gateway_audit:content_type');
+  }
+  if (raw.source_content_type === 'application/pdf' && raw.extraction !== 'pdf_text') {
+    throw new Error('invalid_pdf_extraction');
+  }
+  if (!['html', 'text', 'json', 'pdf_text'].includes(String(raw.extraction))) {
+    throw new Error('unsafe_gateway_audit:extraction');
+  }
+  const extraction = raw.extraction as PublicDocument['extraction'];
+  const expectedExtraction: Record<string, PublicDocument['extraction']> = {
+    'text/html': 'html', 'application/xhtml+xml': 'html', 'text/plain': 'text',
+    'application/json': 'json', 'application/pdf': 'pdf_text',
+  };
+  if (expectedExtraction[raw.source_content_type] !== extraction) throw new Error('unsafe_gateway_audit:extraction_mismatch');
+  return { hops, source_content_type: raw.source_content_type, extraction };
 }
 
+async function withinDeadline<T>(promise: Promise<T>, deadline: number, controller: AbortController): Promise<T> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    controller.abort();
+    throw new Error('gateway_timeout');
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error('gateway_timeout'));
+        }, remaining);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function readBoundedBody(
+  response: Response,
+  maxBytes: number,
+  deadline: number,
+  controller: AbortController,
+): Promise<{ text: string; bytes: number }> {
+  const declared = Number(response.headers.get('Content-Length') || 0);
+  if (Number.isFinite(declared) && declared > maxBytes) throw new Error('response_too_large');
+  if (!response.body) return { text: '', bytes: 0 };
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
+  let text = '';
+  let bytes = 0;
+  try {
+    while (true) {
+      const chunk = await withinDeadline(reader.read(), deadline, controller);
+      if (chunk.done) break;
+      bytes += chunk.value.byteLength;
+      if (bytes > maxBytes) {
+        await reader.cancel('response_too_large');
+        throw new Error('response_too_large');
+      }
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+    text += decoder.decode();
+    return { text, bytes };
+  } catch (error) {
+    try { await reader.cancel(); } catch { /* already closed */ }
+    if (error instanceof TypeError) throw new Error('invalid_gateway_utf8');
+    throw error;
+  }
+}
+
+async function postTrusted(
+  service: TrustedResearchService | undefined,
+  path: '/v1/document' | '/v1/search',
+  payload: unknown,
+  timeoutMs: number,
+): Promise<{ response: Response; deadline: number; controller: AbortController }> {
+  const endpoint = trustedEndpoint(service, path);
+  const controller = new AbortController();
+  const deadline = Date.now() + timeoutMs;
+  const response = await withinDeadline(endpoint.fetcher(endpoint.url, {
+    method: 'POST', redirect: 'error', signal: controller.signal,
+    headers: {
+      Accept: path === '/v1/search' ? 'application/json' : 'text/plain',
+      Authorization: `Bearer ${endpoint.token}`,
+      'Content-Type': 'application/json',
+      'User-Agent': 'ai-feeds-manual-news-lead/2.0',
+    },
+    body: JSON.stringify(payload),
+  }), deadline, controller);
+  if (!response.ok) {
+    controller.abort();
+    throw new Error(`trusted_gateway_http_${response.status}`);
+  }
+  return { response, deadline, controller };
+}
+
+/**
+ * Security invariant: this Worker never issues fetch() to a user-controlled host.
+ * The only network peer is an exact configured HTTPS research-service origin. That
+ * service must pin DNS validation to the connected peer on every hop and returns
+ * a hop audit; this function rejects any private or mismatched validated/connected
+ * address before consuming the body.
+ */
 export async function fetchPublicDocument(
   input: string,
   deps: {
-    resolveHost?: PublicHostResolver;
-    fetcher?: PublicDocumentFetcher;
+    service?: TrustedResearchService;
     timeoutMs?: number;
     maxBytes?: number;
     maxRedirects?: number;
   } = {},
 ): Promise<PublicDocument> {
-  const fetcher = deps.fetcher ?? fetch;
-  const resolveHost = deps.resolveHost ?? ((hostname) => resolveHostWithCloudflareDns(hostname, fetcher));
+  const target = validatePublicHttpUrl(input);
   const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxBytes = deps.maxBytes ?? DEFAULT_MAX_BYTES;
   const maxRedirects = deps.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
-  let current = validatePublicHttpUrl(input);
-  let redirects = 0;
-
-  while (true) {
-    await assertStablePublicResolution(normalizedHostname(current.hostname), resolveHost);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    let response: Response;
-    try {
-      response = await fetcher(current, {
-        method: 'GET',
-        redirect: 'manual',
-        signal: controller.signal,
-        headers: {
-          Accept: 'text/html,application/xhtml+xml,text/plain,application/json,application/pdf;q=0.8',
-          'User-Agent': 'ai-feeds-manual-news-lead/1.0',
-        },
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
-
-    if (response.status >= 300 && response.status < 400) {
-      if (redirects >= maxRedirects) throw unsafe('too_many_redirects');
-      const location = response.headers.get('Location');
-      if (!location) throw unsafe('redirect_without_location');
-      current = validatePublicHttpUrl(new URL(location, current).toString());
-      redirects += 1;
-      continue;
-    }
-    if (!response.ok) throw new Error(`upstream_http_${response.status}`);
-    const contentType = (response.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
-    if (!ALLOWED_CONTENT_TYPES.has(contentType)) throw new Error('unsupported_content_type');
-    const declaredLength = Number(response.headers.get('Content-Length') || 0);
-    if (declaredLength > maxBytes) throw new Error('response_too_large');
-    const bytes = await response.arrayBuffer();
-    if (bytes.byteLength > maxBytes) throw new Error('response_too_large');
+  const { response, deadline, controller } = await postTrusted(
+    deps.service, '/v1/document', { url: target.toString(), max_bytes: maxBytes, max_redirects: maxRedirects }, timeoutMs,
+  );
+  try {
+    const transportType = (response.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+    if (transportType !== 'text/plain') throw new Error('invalid_gateway_content_type');
+    const audit = parseFetchAudit(response, target, maxRedirects);
+    const body = await readBoundedBody(response, maxBytes, deadline, controller);
     return {
-      url: current.toString(),
-      content_type: contentType,
-      body: new TextDecoder().decode(bytes),
-      redirects,
-      bytes: bytes.byteLength,
+      url: audit.hops.at(-1)!.url,
+      content_type: audit.source_content_type,
+      extraction: audit.extraction,
+      body: body.text,
+      redirects: audit.hops.length - 1,
+      bytes: body.bytes,
     };
+  } finally {
+    controller.abort();
+  }
+}
+
+function normalizedPublishedAt(value: unknown): string | null | undefined {
+  if (value === null) return null;
+  if (typeof value !== 'string') return undefined;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  if (!/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) return undefined;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
+}
+
+export async function searchPublicWeb(
+  input: { text: string; date: string },
+  deps: { service?: TrustedResearchService; timeoutMs?: number; maxBytes?: number } = {},
+): Promise<PublicWebSearchResult[]> {
+  const text = input.text.trim();
+  if (!text || Array.from(text).length > 4_000 || !/^\d{4}-\d{2}-\d{2}$/.test(input.date)) {
+    throw new Error('invalid_search_request');
+  }
+  const { response, deadline, controller } = await postTrusted(
+    deps.service, '/v1/search', { query: text, date: input.date, limit: 8 }, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+  );
+  try {
+    const contentType = (response.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+    if (contentType !== 'application/json') throw new Error('invalid_search_response:content_type');
+    const body = await readBoundedBody(response, deps.maxBytes ?? DEFAULT_SEARCH_MAX_BYTES, deadline, controller);
+    let raw: unknown;
+    try { raw = JSON.parse(body.text); } catch { throw new Error('invalid_search_response:json'); }
+    if (!strictObject(raw, ['results']) || !Array.isArray(raw.results) || raw.results.length > 8) {
+      throw new Error('invalid_search_response:schema');
+    }
+    return raw.results.map((value) => {
+      if (!strictObject(value, ['url', 'title', 'snippet', 'published_at'])
+        || typeof value.url !== 'string' || typeof value.title !== 'string' || typeof value.snippet !== 'string') {
+        throw new Error('invalid_search_response:item');
+      }
+      const publishedAt = normalizedPublishedAt(value.published_at);
+      if (publishedAt === undefined || !value.title.trim() || !value.snippet.trim()
+        || Array.from(value.title).length > 220 || Array.from(value.snippet).length > 1_500) {
+        throw new Error('invalid_search_response:item');
+      }
+      let url: string;
+      try { url = validatePublicHttpUrl(value.url).toString(); } catch { throw new Error('invalid_search_response:url'); }
+      return { url, title: value.title.trim(), snippet: value.snippet.trim(), published_at: publishedAt };
+    });
+  } finally {
+    controller.abort();
   }
 }
