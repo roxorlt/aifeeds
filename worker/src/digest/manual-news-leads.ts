@@ -135,7 +135,7 @@ export function validateManualLeadAssessment(
   }
   const title = compact(raw.title, 160);
   const summary = compact(raw.summary, 800);
-  const eventKey = compact(raw.event_key, 200).toLowerCase();
+  const eventKey = raw.event_key;
   const eventKeyPattern = /^[a-z0-9][a-z0-9:_-]{5,199}$/;
   if (!title || !summary || !eventKeyPattern.test(eventKey)) throw new Error('invalid_assessment_identity');
   if (!eventTypes.includes(raw.event_type as ManualNewsEventType)) throw new Error('invalid_event_type');
@@ -171,7 +171,7 @@ export function validateManualLeadAssessment(
   let matchedEventKey: string | null = null;
   if (raw.matched_event_key !== null) {
     if (typeof raw.matched_event_key !== 'string') throw new Error('invalid_matched_event_key');
-    matchedEventKey = raw.matched_event_key.trim().toLowerCase();
+    matchedEventKey = raw.matched_event_key;
     if (!eventKeyPattern.test(matchedEventKey)) throw new Error('invalid_matched_event_key');
     if (priorEventKeys && !priorEventKeys.includes(matchedEventKey)) throw new Error('unknown_matched_event_key');
     if (matchedEventKey !== eventKey) throw new Error('matched_event_key_mismatch');
@@ -208,7 +208,7 @@ export function buildManualLeadAssessmentPrompt(input: {
       'occurred_at 只填写证据明确支持的事件发生时间（ISO-8601 日期或带时区时间）；来源发布时间不是事件发生时间，无法确认时必须为 null。',
       '产品公告可由官方一手公告或帮助文档单独支持，但只能陈述文档明确覆盖的模型、产品、地区和输出类型。',
       '政治或监管事件必须区分个人呼吁、公开信、机构提案、立法程序与有约束力决定；要建议加入，必须同时有原始文件/官方声明和可靠独立报道。',
-      'event_key 用规范化的“主体-动作-对象或版本-事件日期”表达现实事件，不得包含媒体名、标题修辞或抓取日期；同一真实事件的不同报道和修复重试必须给相同 event_key。',
+      'event_key 用规范化的“主体-动作-对象或版本-事件日期”表达现实事件，不得包含媒体名、标题修辞或抓取日期；同一真实事件的不同报道和不同核验运行必须给相同 event_key。',
       'event_key 必须严格匹配 ^[a-z0-9][a-z0-9:_-]{5,199}$：只能使用 ASCII 小写字母 a-z、数字 0-9、冒号、下划线、短横线，共 6 到 200 个字符，首字符必须是字母或数字。',
       'event_key 合格示例：anthropic-adds-output-watermark-2026-08-11、openai:gpt-5-release-2026-08-07；不合格示例：Anthropic-Watermark（含大写）、anthropic 水印（含空格和中文）、abc（过短）、anthropic/watermark（含斜杠）。',
       '必须逐项判断 evidence 是否直接支持用户线索的核心主体、对象、动作、版本和时间；仅同一公司、同一模型或旧背景新闻不构成直接支持，也不能推动 recommended。',
@@ -265,27 +265,6 @@ export function manualLeadAssessmentValidationErrorCode(error: unknown): string 
   return ASSESSMENT_VALIDATION_ERROR_CODES.has(code) ? code : 'assessment_validation_failed';
 }
 
-export function buildManualLeadAssessmentRepairPrompt(
-  originalPrompt: { system: string; user: string },
-  validationErrorCode: string,
-): { system: string; user: string } {
-  const safeCode = ASSESSMENT_VALIDATION_ERROR_CODES.has(validationErrorCode)
-    ? validationErrorCode
-    : 'assessment_validation_failed';
-  return {
-    system: [
-      originalPrompt.system,
-      '你正在执行唯一一次 bounded schema repair。只根据原 prompt/schema 重新生成一份完整 JSON，不要修改 schema，不要省略字段。',
-      '不要引用、复述或推测上一次模型输出；只使用 validation_error_code 定位契约错误。仍须遵守证据、相关性、event_key 和 evidence_ids 的全部严格规则。',
-    ].join('\n'),
-    user: JSON.stringify({
-      task: 'schema repair：严格重新生成完整 assessment JSON',
-      validation_error_code: safeCode,
-      original_prompt: originalPrompt,
-    }),
-  };
-}
-
 export function applyManualLeadEvidencePolicy(
   assessment: ManualNewsLeadAssessment,
   evidence: readonly ManualNewsEvidence[],
@@ -332,44 +311,39 @@ export function applyManualLeadEvidencePolicy(
   };
 }
 
-const GENERIC_ASCII_LEAD_TERMS = new Set([
-  'about', 'adds', 'added', 'announces', 'announced', 'for', 'from', 'into',
-  'launch', 'launched', 'launches', 'model', 'models', 'new', 'output', 'outputs',
-  'release', 'released', 'releases', 'system', 'the', 'update', 'updated', 'updates', 'with',
-]);
+const NON_DISTINCTIVE_ACRONYMS = new Set(['api', 'http', 'https', 'url']);
 
-function distinctiveAsciiLeadTerms(value: string): string[] {
-  const terms = new Map<string, string>();
-  for (const match of value.match(/[a-z][a-z0-9._+-]{2,}/gi) || []) {
-    const normalized = match.toLowerCase();
-    if (GENERIC_ASCII_LEAD_TERMS.has(normalized) || normalized === 'http' || normalized === 'https') continue;
-    if (!terms.has(normalized)) terms.set(normalized, match);
-    if (terms.size >= 12) break;
+function highConfidenceLeadAnchors(leadText: string): string[] {
+  const withoutUrls = leadText.replace(/https?:\/\/\S+/gi, ' ');
+  const anchors = new Map<string, string>();
+  for (const token of withoutUrls.match(/[A-Za-z0-9]+(?:[._+-][A-Za-z0-9]+)*/g) || []) {
+    const normalized = token.toLowerCase();
+    const hasLetter = /[a-z]/i.test(token);
+    const hasDigit = /\d/.test(token);
+    const numericVersion = /^\d+\.\d+(?:\.\d+)*$/.test(token);
+    const uppercaseAcronym = /^[A-Z]{3,}$/.test(token) && !NON_DISTINCTIVE_ACRONYMS.has(normalized);
+    if ((!hasLetter || !hasDigit) && !numericVersion && !uppercaseAcronym) continue;
+    if (!anchors.has(normalized)) anchors.set(normalized, token);
+    if (anchors.size >= 8) break;
   }
-  return [...terms.values()];
+  return [...anchors.values()];
 }
 
-export function applyManualLeadRelevancePolicy<T extends ManualNewsLeadAssessment>(
-  assessment: T,
+function evidenceContainsAnchor(evidenceText: string, anchor: string): boolean {
+  const escaped = anchor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`, 'i').test(evidenceText);
+}
+
+export function missingManualLeadEvidenceAnchors(
   leadText: string,
   evidence: readonly ManualNewsEvidence[],
-): T {
-  const terms = distinctiveAsciiLeadTerms(leadText);
-  if (!terms.length) return assessment;
+): string[] {
+  const anchors = highConfidenceLeadAnchors(leadText);
+  if (!anchors.length) return [];
   const evidenceText = evidence.map((item) => [
     item.publisher, item.title, item.excerpt, ...item.claims_supported,
-  ].join(' ')).join(' ').toLowerCase();
-  const missing = terms.filter((term) => !evidenceText.includes(term.toLowerCase()));
-  if (!missing.length) return assessment;
-  const uncertainty = `现有证据未直接出现线索中的关键专有词：${missing.join('、')}。`;
-  return {
-    ...assessment,
-    recommendation: assessment.recommendation === 'recommended' ? 'needs_review' : assessment.recommendation,
-    material_update: false,
-    uncertainties: assessment.uncertainties.some((item) => item.startsWith('现有证据未直接出现线索中的关键专有词：'))
-      ? assessment.uncertainties
-      : [...assessment.uncertainties, uncertainty],
-  };
+  ].join(' ')).join('\n');
+  return anchors.filter((anchor) => !evidenceContainsAnchor(evidenceText, anchor));
 }
 
 function factTokens(value: string): Set<string> {

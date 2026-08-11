@@ -4,7 +4,6 @@ import {
   applyManualLeadEvidencePolicy,
   assertManualLeadTransition,
   buildManualLeadAssessmentPrompt,
-  buildManualLeadAssessmentRepairPrompt,
   classifyManualLeadDuplicate,
   manualLeadAssessmentValidationErrorCode,
   mergeManualLeadCandidate,
@@ -123,6 +122,28 @@ describe('manual news lead domain', () => {
       .toThrow(/matched_event_key_mismatch/);
   });
 
+  test('rejects event keys unless the original model string already satisfies the contract', () => {
+    const valid = 'anthropic-output-provenance-2026-08';
+    expect(validateManualLeadAssessment(assessment({ event_key: valid }), [officialAnthropic]).event_key)
+      .toBe(valid);
+    for (const eventKey of [
+      'Anthropic-output-provenance-2026-08',
+      ' anthropic-output-provenance-2026-08',
+      'anthropic-output-provenance-2026-08 ',
+      `a${'b'.repeat(200)}`,
+    ]) {
+      expect(() => validateManualLeadAssessment(assessment({ event_key: eventKey }), [officialAnthropic]))
+        .toThrow(/invalid_assessment_identity/);
+    }
+  });
+
+  test('reduces validation failures to allowlisted stable error codes', () => {
+    expect(manualLeadAssessmentValidationErrorCode(new Error('unknown_evidence_id:ev-private-output')))
+      .toBe('unknown_evidence_id');
+    expect(manualLeadAssessmentValidationErrorCode(new Error('provider detail https://private.example/path')))
+      .toBe('assessment_validation_failed');
+  });
+
   test('treats prompt-injection-shaped source text as quoted data, not instructions', () => {
     const prompt = buildManualLeadAssessmentPrompt({
       date: '2026-08-11',
@@ -156,24 +177,6 @@ describe('manual news lead domain', () => {
     const user = JSON.parse(prompt.user) as { output_schema: { event_key: string } };
     expect(user.output_schema.event_key).toContain('ASCII lowercase');
     expect(user.output_schema.event_key).toContain('^[a-z0-9][a-z0-9:_-]{5,199}$');
-  });
-
-  test('builds schema repair from a stable validation code without dynamic validator details', () => {
-    const original = buildManualLeadAssessmentPrompt({
-      date: '2026-08-11', text: 'Anthropic C2PA', note: '', evidence: [officialAnthropic], prior_events: [],
-    });
-    const code = manualLeadAssessmentValidationErrorCode(new Error('unknown_evidence_id:ev-private-model-output'));
-    const repair = buildManualLeadAssessmentRepairPrompt(original, code);
-    const body = JSON.parse(repair.user) as {
-      validation_error_code: string;
-      original_prompt: { system: string; user: string };
-    };
-    expect(code).toBe('unknown_evidence_id');
-    expect(body.validation_error_code).toBe('unknown_evidence_id');
-    expect(body.original_prompt).toEqual(original);
-    expect(repair.user).not.toContain('ev-private-model-output');
-    expect(manualLeadAssessmentValidationErrorCode(new Error('provider detail https://private.example/path')))
-      .toBe('assessment_validation_failed');
   });
 
   test('allows a bounded official product document alone but requires original plus independent reporting for politics', () => {
