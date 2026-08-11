@@ -4,9 +4,12 @@ import {
   createManualEvidenceDigest,
   createManualLeadVerificationProof,
   MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+  MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
   MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
   MANUAL_LEAD_SOURCE_FACT_CONTRACT,
   MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+  manualLeadAssessmentValidationFailure,
+  manualNewsAssessmentGenerationAudit,
   mergeManualLeadCandidate,
   validateManualLeadFactVerification,
   validateManualNewsProcessedAssessment,
@@ -15,6 +18,7 @@ import {
   type ManualLeadPriorEvent,
   type ManualNewsLeadStatus,
   type ManualNewsProcessedAssessment,
+  type ManualNewsAssessmentGenerationAudit,
 } from './manual-news-leads';
 import {
   loadManualNewsEvidence,
@@ -24,6 +28,8 @@ import {
   type PersistedManualVerificationRow,
 } from './manual-news-leads-verification';
 import type {
+  ManualAssessmentGenerationCycleState,
+  ManualAssessmentGenerationValidationResult,
   ManualLeadProcessingStore,
   ManualLeadTransitionPatch,
   ManualNewsLeadRecord,
@@ -74,6 +80,59 @@ interface ManualLeadRow {
   updated_at: number;
 }
 
+interface ManualAssessmentGenerationCycleRow {
+  cycle_id: string;
+  lead_id: string;
+  processing_owner: string;
+  base_version: number;
+  call_state: ManualAssessmentGenerationCycleState['call_state'] | 'superseded';
+  first_validation_code: string | null;
+  first_validation_path: string | null;
+  last_validation_code: string | null;
+  last_validation_path: string | null;
+  regeneration_consumed: number;
+  validated_assessment_json: string | null;
+  provider_failure_json: string | null;
+}
+
+function assessmentGenerationCycleState(
+  row: ManualAssessmentGenerationCycleRow,
+  acquiredCall: boolean,
+): ManualAssessmentGenerationCycleState {
+  if (row.call_state === 'superseded') throw new Error('assessment_generation_cycle_superseded');
+  let validatedAssessment: ManualNewsProcessedAssessment | undefined;
+  if (row.validated_assessment_json) {
+    try {
+      validatedAssessment = JSON.parse(row.validated_assessment_json) as ManualNewsProcessedAssessment;
+    } catch {
+      throw new Error('assessment_generation_state_invalid');
+    }
+  }
+  let providerFailure: ManualNewsProviderFailureAudit | undefined;
+  if (row.provider_failure_json) {
+    try {
+      const parsed = JSON.parse(row.provider_failure_json);
+      if (isValidManualNewsProviderFailureAudit(parsed)) providerFailure = parsed;
+    } catch {
+      throw new Error('assessment_generation_state_invalid');
+    }
+  }
+  return {
+    cycle_id: row.cycle_id,
+    base_version: Number(row.base_version),
+    generation_revision: Number(row.regeneration_consumed) === 1 ? 2 : 1,
+    call_state: row.call_state,
+    acquired_call: acquiredCall,
+    ...(row.first_validation_code ? { first_validation_code: row.first_validation_code } : {}),
+    ...(row.first_validation_path ? { first_validation_path: row.first_validation_path } : {}),
+    ...(row.last_validation_code ? { last_validation_code: row.last_validation_code } : {}),
+    ...(row.last_validation_path ? { last_validation_path: row.last_validation_path } : {}),
+    regeneration_consumed: Number(row.regeneration_consumed) === 1,
+    ...(validatedAssessment ? { validated_assessment: validatedAssessment } : {}),
+    ...(providerFailure ? { provider_failure: providerFailure } : {}),
+  };
+}
+
 async function sha256Hex(value: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -89,32 +148,44 @@ function validatedTransitionAuditMetadata(
   if (!metadata) return {};
   const allowed = new Set([
     'assessment_generation_attempts',
+    'assessment_first_validation_code',
+    'assessment_first_validation_path',
     'assessment_last_validation_code',
+    'assessment_last_validation_path',
     'assessment_regeneration_trigger_code',
+    'assessment_regeneration_trigger_path',
     'assessment_claim_contract',
     'assessment_source_fact_contract',
     'assessment_editorial_projection_contract',
+    'assessment_evidence_disposition_contract',
     'assessment_verification_policy',
     'assessment_recovery',
     'provider_failure',
   ]);
-  const generation = metadata.assessment_generation_attempts === 1
-    || metadata.assessment_generation_attempts === 2;
+  const generationAudit = manualNewsAssessmentGenerationAudit(metadata);
+  const generation = metadata.assessment_generation_attempts !== undefined;
   const recovery = metadata.assessment_recovery === 'persisted_verified';
+  const generationFields = [
+    'assessment_generation_attempts',
+    'assessment_first_validation_code',
+    'assessment_first_validation_path',
+    'assessment_last_validation_code',
+    'assessment_last_validation_path',
+    'assessment_regeneration_trigger_code',
+    'assessment_regeneration_trigger_path',
+  ] as const;
   if (Object.keys(metadata).some((key) => !allowed.has(key))
     || generation === recovery
-    || (generation && !/^[a-z0-9_]{1,80}$/.test(metadata.assessment_last_validation_code || ''))
-    || (recovery && (metadata.assessment_generation_attempts !== undefined
-      || metadata.assessment_last_validation_code !== undefined
-      || metadata.assessment_regeneration_trigger_code !== undefined))
+    || (generation && !generationAudit)
+    || (recovery && generationFields.some((field) => metadata[field] !== undefined))
     || metadata.assessment_claim_contract !== MANUAL_LEAD_GENERATED_CLAIM_CONTRACT
     || metadata.assessment_source_fact_contract !== MANUAL_LEAD_SOURCE_FACT_CONTRACT
     || metadata.assessment_editorial_projection_contract !== MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT
+    || metadata.assessment_evidence_disposition_contract !== MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT
     || metadata.assessment_verification_policy !== MANUAL_LEAD_VERIFICATION_POLICY_VERSION
     || (metadata.provider_failure !== undefined
       && !isValidManualNewsProviderFailureAudit(metadata.provider_failure))
-    || (metadata.assessment_regeneration_trigger_code !== undefined
-      && !/^[a-z0-9_]{1,80}$/.test(metadata.assessment_regeneration_trigger_code))) {
+    ) {
     throw new Error('invalid_transition_audit_metadata');
   }
   return { ...metadata };
@@ -200,12 +271,58 @@ async function loadCurrentProviderFailure(
   return null;
 }
 
+async function loadCurrentAssessmentGenerationAudit(
+  env: Env,
+  lead: Pick<ManualLeadRow, 'id' | 'status' | 'version' | 'processing_owner'>,
+): Promise<ManualNewsAssessmentGenerationAudit | null> {
+  const leadId = lead.id;
+  const row = await env.DB.prepare(
+    `/* manual_generation:current_api */ SELECT first_validation_code, first_validation_path,
+       last_validation_code, last_validation_path, regeneration_consumed,
+       processing_owner, base_version, call_state
+     FROM manual_news_assessment_generation_cycles_v2
+     WHERE lead_id = ? AND is_current = 1 AND call_state <> 'superseded'`,
+  ).bind(leadId).first<{
+    first_validation_code: string | null;
+    first_validation_path: string | null;
+    last_validation_code: string | null;
+    last_validation_path: string | null;
+    regeneration_consumed: number;
+    processing_owner: string;
+    base_version: number;
+    call_state: ManualAssessmentGenerationCycleRow['call_state'];
+  }>();
+  if (!row) return null;
+  const terminal = ['recommended', 'needs_review', 'duplicate', 'rejected', 'failed'].includes(lead.status);
+  if ((lead.processing_owner && row.processing_owner !== lead.processing_owner)
+    || Number(row.base_version) > Number(lead.version)
+    || (lead.status === 'verifying' && Number(row.base_version) !== Number(lead.version))
+    || (terminal && !['validated', 'terminal'].includes(row.call_state))) return null;
+  const attempts = Number(row.regeneration_consumed) === 1 ? 2 : 1;
+  const firstCode = row.first_validation_code || 'not_validated';
+  const lastCode = row.last_validation_code || firstCode;
+  return manualNewsAssessmentGenerationAudit({
+    assessment_generation_attempts: attempts,
+    assessment_first_validation_code: firstCode,
+    ...(row.first_validation_path ? { assessment_first_validation_path: row.first_validation_path } : {}),
+    assessment_last_validation_code: lastCode,
+    ...(row.last_validation_path ? { assessment_last_validation_path: row.last_validation_path } : {}),
+    ...(attempts === 2 ? {
+      assessment_regeneration_trigger_code: firstCode,
+      ...(row.first_validation_path
+        ? { assessment_regeneration_trigger_path: row.first_validation_path }
+        : {}),
+    } : {}),
+  });
+}
+
 async function leadFromRow(env: Env, row: ManualLeadRow): Promise<ManualNewsLeadRecord> {
-  const [evidence, providerFailure] = await Promise.all([
+  const [evidence, providerFailure, assessmentGeneration] = await Promise.all([
     loadManualNewsEvidence(env, row.id),
     String(row.error_message || '').startsWith('manual_news_provider_error:')
       ? loadCurrentProviderFailure(env, row.id, Number(row.version))
       : Promise.resolve(null),
+    loadCurrentAssessmentGenerationAudit(env, row),
   ]);
   const verified = await loadVerifiedManualAssessment(env, row.id, evidence);
   return {
@@ -219,6 +336,7 @@ async function leadFromRow(env: Env, row: ManualLeadRow): Promise<ManualNewsLead
     version: Number(row.version),
     error_code: row.error_code,
     error_message: row.error_message,
+    ...(assessmentGeneration ? { assessment_generation: assessmentGeneration } : {}),
     ...(providerFailure ? { provider_failure: providerFailure } : {}),
     processing_owner: row.processing_owner || null,
     processing_attempt: Number(row.processing_attempt || 0),
@@ -358,16 +476,24 @@ export async function retryManualNewsLead(
   if (!['failed', 'needs_review', 'rejected'].includes(lead.status)) {
     return { ok: false, status: 409, error: 'lead_not_retryable', lead };
   }
+  const generationCycle = await env.DB.prepare(
+    `/* manual_generation:retry_current */ SELECT cycle_id
+     FROM manual_news_assessment_generation_cycles_v2
+     WHERE lead_id = ? AND is_current = 1 AND call_state <> 'superseded'`,
+  ).bind(id).first<{ cycle_id: string }>();
+  const previousGenerationCycleId = generationCycle?.cycle_id || null;
   assertManualLeadTransition(lead.status, 'validating');
   const nextVersion = expectedVersion + 1;
   const processingOwner = manualNewsLeadProcessingOwner(id, nextVersion);
   const mutationNonce = createMutationNonce('retry');
   const invalidationNonce = createMutationNonce('assessment_invalidate');
+  const supersedeNonce = createMutationNonce('assessment_generation_supersede');
   const mutation = env.DB.prepare(
     `/* manual_lead:retry */ UPDATE manual_news_leads SET
        status = 'validating', version = version + 1, error_code = NULL, error_message = NULL,
        last_mutation_kind = 'retry', last_mutation_idempotency_key = ?,
-       last_mutation_nonce = ?, processing_owner = ?, processing_lease_until = ?, updated_at = ?
+       last_mutation_nonce = ?, processing_owner = ?, processing_lease_until = ?,
+       updated_at = ?
      WHERE id = ? AND version = ? AND status IN ('failed', 'needs_review', 'rejected')`,
   ).bind(idempotencyKey, mutationNonce, processingOwner, now + PROCESSING_LEASE_MS, now, id, expectedVersion);
   const retryAudit = auditMutationStatement(env, {
@@ -419,12 +545,48 @@ export async function retryManualNewsLead(
       new Date(now).toISOString(), `blog:manual:${id}`, id, now,
       id, nextVersion, idempotencyKey, mutationNonce,
     ),
+    env.DB.prepare(
+      `/* manual_generation:retry_supersede */ UPDATE manual_news_assessment_generation_cycles_v2
+       SET call_state = 'superseded', superseded_by_processing_owner = ?, is_current = 0,
+           supersede_nonce = ?, updated_at = ?
+       WHERE cycle_id = ? AND lead_id = ? AND call_state <> 'superseded'
+         AND is_current = 1 AND supersede_nonce IS NULL AND ${retryGuard}`,
+    ).bind(
+      processingOwner, supersedeNonce, now, previousGenerationCycleId, id,
+      id, nextVersion, idempotencyKey, mutationNonce,
+    ),
+    env.DB.prepare(
+      `/* manual_generation:retry_supersede_audit */ INSERT INTO manual_news_lead_audit (
+         lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
+         resulting_version, metadata_json, created_at
+       ) SELECT ?, 'assessment_generation_supersede', 'validating', 'validating', NULL, ?, ?, ?, ?
+       WHERE ${retryGuard} AND EXISTS (
+         SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
+         WHERE cycle.cycle_id = ? AND cycle.lead_id = ? AND cycle.call_state = 'superseded'
+           AND cycle.superseded_by_processing_owner = ? AND cycle.supersede_nonce = ?
+       )`,
+    ).bind(
+      id, supersedeNonce, nextVersion,
+      JSON.stringify({
+        cycle_id: previousGenerationCycleId, superseded_by_processing_owner: processingOwner,
+        previous_lead_version: expectedVersion, next_lead_version: nextVersion,
+      }), now,
+      id, nextVersion, idempotencyKey, mutationNonce,
+      previousGenerationCycleId, id, processingOwner, supersedeNonce,
+    ),
   ]) as Array<{ meta?: { changes?: number } }>;
   const changed = auditedMutationChanges(results, 0, 1);
   const invalidationAudit = Number(results[2]?.meta?.changes || 0);
   const invalidated = Number(results[3]?.meta?.changes || 0);
   if ((invalidated > 0 ? 1 : 0) !== invalidationAudit) {
     throw new Error('manual_verification_audit_causality_mismatch');
+  }
+  const superseded = Number(results[5]?.meta?.changes || 0);
+  const supersedeAudit = Number(results[6]?.meta?.changes || 0);
+  if (superseded !== supersedeAudit
+    || (changed && (previousGenerationCycleId ? 1 : 0) !== superseded)
+    || (!changed && superseded !== 0)) {
+    throw new Error('assessment_generation_supersede_causality_mismatch');
   }
   if (!changed) {
     const conflicted = await getManualNewsLead(env, id);
@@ -548,23 +710,97 @@ export async function recoverStaleManualNewsLeads(
   ).bind(date, now).all<{ id: string; status: ManualNewsLeadStatus; version: number }>();
   const recovered: ManualNewsLeadRecord[] = [];
   for (const row of stale.results || []) {
+    const currentGeneration = await env.DB.prepare(
+      `/* manual_generation:stale_current */ SELECT cycle_id
+       FROM manual_news_assessment_generation_cycles_v2
+       WHERE lead_id = ? AND is_current = 1 AND call_state <> 'superseded'`,
+    ).bind(row.id).first<{ cycle_id: string }>();
+    const previousGenerationCycleId = currentGeneration?.cycle_id || null;
     const key = `stale-recovery:${row.version}`;
     const nextVersion = Number(row.version) + 1;
     const processingOwner = manualNewsLeadProcessingOwner(row.id, nextVersion);
     const mutationNonce = createMutationNonce('stale_recovery');
+    const supersedeNonce = createMutationNonce('assessment_generation_stale_supersede');
+    const generationSnapshotGuard = previousGenerationCycleId
+      ? `AND EXISTS (
+           SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
+           WHERE cycle.cycle_id = ? AND cycle.lead_id = manual_news_leads.id
+             AND cycle.is_current = 1 AND cycle.call_state <> 'superseded'
+         )`
+      : `AND NOT EXISTS (
+           SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
+           WHERE cycle.lead_id = manual_news_leads.id AND cycle.is_current = 1
+             AND cycle.call_state <> 'superseded'
+         )`;
     const mutation = env.DB.prepare(
       `/* manual_lead:recover_stale */ UPDATE manual_news_leads SET
          status = 'validating', version = version + 1, error_code = NULL, error_message = NULL,
          last_mutation_kind = 'stale_recovery', last_mutation_idempotency_key = ?,
          last_mutation_nonce = ?, processing_owner = ?, processing_lease_until = ?, updated_at = ?
        WHERE id = ? AND status = ? AND version = ?
-         AND (processing_lease_until IS NULL OR processing_lease_until < ?)`,
-    ).bind(key, mutationNonce, processingOwner, now + PROCESSING_LEASE_MS, now, row.id, row.status, row.version, now);
-    const changed = await runAuditedMutation(env, mutation, auditMutationStatement(env, {
+         AND (processing_lease_until IS NULL OR processing_lease_until < ?)
+         ${generationSnapshotGuard}`,
+    ).bind(
+      key, mutationNonce, processingOwner, now + PROCESSING_LEASE_MS, now,
+      row.id, row.status, row.version, now,
+      ...(previousGenerationCycleId ? [previousGenerationCycleId] : []),
+    );
+    const recoveryAudit = auditMutationStatement(env, {
       leadId: row.id, action: 'stale_recovery', mutationKind: 'stale_recovery', mutationNonce,
       fromStatus: row.status, toStatus: 'validating',
       idempotencyKey: key, resultingVersion: nextVersion, createdAt: now,
-    }));
+    });
+    const recoveredLeadGuard = `EXISTS (
+      SELECT 1 FROM manual_news_leads lead
+      WHERE lead.id = ? AND lead.version = ? AND lead.status = 'validating'
+        AND lead.last_mutation_kind = 'stale_recovery'
+        AND lead.last_mutation_idempotency_key = ? AND lead.last_mutation_nonce = ?
+        AND lead.processing_owner = ?
+    )`;
+    const results = await env.DB.batch([
+      mutation,
+      recoveryAudit,
+      env.DB.prepare(
+        `/* manual_generation:stale_supersede */ UPDATE manual_news_assessment_generation_cycles_v2
+         SET call_state = 'superseded', superseded_by_processing_owner = ?, is_current = 0,
+             supersede_nonce = ?, updated_at = ?
+         WHERE cycle_id = ? AND lead_id = ? AND is_current = 1
+           AND call_state <> 'superseded' AND supersede_nonce IS NULL
+           AND ${recoveredLeadGuard}`,
+      ).bind(
+        processingOwner, supersedeNonce, now, previousGenerationCycleId, row.id,
+        row.id, nextVersion, key, mutationNonce, processingOwner,
+      ),
+      env.DB.prepare(
+        `/* manual_generation:stale_supersede_audit */ INSERT INTO manual_news_lead_audit (
+           lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
+           resulting_version, metadata_json, created_at
+         ) SELECT ?, 'assessment_generation_supersede', 'validating', 'validating', NULL, ?, ?, ?, ?
+         WHERE ${recoveredLeadGuard} AND EXISTS (
+           SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
+           WHERE cycle.cycle_id = ? AND cycle.lead_id = ? AND cycle.call_state = 'superseded'
+             AND cycle.is_current = 0 AND cycle.superseded_by_processing_owner = ?
+             AND cycle.supersede_nonce = ?
+         )`,
+      ).bind(
+        row.id, supersedeNonce, nextVersion, JSON.stringify({
+          cycle_id: previousGenerationCycleId,
+          superseded_by_processing_owner: processingOwner,
+          previous_lead_version: row.version,
+          next_lead_version: nextVersion,
+          recovery_nonce: mutationNonce,
+        }), now,
+        row.id, nextVersion, key, mutationNonce, processingOwner,
+        previousGenerationCycleId, row.id, processingOwner, supersedeNonce,
+      ),
+    ]) as Array<{ meta?: { changes?: number } }>;
+    const changed = auditedMutationChanges(results, 0, 1);
+    const superseded = Number(results[2]?.meta?.changes || 0);
+    const supersedeAudit = Number(results[3]?.meta?.changes || 0);
+    const expectedSupersede = changed && previousGenerationCycleId ? 1 : 0;
+    if (superseded !== expectedSupersede || supersedeAudit !== expectedSupersede) {
+      throw new Error('assessment_generation_stale_supersede_causality_mismatch');
+    }
     if (!changed) continue;
     const lead = await getManualNewsLead(env, row.id);
     if (lead) recovered.push(lead);
@@ -598,6 +834,313 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
        ) AS present`,
     ).bind(id).first<{ present: number }>();
     return Number(row?.present || 0) === 1;
+  }
+
+  private async currentAssessmentGenerationCycle(
+    id: string,
+    expectedVersion: number,
+  ): Promise<ManualAssessmentGenerationCycleState | null> {
+    const { owner, attempt } = this.fence();
+    const row = await this.env.DB.prepare(
+      `/* manual_generation:current_fenced */ SELECT cycle.*
+       FROM manual_news_leads lead
+       JOIN manual_news_assessment_generation_cycles_v2 cycle
+         ON cycle.lead_id = lead.id AND cycle.is_current = 1
+       WHERE lead.id = ? AND lead.version = ? AND lead.status = 'verifying'
+         AND lead.processing_owner = ? AND lead.processing_attempt = ?
+         AND cycle.processing_owner = ? AND cycle.base_version = ?
+         AND cycle.call_state <> 'superseded'`,
+    ).bind(id, expectedVersion, owner, attempt, owner, expectedVersion)
+      .first<ManualAssessmentGenerationCycleRow>();
+    return row ? assessmentGenerationCycleState(row, false) : null;
+  }
+
+  async beginAssessmentGenerationCycle(
+    id: string,
+    expectedVersion: number,
+  ): Promise<ManualAssessmentGenerationCycleState> {
+    const existing = await this.currentAssessmentGenerationCycle(id, expectedVersion);
+    if (existing) return existing;
+    const { owner, attempt } = this.fence();
+    const cycleId = `mag:${id}:${expectedVersion}:${(await sha256Hex(owner)).slice(0, 16)}`;
+    const now = Date.now();
+    const mutationNonce = createMutationNonce('assessment_generation_start');
+    const leadGuard = `EXISTS (
+      SELECT 1 FROM manual_news_leads lead
+      WHERE lead.id = ? AND lead.version = ? AND lead.status = 'verifying'
+        AND lead.processing_owner = ? AND lead.processing_attempt = ?
+    )`;
+    const statements = [
+      this.env.DB.prepare(
+        `/* manual_generation:insert_cycle */ INSERT OR IGNORE INTO manual_news_assessment_generation_cycles_v2 (
+           cycle_id, lead_id, processing_owner, base_version, call_state,
+           regeneration_consumed, is_current, start_nonce, created_at, updated_at
+         ) SELECT ?, ?, ?, ?, 'initial_started', 0, 1, ?, ?, ? WHERE ${leadGuard}
+           AND NOT EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles_v2 current
+             WHERE current.lead_id = ? AND current.is_current = 1)`,
+      ).bind(
+        cycleId, id, owner, expectedVersion, mutationNonce, now, now,
+        id, expectedVersion, owner, attempt,
+        id,
+      ),
+      this.env.DB.prepare(
+        `/* manual_generation:insert_revision */ INSERT OR IGNORE INTO manual_news_assessment_generation_revisions_v2 (
+           cycle_id, generation_revision, call_kind, call_state, start_nonce, created_at
+         ) SELECT ?, 1, 'initial', 'started', ?, ? WHERE ${leadGuard}
+           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
+             WHERE cycle.cycle_id = ? AND cycle.call_state = 'initial_started'
+               AND cycle.is_current = 1 AND cycle.start_nonce = ?)`,
+      ).bind(
+        cycleId, mutationNonce, now,
+        id, expectedVersion, owner, attempt,
+        cycleId, mutationNonce,
+      ),
+      this.env.DB.prepare(
+        `/* manual_generation:start_audit */ INSERT INTO manual_news_lead_audit (
+           lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
+           resulting_version, metadata_json, created_at
+         ) SELECT ?, 'assessment_generation_start_1', 'verifying', 'verifying', NULL, ?, ?, ?, ?
+         WHERE ${leadGuard} AND EXISTS (
+           SELECT 1 FROM manual_news_assessment_generation_revisions_v2 revision
+           WHERE revision.cycle_id = ? AND revision.generation_revision = 1
+             AND revision.call_state = 'started' AND revision.start_nonce = ?
+         ) AND EXISTS (
+           SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
+           WHERE cycle.cycle_id = ? AND cycle.start_nonce = ? AND cycle.is_current = 1
+         )`,
+      ).bind(
+        id, mutationNonce, expectedVersion, JSON.stringify({
+          cycle_id: cycleId, generation_revision: 1, call_kind: 'initial',
+          processing_owner: owner, processing_attempt: attempt, base_version: expectedVersion,
+        }), now,
+        id, expectedVersion, owner, attempt,
+        cycleId, mutationNonce,
+        cycleId, mutationNonce,
+      ),
+    ];
+    const results = await this.env.DB.batch(statements) as Array<{ meta?: { changes?: number } }>;
+    const claimed = Number(results[0]?.meta?.changes || 0);
+    if (claimed === 1) {
+      if (Number(results[1]?.meta?.changes || 0) !== 1
+        || Number(results[2]?.meta?.changes || 0) !== 1) {
+        throw new Error('assessment_generation_start_causality_mismatch');
+      }
+      const row = await this.currentAssessmentGenerationCycle(id, expectedVersion);
+      if (!row) throw new Error('assessment_generation_state_missing');
+      return { ...row, acquired_call: true };
+    }
+    if (results.some((entry) => Number(entry?.meta?.changes || 0) !== 0)) {
+      throw new Error('assessment_generation_start_causality_mismatch');
+    }
+    const winner = await this.currentAssessmentGenerationCycle(id, expectedVersion);
+    if (winner) return winner;
+    throw new Error('stale_processing_owner');
+  }
+
+  async recordAssessmentGenerationValidation(
+    id: string,
+    expectedVersion: number,
+    result: ManualAssessmentGenerationValidationResult,
+  ): Promise<ManualAssessmentGenerationCycleState> {
+    const { owner, attempt } = this.fence();
+    const safeFailure = manualLeadAssessmentValidationFailure(new Error(
+      `${result.validation_code}${result.validation_path ? `:${result.validation_path}` : ''}`,
+    ));
+    if (!['valid', 'not_validated'].includes(result.validation_code)
+      && (safeFailure.code !== result.validation_code || safeFailure.path !== result.validation_path)) {
+      throw new Error('assessment_generation_validation_invalid');
+    }
+    if ((result.validation_code === 'valid' && (!result.validated_assessment || result.validation_path))
+      || (result.validation_code === 'not_validated' && result.validation_path)) {
+      throw new Error('assessment_generation_validation_invalid');
+    }
+    if (result.generation_revision === 2 && result.regeneratable) {
+      throw new Error('assessment_generation_validation_invalid');
+    }
+    if (result.provider_failure && !isValidManualNewsProviderFailureAudit(result.provider_failure)) {
+      throw new Error('assessment_generation_validation_invalid');
+    }
+    const current = await this.currentAssessmentGenerationCycle(id, expectedVersion);
+    if (!current) throw new Error('stale_processing_owner');
+    if (current.generation_revision !== result.generation_revision
+      || !['initial_started', 'regeneration_started'].includes(current.call_state)) {
+      throw new Error('assessment_generation_revision_conflict');
+    }
+    const now = Date.now();
+    const nextState = result.validation_code === 'valid'
+      ? 'validated'
+      : (result.generation_revision === 1 && result.regeneratable ? 'regeneration_ready' : 'terminal');
+    const revisionState = result.validation_code === 'valid'
+      ? 'validated'
+      : (result.provider_failure ? 'provider_failed' : 'validation_failed');
+    const mutationNonce = createMutationNonce(`assessment_generation_result_${result.generation_revision}`);
+    const providerFailureJson = result.provider_failure ? JSON.stringify(result.provider_failure) : null;
+    const assessmentJson = result.validated_assessment ? JSON.stringify(result.validated_assessment) : null;
+    const guard = `EXISTS (
+      SELECT 1 FROM manual_news_leads lead
+      WHERE lead.id = ? AND lead.version = ? AND lead.status = 'verifying'
+        AND lead.processing_owner = ? AND lead.processing_attempt = ?
+    )`;
+    const statements = [
+      this.env.DB.prepare(
+        `/* manual_generation:complete_revision */ UPDATE manual_news_assessment_generation_revisions_v2
+         SET call_state = ?, validation_code = ?, validation_path = ?,
+             validated_assessment_json = ?, provider_failure_json = ?, result_nonce = ?, completed_at = ?
+         WHERE cycle_id = ? AND generation_revision = ? AND call_state = 'started'
+           AND result_nonce IS NULL AND ${guard}
+           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
+             WHERE cycle.cycle_id = ? AND cycle.is_current = 1
+               AND cycle.processing_owner = ? AND cycle.base_version = ?)`,
+      ).bind(
+        revisionState, result.validation_code, result.validation_path || null,
+        assessmentJson, providerFailureJson, mutationNonce, now,
+        current.cycle_id, result.generation_revision,
+        id, expectedVersion, owner, attempt,
+        current.cycle_id, owner, expectedVersion,
+      ),
+      this.env.DB.prepare(
+        `/* manual_generation:update_cycle */ UPDATE manual_news_assessment_generation_cycles_v2
+         SET call_state = ?,
+             first_validation_code = CASE WHEN ? = 1 THEN ? ELSE first_validation_code END,
+             first_validation_path = CASE WHEN ? = 1 THEN ? ELSE first_validation_path END,
+             last_validation_code = ?, last_validation_path = ?,
+             validated_assessment_json = ?, provider_failure_json = ?,
+             last_result_nonce = ?, updated_at = ?
+         WHERE cycle_id = ? AND call_state = ? AND is_current = 1
+           AND processing_owner = ? AND base_version = ?
+           AND ${guard}
+           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_revisions_v2 revision
+             WHERE revision.cycle_id = ? AND revision.generation_revision = ?
+               AND revision.call_state = ? AND revision.result_nonce = ?)`,
+      ).bind(
+        nextState,
+        result.generation_revision, result.validation_code,
+        result.generation_revision, result.validation_path || null,
+        result.validation_code, result.validation_path || null,
+        assessmentJson, providerFailureJson, mutationNonce, now,
+        current.cycle_id, current.call_state, owner, expectedVersion,
+        id, expectedVersion, owner, attempt,
+        current.cycle_id, result.generation_revision, revisionState, mutationNonce,
+      ),
+      this.env.DB.prepare(
+        `/* manual_generation:result_audit */ INSERT INTO manual_news_lead_audit (
+           lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
+           resulting_version, metadata_json, created_at
+         ) SELECT ?, ?, 'verifying', 'verifying', NULL, ?, ?, ?, ? WHERE ${guard}
+           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
+             WHERE cycle.cycle_id = ? AND cycle.is_current = 1
+               AND cycle.last_result_nonce = ?)
+           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_revisions_v2 revision
+             WHERE revision.cycle_id = ? AND revision.generation_revision = ?
+               AND revision.call_state = ? AND revision.validation_code = ?
+               AND revision.result_nonce = ?)`,
+      ).bind(
+        id, `assessment_generation_result_${result.generation_revision}`, mutationNonce,
+        expectedVersion, JSON.stringify({
+          cycle_id: current.cycle_id, generation_revision: result.generation_revision,
+          validation_code: result.validation_code,
+          ...(result.validation_path ? { validation_path: result.validation_path } : {}),
+          processing_owner: owner, processing_attempt: attempt, base_version: expectedVersion,
+          ...(result.provider_failure ? { provider_failure: result.provider_failure } : {}),
+        }), now,
+        id, expectedVersion, owner, attempt,
+        current.cycle_id, mutationNonce,
+        current.cycle_id, result.generation_revision, revisionState, result.validation_code, mutationNonce,
+      ),
+    ];
+    const results = await this.env.DB.batch(statements) as Array<{ meta?: { changes?: number } }>;
+    const changes = results.map((entry) => Number(entry?.meta?.changes || 0));
+    if (changes.every((value) => value === 0)) {
+      const winner = await this.currentAssessmentGenerationCycle(id, expectedVersion);
+      if (winner && winner.generation_revision === result.generation_revision
+        && winner.call_state === nextState) return winner;
+      throw new Error('stale_processing_owner');
+    }
+    if (changes.some((value) => value !== 1)) {
+      throw new Error('assessment_generation_result_causality_mismatch');
+    }
+    const updated = await this.currentAssessmentGenerationCycle(id, expectedVersion);
+    if (!updated) throw new Error('assessment_generation_state_missing');
+    return updated;
+  }
+
+  async consumeAssessmentRegeneration(
+    id: string,
+    expectedVersion: number,
+  ): Promise<ManualAssessmentGenerationCycleState> {
+    const current = await this.currentAssessmentGenerationCycle(id, expectedVersion);
+    if (!current) throw new Error('stale_processing_owner');
+    if (current.call_state !== 'regeneration_ready') return current;
+    const { owner, attempt } = this.fence();
+    const now = Date.now();
+    const mutationNonce = createMutationNonce('assessment_regeneration_consume');
+    const guard = `EXISTS (
+      SELECT 1 FROM manual_news_leads lead
+      WHERE lead.id = ? AND lead.version = ? AND lead.status = 'verifying'
+        AND lead.processing_owner = ? AND lead.processing_attempt = ?
+    )`;
+    const statements = [
+      this.env.DB.prepare(
+        `/* manual_generation:consume_regeneration */ UPDATE manual_news_assessment_generation_cycles_v2
+         SET regeneration_consumed = 1, call_state = 'regeneration_started',
+             regeneration_nonce = ?, updated_at = ?
+         WHERE cycle_id = ? AND call_state = 'regeneration_ready' AND regeneration_consumed = 0
+           AND is_current = 1 AND processing_owner = ? AND base_version = ?
+           AND regeneration_nonce IS NULL AND ${guard}`,
+      ).bind(mutationNonce, now, current.cycle_id, owner, expectedVersion, id, expectedVersion, owner, attempt),
+      this.env.DB.prepare(
+        `/* manual_generation:insert_regeneration_revision */ INSERT OR IGNORE INTO manual_news_assessment_generation_revisions_v2 (
+           cycle_id, generation_revision, call_kind, call_state, start_nonce, created_at
+         ) SELECT ?, 2, 'regeneration', 'started', ?, ? WHERE ${guard}
+           AND EXISTS (SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
+             WHERE cycle.cycle_id = ? AND cycle.call_state = 'regeneration_started'
+               AND cycle.regeneration_consumed = 1 AND cycle.is_current = 1
+               AND cycle.regeneration_nonce = ?)`,
+      ).bind(
+        current.cycle_id, mutationNonce, now,
+        id, expectedVersion, owner, attempt,
+        current.cycle_id, mutationNonce,
+      ),
+      this.env.DB.prepare(
+        `/* manual_generation:regeneration_audit */ INSERT INTO manual_news_lead_audit (
+           lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
+           resulting_version, metadata_json, created_at
+         ) SELECT ?, 'assessment_generation_start_2', 'verifying', 'verifying', NULL, ?, ?, ?, ?
+         WHERE ${guard} AND EXISTS (
+           SELECT 1 FROM manual_news_assessment_generation_revisions_v2 revision
+           WHERE revision.cycle_id = ? AND revision.generation_revision = 2
+             AND revision.call_state = 'started' AND revision.start_nonce = ?
+         ) AND EXISTS (
+           SELECT 1 FROM manual_news_assessment_generation_cycles_v2 cycle
+           WHERE cycle.cycle_id = ? AND cycle.regeneration_nonce = ? AND cycle.is_current = 1
+         )`,
+      ).bind(
+        id, mutationNonce, expectedVersion, JSON.stringify({
+          cycle_id: current.cycle_id, generation_revision: 2, call_kind: 'regeneration',
+          processing_owner: owner, processing_attempt: attempt, base_version: expectedVersion,
+        }), now,
+        id, expectedVersion, owner, attempt,
+        current.cycle_id, mutationNonce,
+        current.cycle_id, mutationNonce,
+      ),
+    ];
+    const results = await this.env.DB.batch(statements) as Array<{ meta?: { changes?: number } }>;
+    const consumed = Number(results[0]?.meta?.changes || 0);
+    if (consumed === 1) {
+      if (Number(results[1]?.meta?.changes || 0) !== 1
+        || Number(results[2]?.meta?.changes || 0) !== 1) {
+        throw new Error('assessment_regeneration_causality_mismatch');
+      }
+      const updated = await this.currentAssessmentGenerationCycle(id, expectedVersion);
+      if (!updated) throw new Error('assessment_generation_state_missing');
+      return { ...updated, acquired_call: true };
+    }
+    if (results.some((entry) => Number(entry?.meta?.changes || 0) !== 0)) {
+      throw new Error('assessment_regeneration_causality_mismatch');
+    }
+    const winner = await this.currentAssessmentGenerationCycle(id, expectedVersion);
+    if (winner) return winner;
+    throw new Error('stale_processing_owner');
   }
 
   async transition(
@@ -860,7 +1403,13 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     const verification = validateManualLeadFactVerification(
       verificationRaw, validatedAssessment, evidence, { prior_events: priorEvents, persisted: true },
     );
-    if (verification.overall_verdict !== 'supported') throw new Error('fact_verification_not_supported');
+    if (!['supported', 'conflicted'].includes(verification.overall_verdict)) {
+      throw new Error('fact_verification_not_supported');
+    }
+    if (verification.overall_verdict === 'conflicted'
+      && validatedAssessment.recommendation !== 'needs_review') {
+      throw new Error('fact_verification_conflict_not_reviewed');
+    }
     const assessmentVersion = expectedVersion * 1_000_000 + attempt;
     if (attempt >= 1_000_000 || !Number.isSafeInteger(assessmentVersion) || assessmentVersion <= 0) {
       throw new Error('invalid_assessment_version');
@@ -962,6 +1511,7 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
           assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
           assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
           assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+          assessment_evidence_disposition_contract: MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
           assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
           processing_owner: owner,
           processing_attempt: attempt,

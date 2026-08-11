@@ -7,6 +7,7 @@ import {
   applyManualLeadEvidencePolicy,
   buildManualLeadFactVerificationPrompt,
   MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+  MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
   MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
   MANUAL_LEAD_SOURCE_FACT_CONTRACT,
   MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
@@ -81,6 +82,29 @@ class SqliteD1 {
       );
       CREATE UNIQUE INDEX idx_manual_news_verification_one_active_lead
         ON manual_news_assessment_verifications(lead_id) WHERE status = 'active';
+      CREATE TABLE manual_news_assessment_generation_cycles_v2 (
+        cycle_id TEXT PRIMARY KEY, lead_id TEXT NOT NULL, processing_owner TEXT NOT NULL,
+        base_version INTEGER NOT NULL, call_state TEXT NOT NULL,
+        first_validation_code TEXT, first_validation_path TEXT,
+        last_validation_code TEXT, last_validation_path TEXT,
+        regeneration_consumed INTEGER NOT NULL DEFAULT 0,
+        validated_assessment_json TEXT, provider_failure_json TEXT,
+        superseded_by_processing_owner TEXT, is_current INTEGER NOT NULL DEFAULT 1,
+        start_nonce TEXT NOT NULL UNIQUE, last_result_nonce TEXT UNIQUE,
+        regeneration_nonce TEXT UNIQUE, supersede_nonce TEXT UNIQUE,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        UNIQUE (lead_id, processing_owner, base_version)
+      );
+      CREATE UNIQUE INDEX idx_manual_news_generation_v2_one_current_lead
+        ON manual_news_assessment_generation_cycles_v2(lead_id) WHERE is_current = 1;
+      CREATE TABLE manual_news_assessment_generation_revisions_v2 (
+        cycle_id TEXT NOT NULL, generation_revision INTEGER NOT NULL,
+        call_kind TEXT NOT NULL, call_state TEXT NOT NULL,
+        validation_code TEXT, validation_path TEXT, validated_assessment_json TEXT,
+        provider_failure_json TEXT, start_nonce TEXT NOT NULL UNIQUE, result_nonce TEXT UNIQUE,
+        created_at INTEGER NOT NULL, completed_at INTEGER,
+        PRIMARY KEY (cycle_id, generation_revision), UNIQUE (cycle_id, call_kind)
+      );
       CREATE TABLE manual_news_lead_audit (
         id INTEGER PRIMARY KEY AUTOINCREMENT, lead_id TEXT NOT NULL, action TEXT NOT NULL,
         from_status TEXT, to_status TEXT, idempotency_key TEXT,
@@ -273,6 +297,12 @@ function generatedAssessment(overrides: Record<string, unknown> = {}) {
         },
       }],
     },
+    evidence_dispositions: [{
+      evidence_id: 'ev-official',
+      disposition: 'supports_core',
+      source_fact_refs: ['fact-01'],
+      reason_code: null,
+    }],
     matched_event_key: null,
     ...rest,
   };
@@ -375,7 +405,9 @@ function verifiedAssessment(
   }).user) as {
     facts: Array<{ fact_id: string; untrusted_prior_events?: Array<{ event_key: string }> }>;
     projections?: Array<{ projection_id: string; source_fact_ids: string[] }>;
+    evidence_dispositions?: Array<{ evidence_id: string; disposition: string }>;
   };
+  const evidenceById = new Map(evidence.map((item) => [item.id, item]));
   return validateManualLeadFactVerification({
     overall_verdict: 'supported',
     fact_results: facts.map((fact) => ({
@@ -399,6 +431,18 @@ function verifiedAssessment(
         supported: true, issue_code: 'none',
       })),
     } : {}),
+    ...(promptBody.evidence_dispositions?.length ? {
+      disposition_results: promptBody.evidence_dispositions.map((disposition) => {
+        const item = evidenceById.get(disposition.evidence_id)!;
+        return {
+          evidence_id: disposition.evidence_id,
+          disposition: disposition.disposition,
+          supported: true,
+          issue_code: 'none',
+          source_quotes: [{ evidence_id: item.id, quote: item.excerpt }],
+        };
+      }),
+    } : {}),
   }, candidate, evidence, { prior_events: priorEvents });
 }
 
@@ -420,6 +464,7 @@ function verifyingAdapters(): ManualLeadProcessingAdapters {
         untrusted_evidence: Array<{ id: string; excerpt: string }>;
         facts: Array<{ fact_id: string; allowed_evidence_ids: string[] }>;
         projections?: Array<{ projection_id: string; source_fact_ids: string[] }>;
+        evidence_dispositions?: Array<{ evidence_id: string; disposition: string }>;
       };
       const evidenceById = new Map(body.untrusted_evidence.map((item) => [item.id, item]));
       return {
@@ -444,12 +489,257 @@ function verifyingAdapters(): ManualLeadProcessingAdapters {
             supported: true, issue_code: 'none',
           })),
         } : {}),
+        ...(body.evidence_dispositions?.length ? {
+          disposition_results: body.evidence_dispositions.map((disposition) => {
+            const evidence = evidenceById.get(disposition.evidence_id)!;
+            return {
+              evidence_id: disposition.evidence_id,
+              disposition: disposition.disposition,
+              supported: true,
+              issue_code: 'none',
+              source_quotes: [{ evidence_id: evidence.id, quote: evidence.excerpt }],
+            };
+          }),
+        } : {}),
       };
     },
   };
 }
 
 describe('manual lead D1-backed dedupe', () => {
+  test('persists one assessment generation and one regeneration across Workflow fencing attempts', async () => {
+    const state = fixture('verifying', 4);
+    const first = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+
+    const initial = await first.beginAssessmentGenerationCycle(state.leadId, 4);
+    expect(initial).toMatchObject({ acquired_call: true, generation_revision: 1, call_state: 'initial_started' });
+
+    const attempt2 = await claimManualNewsLeadProcessing(state.env, state.leadId, PROCESSING_OWNER, 10);
+    expect(attempt2).toBe(2);
+    const resumed = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 2);
+    expect(await resumed.beginAssessmentGenerationCycle(state.leadId, 4)).toMatchObject({
+      acquired_call: false, generation_revision: 1, call_state: 'initial_started',
+    });
+    await expect(first.recordAssessmentGenerationValidation(state.leadId, 4, {
+      generation_revision: 1, validation_code: 'non_atomic_source_object',
+      validation_path: 'source_facts[0].atomic_fact.object', regeneratable: true,
+    })).rejects.toThrow(/stale_processing_owner/);
+
+    await resumed.recordAssessmentGenerationValidation(state.leadId, 4, {
+      generation_revision: 1, validation_code: 'non_atomic_source_object',
+      validation_path: 'source_facts[0].atomic_fact.object', regeneratable: true,
+    });
+    expect(await resumed.consumeAssessmentRegeneration(state.leadId, 4)).toMatchObject({
+      acquired_call: true, generation_revision: 2, call_state: 'regeneration_started',
+    });
+
+    const attempt3 = await claimManualNewsLeadProcessing(state.env, state.leadId, PROCESSING_OWNER, 20);
+    expect(attempt3).toBe(3);
+    const resumedAgain = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 3);
+    expect(await resumedAgain.consumeAssessmentRegeneration(state.leadId, 4)).toMatchObject({
+      acquired_call: false, generation_revision: 2, call_state: 'regeneration_started',
+    });
+
+    expect(state.db.sqlite.prepare(`SELECT generation_revision, call_kind, call_state
+      FROM manual_news_assessment_generation_revisions_v2 ORDER BY generation_revision`).all()).toEqual([
+      { generation_revision: 1, call_kind: 'initial', call_state: 'validation_failed' },
+      { generation_revision: 2, call_kind: 'regeneration', call_state: 'started' },
+    ]);
+  });
+
+  test('ignores unverifiable legacy v1 generation state and starts a fresh v2 initial revision', async () => {
+    const state = fixture('verifying', 4);
+    state.db.sqlite.exec(`CREATE TABLE manual_news_assessment_generation_cycles (
+      cycle_id TEXT PRIMARY KEY, lead_id TEXT NOT NULL, processing_owner TEXT NOT NULL,
+      base_version INTEGER NOT NULL, call_state TEXT NOT NULL,
+      regeneration_consumed INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    )`);
+    state.db.sqlite.prepare(`INSERT INTO manual_news_assessment_generation_cycles (
+      cycle_id, lead_id, processing_owner, base_version, call_state,
+      regeneration_consumed, created_at, updated_at
+    ) VALUES ('legacy-v1-cycle', ?, ?, 4, 'regeneration_started', 1, 1, 1)`).run(
+      state.leadId, PROCESSING_OWNER,
+    );
+
+    const cycle = await new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1)
+      .beginAssessmentGenerationCycle(state.leadId, 4);
+
+    expect(cycle).toMatchObject({
+      generation_revision: 1, regeneration_consumed: false,
+      call_state: 'initial_started', acquired_call: true,
+    });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
+      FROM manual_news_assessment_generation_cycles_v2 WHERE lead_id = ?`).get(state.leadId))
+      .toEqual({ count: 1 });
+    expect(state.db.sqlite.prepare(`SELECT call_state, regeneration_consumed
+      FROM manual_news_assessment_generation_cycles WHERE cycle_id = 'legacy-v1-cycle'`).get())
+      .toEqual({ call_state: 'regeneration_started', regeneration_consumed: 1 });
+  });
+
+  test('binds start, result, and regeneration audits to the exact concurrent mutation nonce', async () => {
+    const state = fixture('verifying', 4);
+    const firstStore = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    const secondStore = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+
+    const startBarrier = state.db.pauseNextFirstCalls('manual_generation:current_fenced', 2);
+    const startOne = firstStore.beginAssessmentGenerationCycle(state.leadId, 4);
+    const startTwo = secondStore.beginAssessmentGenerationCycle(state.leadId, 4);
+    await startBarrier.entered;
+    startBarrier.release();
+    const starts = await Promise.all([startOne, startTwo]);
+    expect(starts.filter((result) => result.acquired_call)).toHaveLength(1);
+
+    const cycleStart = state.db.sqlite.prepare(`SELECT start_nonce FROM manual_news_assessment_generation_cycles_v2
+      WHERE lead_id = ? AND is_current = 1`).get(state.leadId) as { start_nonce: string };
+    const revisionStart = state.db.sqlite.prepare(`SELECT start_nonce FROM manual_news_assessment_generation_revisions_v2
+      WHERE generation_revision = 1`).get() as { start_nonce: string };
+    const startAudits = state.db.sqlite.prepare(`SELECT mutation_nonce FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'assessment_generation_start_1'`).all(state.leadId) as Array<{ mutation_nonce: string }>;
+    expect(startAudits).toEqual([{ mutation_nonce: cycleStart.start_nonce }]);
+    expect(revisionStart.start_nonce).toBe(cycleStart.start_nonce);
+
+    const resultBarrier = state.db.pauseNextFirstCalls('manual_generation:current_fenced', 2);
+    const validation = {
+      generation_revision: 1 as const,
+      validation_code: 'non_atomic_source_object',
+      validation_path: 'source_facts[0].atomic_fact.object',
+      regeneratable: true,
+    };
+    const resultOne = firstStore.recordAssessmentGenerationValidation(state.leadId, 4, validation);
+    const resultTwo = secondStore.recordAssessmentGenerationValidation(state.leadId, 4, validation);
+    await resultBarrier.entered;
+    resultBarrier.release();
+    await expect(Promise.all([resultOne, resultTwo])).resolves.toHaveLength(2);
+
+    const cycleResult = state.db.sqlite.prepare(`SELECT last_result_nonce
+      FROM manual_news_assessment_generation_cycles_v2 WHERE lead_id = ? AND is_current = 1`)
+      .get(state.leadId) as { last_result_nonce: string };
+    const revisionResult = state.db.sqlite.prepare(`SELECT result_nonce
+      FROM manual_news_assessment_generation_revisions_v2 WHERE generation_revision = 1`)
+      .get() as { result_nonce: string };
+    const resultAudits = state.db.sqlite.prepare(`SELECT mutation_nonce FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'assessment_generation_result_1'`).all(state.leadId) as Array<{ mutation_nonce: string }>;
+    expect(resultAudits).toEqual([{ mutation_nonce: cycleResult.last_result_nonce }]);
+    expect(revisionResult.result_nonce).toBe(cycleResult.last_result_nonce);
+
+    const regenerationBarrier = state.db.pauseNextFirstCalls('manual_generation:current_fenced', 2);
+    const regenerationOne = firstStore.consumeAssessmentRegeneration(state.leadId, 4);
+    const regenerationTwo = secondStore.consumeAssessmentRegeneration(state.leadId, 4);
+    await regenerationBarrier.entered;
+    regenerationBarrier.release();
+    const regenerations = await Promise.all([regenerationOne, regenerationTwo]);
+    expect(regenerations.filter((result) => result.acquired_call)).toHaveLength(1);
+
+    const cycleRegeneration = state.db.sqlite.prepare(`SELECT regeneration_nonce
+      FROM manual_news_assessment_generation_cycles_v2 WHERE lead_id = ? AND is_current = 1`)
+      .get(state.leadId) as { regeneration_nonce: string };
+    const revisionRegeneration = state.db.sqlite.prepare(`SELECT start_nonce
+      FROM manual_news_assessment_generation_revisions_v2 WHERE generation_revision = 2`)
+      .get() as { start_nonce: string };
+    const regenerationAudits = state.db.sqlite.prepare(`SELECT mutation_nonce FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'assessment_generation_start_2'`).all(state.leadId) as Array<{ mutation_nonce: string }>;
+    expect(regenerationAudits).toEqual([{ mutation_nonce: cycleRegeneration.regeneration_nonce }]);
+    expect(revisionRegeneration.start_nonce).toBe(cycleRegeneration.regeneration_nonce);
+
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action IN (
+        'assessment_generation_start_1', 'assessment_generation_result_1', 'assessment_generation_start_2'
+      )`).get(state.leadId)).toEqual({ count: 3 });
+  });
+
+  test('an old generation nonce cannot mutate or audit a superseding current-cycle lineage', async () => {
+    const state = fixture('verifying', 4);
+    const oldStore = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    const oldCycle = await oldStore.beginAssessmentGenerationCycle(state.leadId, 4);
+    await oldStore.recordAssessmentGenerationValidation(state.leadId, 4, {
+      generation_revision: 1,
+      validation_code: 'non_atomic_source_object',
+      validation_path: 'source_facts[0].atomic_fact.object',
+      regeneratable: false,
+    });
+    state.db.sqlite.prepare(`UPDATE manual_news_leads SET status = 'needs_review', version = 5,
+      processing_owner = NULL, processing_lease_until = NULL WHERE id = ?`).run(state.leadId);
+
+    const retried = await retryManualNewsLead(state.env, state.leadId, 5, 'retry-generation-aba', 50);
+    expect(retried).toMatchObject({ ok: true, changed: true, lead: { version: 6 } });
+    if (!retried.ok) throw new Error('expected retry success');
+    state.db.sqlite.prepare(`UPDATE manual_news_leads SET status = 'verifying' WHERE id = ?`).run(state.leadId);
+    const nextOwner = `manual-news-${state.leadId}-v6`;
+    const nextStore = new D1ManualLeadProcessingStore(state.env, nextOwner, 1);
+    const nextCycle = await nextStore.beginAssessmentGenerationCycle(state.leadId, 6);
+    expect(nextCycle.cycle_id).not.toBe(oldCycle.cycle_id);
+
+    const auditsBefore = state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action LIKE 'assessment_generation_%'`).get(state.leadId);
+    await expect(oldStore.recordAssessmentGenerationValidation(state.leadId, 4, {
+      generation_revision: 1, validation_code: 'valid', regeneratable: false,
+      validated_assessment: processedAssessment(),
+    })).rejects.toThrow(/stale_processing_owner/);
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action LIKE 'assessment_generation_%'`).get(state.leadId)).toEqual(auditsBefore);
+    expect(state.db.sqlite.prepare(`SELECT cycle_id, is_current, call_state FROM manual_news_assessment_generation_cycles_v2
+      WHERE lead_id = ? ORDER BY created_at, cycle_id`).all(state.leadId)).toEqual(expect.arrayContaining([
+        { cycle_id: oldCycle.cycle_id, is_current: 0, call_state: 'superseded' },
+        { cycle_id: nextCycle.cycle_id, is_current: 1, call_state: 'initial_started' },
+      ]));
+  });
+
+  test('manual retry supersedes the old generation cycle and hides its diagnostics', async () => {
+    const state = fixture('verifying', 4);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    await store.beginAssessmentGenerationCycle(state.leadId, 4);
+    await store.recordAssessmentGenerationValidation(state.leadId, 4, {
+      generation_revision: 1, validation_code: 'non_atomic_source_object',
+      validation_path: 'source_facts[0].atomic_fact.object', regeneratable: false,
+    });
+    state.db.sqlite.prepare(`UPDATE manual_news_leads SET status = 'needs_review', version = 5,
+      processing_owner = NULL, processing_lease_until = NULL WHERE id = ?`).run(state.leadId);
+
+    const retried = await retryManualNewsLead(state.env, state.leadId, 5, 'retry-cycle-1', 30);
+    expect(retried).toMatchObject({ ok: true, changed: true });
+    if (!retried.ok) throw new Error('expected retry success');
+    expect('assessment_generation' in retried.lead).toBe(false);
+    expect(state.db.sqlite.prepare(`SELECT call_state, superseded_by_processing_owner
+      FROM manual_news_assessment_generation_cycles_v2`).get()).toMatchObject({
+      call_state: 'superseded',
+    });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_assessment_generation_cycles_v2
+      WHERE lead_id = ? AND is_current = 1`).get(state.leadId)).toEqual({ count: 0 });
+  });
+
+  test('exposes generation diagnostics only for the lead row current cycle owner and base version', async () => {
+    const state = fixture('verifying', 4);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    await store.beginAssessmentGenerationCycle(state.leadId, 4);
+    await store.recordAssessmentGenerationValidation(state.leadId, 4, {
+      generation_revision: 1,
+      validation_code: 'non_atomic_source_object',
+      validation_path: 'source_facts[0].atomic_fact.object',
+      regeneratable: false,
+    });
+    await expect(getManualNewsLead(state.env, state.leadId)).resolves.toMatchObject({
+      assessment_generation: {
+        assessment_generation_attempts: 1,
+        assessment_last_validation_code: 'non_atomic_source_object',
+      },
+    });
+
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_generation_cycles_v2
+      SET processing_owner = 'stale-owner' WHERE lead_id = ?`).run(state.leadId);
+    const mismatched = await getManualNewsLead(state.env, state.leadId);
+    expect(mismatched && 'assessment_generation' in mismatched).toBe(false);
+
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_generation_cycles_v2
+      SET processing_owner = ? WHERE lead_id = ?`).run(PROCESSING_OWNER, state.leadId);
+    state.db.sqlite.prepare(`UPDATE manual_news_leads SET status = 'needs_review', version = 5,
+      processing_owner = NULL, processing_lease_until = NULL WHERE id = ?`).run(state.leadId);
+    await expect(getManualNewsLead(state.env, state.leadId)).resolves.toMatchObject({
+      assessment_generation: {
+        assessment_generation_attempts: 1,
+        assessment_last_validation_code: 'non_atomic_source_object',
+      },
+    });
+  });
   test('atomically rolls back submit if its audit insert fails and writes one audit on replay', async () => {
     const state = fixture();
     state.db.sqlite.prepare('DELETE FROM manual_news_leads').run();
@@ -714,6 +1004,7 @@ describe('manual lead D1-backed dedupe', () => {
       assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
       assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
       assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+      assessment_evidence_disposition_contract: MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
       assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
       canonical_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
       processing_owner: PROCESSING_OWNER,
@@ -1113,6 +1404,7 @@ describe('manual lead D1-backed dedupe', () => {
       assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
       assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
       assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+      assessment_evidence_disposition_contract: MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
       assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
       assessment_recovery: 'persisted_verified',
     });
@@ -1122,6 +1414,7 @@ describe('manual lead D1-backed dedupe', () => {
       assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
       assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
       assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+      assessment_evidence_disposition_contract: MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
       assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
     });
   });
@@ -1165,11 +1458,15 @@ describe('manual lead D1-backed dedupe', () => {
         AND from_status = 'verifying' AND to_status = 'clustering'`).get(state.leadId) as { metadata_json: string };
     expect(JSON.parse(audit.metadata_json)).toEqual({
       assessment_generation_attempts: 2,
+      assessment_first_validation_code: 'unknown_evidence_id',
+      assessment_first_validation_path: 'source_facts[0].evidence_ids[0]',
       assessment_last_validation_code: 'valid',
       assessment_regeneration_trigger_code: 'unknown_evidence_id',
+      assessment_regeneration_trigger_path: 'source_facts[0].evidence_ids[0]',
       assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
       assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
       assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+      assessment_evidence_disposition_contract: MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
       assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
     });
   });
@@ -1210,12 +1507,28 @@ describe('manual lead D1-backed dedupe', () => {
         AND from_status = 'verifying' AND to_status = 'needs_review'`).get(state.leadId) as { metadata_json: string };
     expect(JSON.parse(audit.metadata_json)).toEqual({
       assessment_generation_attempts: 2,
+      assessment_first_validation_code: 'unknown_evidence_id',
+      assessment_first_validation_path: 'source_facts[0].evidence_ids[0]',
       assessment_last_validation_code: 'unknown_evidence_id',
+      assessment_last_validation_path: 'source_facts[0].evidence_ids[0]',
       assessment_regeneration_trigger_code: 'unknown_evidence_id',
+      assessment_regeneration_trigger_path: 'source_facts[0].evidence_ids[0]',
       assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
       assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
       assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+      assessment_evidence_disposition_contract: MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
       assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+    });
+    await expect(getManualNewsLead(state.env, state.leadId)).resolves.toMatchObject({
+      assessment_generation: {
+        assessment_generation_attempts: 2,
+        assessment_first_validation_code: 'unknown_evidence_id',
+        assessment_first_validation_path: 'source_facts[0].evidence_ids[0]',
+        assessment_last_validation_code: 'unknown_evidence_id',
+        assessment_last_validation_path: 'source_facts[0].evidence_ids[0]',
+        assessment_regeneration_trigger_code: 'unknown_evidence_id',
+        assessment_regeneration_trigger_path: 'source_facts[0].evidence_ids[0]',
+      },
     });
   });
 
@@ -1383,6 +1696,100 @@ describe('manual lead D1-backed dedupe', () => {
       `SELECT COUNT(*) AS count FROM manual_news_lead_audit
        WHERE action = 'stale_recovery' AND resulting_version = 5`,
     ).get()).toMatchObject({ count: statuses.length });
+  });
+
+  test.each(['initial_started', 'regeneration_started'] as const)(
+    'atomically supersedes the current %s generation cycle during stale recovery',
+    async (cycleState) => {
+      const state = fixture('verifying', 4);
+      const oldStore = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+      const initial = await oldStore.beginAssessmentGenerationCycle(state.leadId, 4);
+      if (cycleState === 'regeneration_started') {
+        await oldStore.recordAssessmentGenerationValidation(state.leadId, 4, {
+          generation_revision: 1, validation_code: 'non_atomic_source_object',
+          validation_path: 'source_facts[0].atomic_fact.object', regeneratable: true,
+        });
+        await oldStore.consumeAssessmentRegeneration(state.leadId, 4);
+      }
+      state.db.sqlite.prepare(`UPDATE manual_news_leads
+        SET processing_lease_until = 10 WHERE id = ?`).run(state.leadId);
+
+      const recovered = await recoverStaleManualNewsLeads(state.env, '2026-08-11', 100);
+
+      expect(recovered).toHaveLength(1);
+      expect(state.db.sqlite.prepare(`SELECT call_state, is_current, supersede_nonce,
+          superseded_by_processing_owner AS next_owner
+        FROM manual_news_assessment_generation_cycles_v2 WHERE cycle_id = ?`).get(initial.cycle_id))
+        .toMatchObject({
+          call_state: 'superseded', is_current: 0,
+          supersede_nonce: expect.stringMatching(/^assessment_generation_stale_supersede:/),
+          next_owner: `manual-news-${state.leadId}-v5`,
+        });
+      expect(state.db.sqlite.prepare(`SELECT action, mutation_nonce, resulting_version
+        FROM manual_news_lead_audit WHERE lead_id = ? AND action = 'assessment_generation_supersede'`)
+        .all(state.leadId)).toEqual([{
+        action: 'assessment_generation_supersede',
+        mutation_nonce: expect.stringMatching(/^assessment_generation_stale_supersede:/),
+        resulting_version: 5,
+      }]);
+      const recoveredOwner = `manual-news-${state.leadId}-v5`;
+      const recoveredStore = new D1ManualLeadProcessingStore(state.env, recoveredOwner, 1);
+      await recoveredStore.transition(state.leadId, 'validating', 'researching');
+      await recoveredStore.transition(state.leadId, 'researching', 'extracting');
+      await recoveredStore.transition(state.leadId, 'extracting', 'verifying');
+      await expect(recoveredStore.beginAssessmentGenerationCycle(state.leadId, 8)).resolves.toMatchObject({
+        call_state: 'initial_started', acquired_call: true,
+      });
+      expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
+        FROM manual_news_assessment_generation_cycles_v2
+        WHERE lead_id = ? AND is_current = 1`).get(state.leadId)).toEqual({ count: 1 });
+    },
+  );
+
+  test('recovers a stale lead without a v2 cycle and emits no supersede ghost audit', async () => {
+    const state = fixture('verifying', 4);
+    state.db.sqlite.prepare(`UPDATE manual_news_leads
+      SET processing_lease_until = 10 WHERE id = ?`).run(state.leadId);
+
+    await expect(recoverStaleManualNewsLeads(state.env, '2026-08-11', 100))
+      .resolves.toHaveLength(1);
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'assessment_generation_supersede'`).get(state.leadId))
+      .toEqual({ count: 0 });
+  });
+
+  test('stale recovery has one CAS winner and no loser cycle audit or ABA nonce reuse', async () => {
+    const state = fixture('verifying', 4);
+    const oldStore = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    const current = await oldStore.beginAssessmentGenerationCycle(state.leadId, 4);
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_generation_cycles_v2
+      SET call_state = 'superseded', is_current = 0, superseded_by_processing_owner = 'older-owner',
+          supersede_nonce = 'old-aba-nonce' WHERE cycle_id = ?`).run(current.cycle_id);
+    state.db.sqlite.prepare(`INSERT INTO manual_news_assessment_generation_cycles_v2 (
+      cycle_id, lead_id, processing_owner, base_version, call_state, regeneration_consumed,
+      is_current, start_nonce, created_at, updated_at
+    ) VALUES ('cycle-current-replacement', ?, 'stale-cycle-owner', 4, 'initial_started', 0, 1,
+      'replacement-start-nonce', 2, 2)`).run(state.leadId);
+    state.db.sqlite.prepare(`UPDATE manual_news_leads
+      SET processing_lease_until = 10 WHERE id = ?`).run(state.leadId);
+
+    const [left, right] = await Promise.all([
+      recoverStaleManualNewsLeads(state.env, '2026-08-11', 100),
+      recoverStaleManualNewsLeads(state.env, '2026-08-11', 100),
+    ]);
+
+    expect(left.length + right.length).toBe(1);
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'stale_recovery'`).get(state.leadId)).toEqual({ count: 1 });
+    expect(state.db.sqlite.prepare(`SELECT mutation_nonce FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'assessment_generation_supersede'`).all(state.leadId))
+      .toEqual([{ mutation_nonce: expect.not.stringMatching(/^old-aba-nonce$/) }]);
+    expect(state.db.sqlite.prepare(`SELECT call_state, is_current, supersede_nonce
+      FROM manual_news_assessment_generation_cycles_v2 WHERE cycle_id = 'cycle-current-replacement'`).get())
+      .toMatchObject({
+        call_state: 'superseded', is_current: 0,
+        supersede_nonce: expect.stringMatching(/^assessment_generation_stale_supersede:/),
+      });
   });
 
   test('marks a still-owned lead failed after workflow retry exhaustion and audits the terminal version', async () => {

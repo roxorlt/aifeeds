@@ -129,15 +129,44 @@ export interface ManualNewsLeadAssessment {
   generated_claim_contract?: typeof MANUAL_LEAD_GENERATED_CLAIM_CONTRACT;
   source_fact_contract?: typeof MANUAL_LEAD_SOURCE_FACT_CONTRACT;
   editorial_projection_contract?: typeof MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT;
+  evidence_disposition_contract?: typeof MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT;
   source_facts?: ManualSourceAtomicFact[];
   editorial_projection?: ManualEditorialProjection;
+  evidence_dispositions?: ManualEvidenceDisposition[];
+  evidence_completeness?: ManualEvidenceCompletenessResult[];
 }
 
 export const MANUAL_LEAD_GENERATED_CLAIM_CONTRACT = 'structured_atomic_fact_v1' as const;
 export const MANUAL_LEAD_SOURCE_FACT_CONTRACT = 'source_atomic_facts_v2' as const;
 export const MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT = 'zh_editorial_projection_v2' as const;
+export const MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT = 'all_evidence_dispositions_v1' as const;
 
-export const MANUAL_LEAD_VERIFICATION_POLICY_VERSION = 'fact-evidence-projection-hmac-v8' as const;
+export const MANUAL_LEAD_VERIFICATION_POLICY_VERSION = 'fact-evidence-projection-hmac-v9' as const;
+
+export type ManualEvidenceDispositionKind =
+  | 'supports_core'
+  | 'contradicts_core'
+  | 'material_update'
+  | 'background'
+  | 'irrelevant';
+
+export type ManualEvidenceDispositionReason =
+  | 'unrelated_event'
+  | 'context_only'
+  | 'duplicate_context'
+  | 'insufficient_overlap';
+
+export interface ManualEvidenceDisposition {
+  evidence_id: string;
+  disposition: ManualEvidenceDispositionKind;
+  source_fact_ids: string[];
+  reason_code: ManualEvidenceDispositionReason | null;
+}
+
+export interface ManualEvidenceCompletenessResult {
+  evidence_id: string;
+  relation: 'supports' | 'conflicts' | 'updates' | 'uncertain' | 'unrelated';
+}
 
 export interface ManualNewsProcessedAssessment extends ManualNewsLeadAssessment {
   evidence_tier: 'official_primary' | 'original_plus_independent' | 'multi_source' | 'insufficient';
@@ -198,7 +227,7 @@ export interface ManualLeadPrimaryFactIdentity {
 }
 
 export interface ManualLeadFactVerification {
-  overall_verdict: 'supported' | 'unsupported';
+  overall_verdict: 'supported' | 'conflicted' | 'unsupported';
   primary_fact: ManualLeadPrimaryFactIdentity;
   fact_results: Array<{
     fact_id: string;
@@ -219,6 +248,15 @@ export interface ManualLeadFactVerification {
     supported: boolean;
     issue_code: 'none' | 'translation_mismatch' | 'fact_expansion' | 'fact_omission';
   }>;
+  disposition_results?: Array<{
+    evidence_id: string;
+    disposition: ManualEvidenceDispositionKind;
+    supported: boolean;
+    issue_code: 'none' | 'misclassified' | 'conflict_ignored' | 'update_ignored' | 'not_found';
+    source_quotes: Array<{ evidence_id: string; quote: string }>;
+    quote_relation: DeterministicEvidenceRelation;
+  }>;
+  completeness_results?: ManualEvidenceCompletenessResult[];
   prior_context: ManualLeadVerifiedPriorContext[];
 }
 
@@ -382,41 +420,72 @@ export function validateManualLeadAssessment(
   };
 }
 
-function generatedFactSlot(value: unknown, field: 'subject' | 'predicate' | 'object'): string {
-  if (typeof value !== 'string') throw new Error('invalid_claim_fact');
+type GeneratedFactScope = 'source' | 'editorial';
+
+interface GeneratedFactValidationContext {
+  scope: GeneratedFactScope;
+  base_path: string;
+}
+
+function generatedFactValidationError(
+  code: string,
+  context: GeneratedFactValidationContext | undefined,
+  field: 'subject' | 'subject_role' | 'predicate' | 'object' | 'assembled',
+): Error {
+  return new Error(context ? `${code}:${context.base_path}.${field}` : code);
+}
+
+function generatedFactSlot(
+  value: unknown,
+  field: 'subject' | 'predicate' | 'object',
+  context?: GeneratedFactValidationContext,
+): string {
+  if (typeof value !== 'string') {
+    throw generatedFactValidationError('invalid_claim_fact', context, field);
+  }
   const limit = field === 'subject' ? 120 : field === 'predicate' ? 100 : 300;
   const normalized = value.normalize('NFKC').replace(/\s+/gu, ' ').trim();
-  if (!normalized || Array.from(normalized).length > limit) throw new Error('invalid_claim_fact');
+  if (!normalized || Array.from(normalized).length > limit) {
+    throw generatedFactValidationError('invalid_claim_fact', context, field);
+  }
   const boundary = new RegExp(
     `(?:${ATOMIC_HARD_PUNCTUATION_SOURCE}|[，,、]|${ATOMIC_COORDINATION_SOURCE})`,
     'iu',
   );
-  if (boundary.test(normalized)) throw new Error('non_atomic_claim');
+  if (boundary.test(normalized)) {
+    throw generatedFactValidationError(
+      context ? `non_atomic_${context.scope}_${field}` : 'non_atomic_claim', context, field,
+    );
+  }
   if (field !== 'object'
     && /(?:因为|由于|所以|因此|从而|以便|尽管|虽然|如果|除非)|\b(?:because|therefore|so\s+that|in\s+order\s+to|although|unless|if)\b/iu.test(normalized)) {
-    throw new Error('non_atomic_claim');
+    throw generatedFactValidationError(
+      context ? `non_atomic_${context.scope}_${field}` : 'non_atomic_claim', context, field,
+    );
   }
   if (field === 'subject'
     && /(?:[&＋+]|\b(?:with|together\s+with|along\s+with)\b)/iu.test(normalized)) {
-    throw new Error('invalid_claim_subject');
+    throw generatedFactValidationError('invalid_claim_subject', context, field);
   }
   if (field === 'predicate'
     && /(?:由于|因为|出于|源于)|\b(?:due\s+to|because\s+of|over\s+.+\s+concerns?)\b/iu.test(normalized)) {
-    throw new Error('invalid_claim_predicate');
+    throw generatedFactValidationError('invalid_claim_predicate', context, field);
   }
   if (field === 'object') {
     if (isTemporalOnlyFactObject(normalized)) {
-      throw new Error('invalid_claim_object');
+      throw generatedFactValidationError('invalid_claim_object', context, field);
     }
     const reason = canonicalFactReason(normalized);
     if (reason.present && (!reason.canonical || !reason.residual)) {
-      throw new Error('invalid_claim_object');
+      throw generatedFactValidationError('invalid_claim_object', context, field);
     }
     const substantive = reason.residual
       .replace(/\b(?:yesterday|today|tomorrow|reportedly|allegedly|officially|possibly|maybe)\b/giu, '')
       .replace(/(?:昨天|今天|明天|据称|正式|可能|已经|已)/gu, '')
       .replace(/[\p{P}\p{S}\s\d]/gu, '');
-    if (Array.from(substantive).length < 2) throw new Error('invalid_claim_object');
+    if (Array.from(substantive).length < 2) {
+      throw generatedFactValidationError('invalid_claim_object', context, field);
+    }
   }
   return normalized;
 }
@@ -465,17 +534,28 @@ function generatedObjectActionOccurrences(object: string): FactActionOccurrence[
   });
 }
 
-function generatedAtomicFact(value: unknown): ManualAtomicFactSlots {
-  if (!isPlainObject(value)) throw new Error('invalid_claim_fact');
+function generatedAtomicFact(
+  value: unknown,
+  context?: GeneratedFactValidationContext,
+): ManualAtomicFactSlots {
+  if (!isPlainObject(value)) {
+    throw generatedFactValidationError('invalid_claim_fact', context, 'assembled');
+  }
   try {
     strictKeys(value, ['subject', 'subject_role', 'predicate', 'object']);
   } catch {
-    throw new Error('invalid_claim_fact');
+    throw generatedFactValidationError('invalid_claim_fact', context, 'assembled');
   }
-  const subject = generatedFactSlot(value.subject, 'subject');
-  const predicate = generatedFactSlot(value.predicate, 'predicate');
-  const object = generatedFactSlot(value.object, 'object');
-  const subjectRole = generatedSubjectRole(value.subject_role, subject);
+  const subject = generatedFactSlot(value.subject, 'subject', context);
+  const predicate = generatedFactSlot(value.predicate, 'predicate', context);
+  const object = generatedFactSlot(value.object, 'object', context);
+  let subjectRole: ManualFactSubjectRole;
+  try {
+    subjectRole = generatedSubjectRole(value.subject_role, subject);
+  } catch (error) {
+    const code = error instanceof Error ? error.message.split(':', 1)[0] : 'invalid_claim_subject_role';
+    throw generatedFactValidationError(code, context, 'subject_role');
+  }
   const predicateActions = factActionOccurrences(predicate);
   const objectActions = generatedObjectActionOccurrences(object);
   const controlled = predicateActions.length === 1 && objectActions.length === 1
@@ -483,10 +563,19 @@ function generatedAtomicFact(value: unknown): ManualAtomicFactSlots {
     && atomicActionChainReliable(joinGeneratedFactSlots(subject, predicate, object))
     && !unknownCompoundShape(joinGeneratedFactSlots(subject, predicate, object));
   if ((predicateActions.length !== 1 || objectActions.length > 0) && !controlled) {
-    throw new Error('invalid_claim_predicate');
+    if (objectActions.length > 0) {
+      const code = context ? `non_atomic_${context.scope}_object` : 'invalid_claim_predicate';
+      throw generatedFactValidationError(code, context, 'object');
+    }
+    const code = predicateActions.length > 1 && context
+      ? `non_atomic_${context.scope}_predicate`
+      : 'invalid_claim_predicate';
+    throw generatedFactValidationError(code, context, 'predicate');
   }
   if (factActionOccurrences(subject).length) {
-    throw new Error('invalid_claim_object');
+    throw generatedFactValidationError(
+      context ? `non_atomic_${context.scope}_subject` : 'invalid_claim_object', context, 'subject',
+    );
   }
   return { subject, subject_role: subjectRole, predicate, object };
 }
@@ -1452,6 +1541,7 @@ function validatedProjectionSentence(
   raw: unknown,
   expectedRef: string,
   sourceByRef: ReadonlyMap<string, ManualSourceAtomicFact>,
+  basePath: string,
 ): ManualEditorialProjectionSentence {
   if (!isPlainObject(raw)) throw new Error('invalid_editorial_projection');
   try {
@@ -1467,9 +1557,23 @@ function validatedProjectionSentence(
   }
   const source = sourceByRef.get(raw.source_fact_refs[0]);
   if (!source) throw new Error('invalid_editorial_projection_mapping');
-  const atomicFact = generatedAtomicFact(raw.atomic_fact);
+  const context: GeneratedFactValidationContext = { scope: 'editorial', base_path: `${basePath}.atomic_fact` };
+  const atomicFact = generatedAtomicFact(raw.atomic_fact, context);
   const textZh = joinGeneratedFactSlots(atomicFact.subject, atomicFact.predicate, atomicFact.object)
     .replace(/\.$/u, '。');
+  // The source-language splitter is intentionally conservative for Chinese
+  // control constructions. Run it for editorial output only when the object
+  // itself has an unresolved predicate shape that can become a second clause
+  // after slot assembly; ordinary translated control objects remain governed
+  // by the stricter bilingual slot comparison below.
+  const unresolvedSecondaryEnglishClause = /(?:^|\s)(?:[A-Z][A-Za-z0-9._+-]*(?:\s+[A-Z][A-Za-z0-9._+-]*){0,3})\s+[a-z][a-z-]*(?:s|ed|ing)\b/u
+    .test(atomicFact.object);
+  if (unresolvedSecondaryEnglishClause) {
+    const assembled = splitAtomicFactClauses(textZh);
+    if (!assembled.reliable || assembled.clauses.length !== 1) {
+      throw generatedFactValidationError('non_atomic_editorial_assembled', context, 'assembled');
+    }
+  }
   const languageError = projectionLanguageError(atomicFact);
   if ((textZh.match(/\p{Script=Han}/gu) || []).length < 4 || languageError) {
     throw new Error(languageError || 'invalid_editorial_projection_language');
@@ -1484,6 +1588,704 @@ function validatedProjectionSentence(
   };
 }
 
+type DeterministicEvidenceRelation = 'supports' | 'conflicts' | 'updates' | 'uncertain' | 'unrelated';
+
+interface AtomicEvidenceClause {
+  text: string;
+  reliable: boolean;
+  linked_addition: boolean;
+}
+
+const EVIDENCE_RELATION_LINK_SOURCE = '(?:但|尽管|虽然|不过|然而|以及|而且)|\\b(?:and|but|while|whereas|alongside|as\\s+well\\s+as|despite|notwithstanding|although|though|not\\s+to\\s+mention)\\b|(?<![\\p{L}\\p{N}_+.-])plus(?![\\p{L}\\p{N}_+.-])';
+
+function relationAdditionHasSemanticContent(value: string): boolean {
+  const normalized = normalizedRelationControllerText(value);
+  if (!normalized) return false;
+  if (factActionOccurrences(normalized).length
+    || EVIDENCE_RELATION_DENIAL_SIGNAL.test(normalized)
+    || EVIDENCE_RELATION_STATUS_SIGNAL.test(normalized)
+    || EVIDENCE_RELATION_SCOPE_SIGNAL.test(normalized)) return true;
+  const targetMask = new Array<boolean>(normalized.length).fill(false);
+  const productTargets = productTargetTuples(normalized);
+  for (const target of productTargets) {
+    for (let index = target.start; index < target.end; index += 1) targetMask[index] = true;
+  }
+  const targetResidue = normalized.split('').map((character, index) =>
+    targetMask[index] ? ' ' : character).join('')
+    .replace(/\b(?:the|a|an|its|their|of|with|to|for)\b/giu, ' ')
+    .replace(/[\p{P}\p{S}\s]+/gu, '');
+  if (productTargets.length && !targetResidue) return false;
+  let residue = normalized;
+  for (const aliases of [
+    ...Object.values(AUTHORITY_ENTITY_REGISTRY),
+    ...Object.values(ORGANIZATION_ENTITY_REGISTRY),
+    ...Object.values(PRODUCT_ENTITY_REGISTRY),
+  ]) {
+    for (const alias of aliases) residue = residue.replace(semanticAliasPattern(alias), ' ');
+  }
+  const semanticResidue = residue.replace(/\b(?:the|a|an|its|their|of|with|to|for)\b/giu, ' ')
+    .replace(/[\p{P}\p{S}\s]+/gu, '');
+  return semanticResidue.length > 0;
+}
+
+function evidenceRelationUnitClauses(value: string): AtomicEvidenceClause[] {
+  const normalized = normalizedRelationControllerText(value);
+  if (!normalized) return [];
+  const linkedParts = normalized
+    .split(new RegExp(EVIDENCE_RELATION_LINK_SOURCE, 'giu'))
+    .map((part) => normalizedSourceText(part))
+    .filter(Boolean);
+  const hasLinkedAddition = linkedParts.length > 1
+    && Boolean(leadingControllerIdentity(linkedParts[0]).identity)
+    && factActionOccurrences(linkedParts[0]).length > 0
+    && linkedParts.slice(1).some(relationAdditionHasSemanticContent);
+  const units = hasLinkedAddition ? linkedParts : [normalized];
+  const clauses: AtomicEvidenceClause[] = [];
+  for (let unitIndex = 0; unitIndex < units.length; unitIndex += 1) {
+    const parsed = splitAtomicFactClauses(units[unitIndex]);
+    const parts = parsed.clauses.length ? parsed.clauses : [units[unitIndex]];
+    for (const part of parts) {
+      const text = normalizedSourceText(part);
+      if (!text) continue;
+      clauses.push({
+        text,
+        reliable: parsed.reliable && !parsed.has_unknown_compound,
+        linked_addition: hasLinkedAddition && unitIndex > 0,
+      });
+    }
+  }
+  return clauses;
+}
+
+function atomicEvidenceClauses(evidence: ManualNewsEvidence): AtomicEvidenceClause[] {
+  const clauses = new Map<string, AtomicEvidenceClause>();
+  for (const value of [evidence.title, evidence.excerpt, ...evidence.claims_supported]) {
+    for (const clause of evidenceRelationUnitClauses(value)) {
+      const existing = clauses.get(clause.text);
+      clauses.set(clause.text, {
+        text: clause.text,
+        reliable: Boolean(existing?.reliable || clause.reliable),
+        linked_addition: Boolean(existing?.linked_addition || clause.linked_addition),
+      });
+    }
+  }
+  return [...clauses.values()];
+}
+
+function isQuestionFramedEvidenceClause(value: string): boolean {
+  return /[?？]\s*$/u.test(value)
+    || /^(?:why|how|what|whether|is|are|was|were|could|would|can|did)\b/iu.test(value.trim())
+    || /^(?:为何|为什么|是否|如何|怎么|难道)/u.test(value.trim());
+}
+
+interface LeadingControllerIdentity {
+  identity: string | null;
+  role_linked: boolean;
+  ambiguous: boolean;
+}
+
+interface RegisteredEntityOccurrence {
+  identity: string;
+  start: number;
+  end: number;
+}
+
+const ENGLISH_CONTROLLER_ROLE_MODIFIER_SOURCE = '(?:strategic|long[- ]?time|longstanding|enterprise|important|major|key)';
+const ENGLISH_CONTROLLER_ROLE_SOURCE = '(?:partner|investor|customer|supplier|affiliate|vendor|client|distributor|reseller)';
+const CHINESE_CONTROLLER_ROLE_MODIFIER_SOURCE = '(?:战略|长期|长年|企业|重要|主要|关键)';
+const CHINESE_CONTROLLER_ROLE_SOURCE = '(?:合作伙伴|投资方|投资者|客户|供应商|关联方|附属机构|经销商|代理商)';
+
+function normalizedRelationControllerText(value: string): string {
+  return normalizedSourceText(value).normalize('NFKC')
+    .replace(/[‘’ʼʻ＇`´]/gu, "'");
+}
+
+function registeredEntityOccurrences(
+  value: string,
+  registry: Readonly<Record<string, readonly string[]>>,
+): RegisteredEntityOccurrence[] {
+  const candidates = Object.entries(registry).flatMap(([identity, aliases]) =>
+    aliases.flatMap((alias) => {
+      const normalizedAlias = normalizedRelationControllerText(alias);
+      const escaped = normalizedAlias.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+        .replace(/\s+/gu, '\\s+');
+      const pattern = /[a-z0-9]/iu.test(normalizedAlias)
+        ? new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`, 'giu')
+        : new RegExp(escaped, 'gu');
+      return [...value.matchAll(pattern)].map((match) => ({
+        identity,
+        start: match.index,
+        end: match.index + match[0].length,
+      }));
+    }));
+  const selected: RegisteredEntityOccurrence[] = [];
+  for (const candidate of candidates.sort((left, right) =>
+    left.start - right.start || (right.end - right.start) - (left.end - left.start))) {
+    if (selected.some((existing) => candidate.start < existing.end && candidate.end > existing.start)) {
+      continue;
+    }
+    selected.push(candidate);
+  }
+  return selected;
+}
+
+function controllerPredicateIndexAfter(value: string, offset: number): number | null {
+  const indices = factActionOccurrences(value)
+    .filter((action) => action.index >= offset)
+    .map((action) => action.index);
+  for (const pattern of [
+    EVIDENCE_RELATION_STATUS_SIGNAL,
+    EVIDENCE_RELATION_DENIAL_SIGNAL,
+    EVIDENCE_RELATION_SCOPE_SIGNAL,
+  ]) {
+    const flags = [...new Set(`${pattern.flags}g`.split(''))].join('');
+    const matcher = new RegExp(pattern.source, flags);
+    matcher.lastIndex = offset;
+    const match = matcher.exec(value);
+    if (match) indices.push(match.index);
+  }
+  return indices.length ? Math.min(...indices) : null;
+}
+
+function controllerPredicateAfter(value: string, offset: number): boolean {
+  return controllerPredicateIndexAfter(value, offset) !== null;
+}
+
+function hasStructuredControlBeforeOrganization(
+  value: string,
+  firstEnd: number,
+  secondStart: number,
+): boolean {
+  return atomicActionChainReliable(value) && factActionOccurrences(value).some((action) =>
+    action.index >= firstEnd
+    && action.end <= secondStart
+    && STRICT_CONTROL_CHAIN_ROOTS.has(action.action));
+}
+
+function leadingRegisteredEntityMatch(
+  value: string,
+  registry: Readonly<Record<string, readonly string[]>>,
+): { identity: string; length: number } | null {
+  const entries = Object.entries(registry)
+    .flatMap(([identity, aliases]) => aliases.map((alias) => ({ identity, alias })))
+    .sort((left, right) => right.alias.length - left.alias.length);
+  for (const entry of entries) {
+    const normalizedAlias = normalizedRelationControllerText(entry.alias);
+    const escaped = normalizedAlias.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&').replace(/\s+/gu, '\\s+');
+    const latin = /[a-z0-9]/iu.test(normalizedAlias);
+    const pattern = latin
+      ? new RegExp(`^${escaped}(?=$|[^a-z0-9])`, 'iu')
+      : new RegExp(`^${escaped}`, 'u');
+    const match = pattern.exec(value);
+    if (match) return { identity: entry.identity, length: match[0].length };
+  }
+  return null;
+}
+
+function bridgedRoleOrganizationMatch(value: string): {
+  identity: string;
+  start: number;
+  end: number;
+} | null {
+  let offset = 0;
+  let bridgeParts = 0;
+  while (offset < value.length && offset <= 48 && bridgeParts < 8) {
+    const organization = leadingRegisteredEntityMatch(
+      value.slice(offset), ORGANIZATION_ENTITY_REGISTRY,
+    );
+    if (organization) {
+      return {
+        identity: organization.identity,
+        start: offset,
+        end: offset + organization.length,
+      };
+    }
+    const bridge = /^(?:\s+|[\p{Ps}\p{Pe},，:：;；—–―-]+|\b(?:company|corporation|firm|is|was|are|were|the\s+latter)\b|(?:公司|企业|是|为|后者))/iu
+      .exec(value.slice(offset));
+    if (!bridge) return null;
+    offset += bridge[0].length;
+    bridgeParts += 1;
+  }
+  return null;
+}
+
+function leadingControllerIdentity(value: string): LeadingControllerIdentity {
+  const normalized = normalizedRelationControllerText(value).replace(/^[\p{P}\p{S}]+/gu, '');
+  const first = leadingRegisteredEntityMatch(normalized, {
+    ...AUTHORITY_ENTITY_REGISTRY,
+    ...ORGANIZATION_ENTITY_REGISTRY,
+    ...PRODUCT_ENTITY_REGISTRY,
+  });
+  if (!first) return { identity: null, role_linked: false, ambiguous: false };
+  const remainder = normalized.slice(first.length);
+  const organizations = registeredEntityOccurrences(normalized, ORGANIZATION_ENTITY_REGISTRY);
+  const firstOrganization = organizations.find((occurrence) => occurrence.start === 0);
+  const role = new RegExp(
+    `^(?:\\s*(?:'s\\s+)?(?:${ENGLISH_CONTROLLER_ROLE_MODIFIER_SOURCE}\\s+){0,3}${ENGLISH_CONTROLLER_ROLE_SOURCE}\\s+|\\s*的?(?:${CHINESE_CONTROLLER_ROLE_MODIFIER_SOURCE}){0,3}${CHINESE_CONTROLLER_ROLE_SOURCE}\\s*)`,
+    'iu',
+  ).exec(remainder);
+  if (role) {
+    const second = bridgedRoleOrganizationMatch(remainder.slice(role[0].length));
+    if (second && firstOrganization) {
+      const secondStart = first.length + role[0].length + second.start;
+      const secondEnd = first.length + role[0].length + second.end;
+      const predicateIndex = controllerPredicateIndexAfter(normalized, secondEnd);
+      const prePredicateOrganizations = predicateIndex === null ? [] : organizations.filter((occurrence) =>
+        occurrence.start >= firstOrganization.end && occurrence.end <= predicateIndex);
+      const controllerIdentities = new Set(prePredicateOrganizations.map((occurrence) => occurrence.identity));
+      if (controllerIdentities.size === 1 && controllerIdentities.has(second.identity)) {
+        return { identity: second.identity, role_linked: true, ambiguous: false };
+      }
+      if (predicateIndex !== null && secondStart < predicateIndex) {
+        return { identity: null, role_linked: true, ambiguous: true };
+      }
+    }
+  }
+
+  const secondOrganization = firstOrganization && organizations.find((occurrence) =>
+    occurrence.start >= firstOrganization.end && occurrence.identity !== firstOrganization.identity);
+  if (firstOrganization && secondOrganization
+    && controllerPredicateAfter(normalized, secondOrganization.end)
+    && !hasStructuredControlBeforeOrganization(
+      normalized, firstOrganization.end, secondOrganization.start,
+    )) {
+    return { identity: null, role_linked: false, ambiguous: true };
+  }
+  return { identity: first.identity, role_linked: false, ambiguous: false };
+}
+
+function sourceFactSubjectMatchesClause(fact: ManualSourceAtomicFact, clause: string): boolean {
+  const expected = canonicalSubjectIdentity(fact.atomic_fact.subject)
+    || canonicalEntityRoleKey(fact.atomic_fact.subject);
+  if (!expected) return false;
+  const controller = leadingControllerIdentity(clause);
+  if (controller.ambiguous) return false;
+  if (controller.role_linked) return controller.identity === expected;
+  const structuredMatch = structuredFactUnits(clause).some((unit) => {
+    if (!unit.subject) return false;
+    return (canonicalSubjectIdentity(unit.subject) || canonicalEntityRoleKey(unit.subject)) === expected;
+  });
+  return structuredMatch || controller.identity === expected;
+}
+
+function sameStructuredEventTarget(fact: ManualSourceAtomicFact, clause: string): boolean {
+  let source: ManualBilingualSemanticSlots;
+  try {
+    source = bilingualSemanticSlots(fact.atomic_fact);
+  } catch {
+    return false;
+  }
+  const productTargets = productTargetTuples(clause).map((target) => ({
+    entity: target.entity, components: target.components,
+  }));
+  const participantRoles = bilingualParticipantRoles(clause);
+  const objectRelations = canonicalObjectRelations(clause);
+  const qualifiers = bilingualTargetQualifiers(clause);
+  const versions = bilingualFactVersions(clause);
+  const regions = bilingualFactRegions(clause);
+  const requiredArrays: Array<[readonly unknown[], readonly unknown[]]> = [
+    [source.product_targets, productTargets],
+    [source.participant_roles, participantRoles],
+    [source.object_relations, objectRelations],
+    [source.target_qualifiers, qualifiers],
+    [source.versions, versions],
+    [source.regions, regions],
+    [source.dates, normalizedFactDates(clause).sort()],
+    [source.instants, normalizedFactInstants(clause).sort()],
+    [source.relative_times, [...new Set(relativeFactTimeSpans(clause).map((span) => span.value))].sort()],
+  ];
+  if (requiredArrays.some(([expected, actual]) => expected.length > 0
+    && canonicalJson(expected) !== canonicalJson(actual))) return false;
+  if (source.participant_quantifier !== null
+    && source.participant_quantifier !== bilingualParticipantQuantifier(clause)) return false;
+  if (source.scope !== null && source.scope !== dominantFactScope(clause)) return false;
+  if (source.object_polarity !== bilingualObjectPolarity(clause)) return false;
+  if (canonicalJson(source.object_modality) !== canonicalJson(bilingualModalitySlots(clause, null))) return false;
+  if (source.reason !== null && source.reason !== canonicalFactReason(clause).canonical) return false;
+  const sourceAnchors = highConfidenceLeadAnchors(fact.atomic_fact.object);
+  return sourceAnchors.every((anchor) => exactStructuredAnchorPresent(anchor, clause));
+}
+
+function sameCoreProductAndSubject(fact: ManualSourceAtomicFact, clause: string): boolean {
+  if (!sourceFactSubjectMatchesClause(fact, clause)) return false;
+  const expectedEntities = registeredEntityIdentities(fact.atomic_fact.object);
+  const actualEntities = registeredEntityIdentities(clause);
+  if (expectedEntities.size > 0
+    && [...expectedEntities].every((entity) => actualEntities.has(entity))) {
+    let source: ManualBilingualSemanticSlots;
+    try {
+      source = bilingualSemanticSlots(fact.atomic_fact);
+    } catch {
+      return false;
+    }
+    return canonicalJson(source.target_qualifiers) === canonicalJson(bilingualTargetQualifiers(clause))
+      && canonicalJson(source.versions) === canonicalJson(bilingualFactVersions(clause));
+  }
+  const anchors = highConfidenceLeadAnchors(fact.atomic_fact.object);
+  return anchors.length > 0 && anchors.every((anchor) => exactStructuredAnchorPresent(anchor, clause));
+}
+
+function mentionsCoreSubjectAndProduct(fact: ManualSourceAtomicFact, clause: string): boolean {
+  const expectedSubject = canonicalSubjectIdentity(fact.atomic_fact.subject)
+    || canonicalEntityRoleKey(fact.atomic_fact.subject);
+  if (!expectedSubject || !registeredEntityIdentities(clause).has(expectedSubject)) return false;
+  const expectedTargets = registeredEntityIdentities(fact.atomic_fact.object);
+  const actualTargets = registeredEntityIdentities(clause);
+  return expectedTargets.size > 0 && [...expectedTargets].every((target) => actualTargets.has(target));
+}
+
+interface DirectDenialClause {
+  controller: string;
+  embedded: string;
+  nominal_report: boolean;
+}
+
+function directDenialEmbeddedClause(value: string): DirectDenialClause | null {
+  if (isQuestionFramedEvidenceClause(value)) return null;
+  const normalized = normalizedSourceText(value);
+  const callFalse = /^(.*?)\bcall(?:s|ed)?\s+(?:the\s+)?reports?\s+(?:(that)\s+|of\s+)?(.+?)\s+(?:false|misleading)[.!]?$/iu.exec(normalized);
+  if (callFalse) {
+    const controller = callFalse[1].trim();
+    const embedded = callFalse[3].trim()
+      .replace(/^(?:the\s+)?(?:reports?|claims?)\s+(?:that\s+)?/iu, '')
+      .replace(/^(?:it|the company)\b/iu, controller);
+    return { controller, embedded, nominal_report: !callFalse[2] };
+  }
+  const english = /^(.*?)\b(?:den(?:y|ies|ied)|refut(?:e|es|ed)|disput(?:e|es|ed)|reject(?:s|ed)?)\b\s*(?:the\s+)?(?:reports?|claims?)?\s*(?:that\s+)?(.+?)(?:\s+(?:false|misleading))?[.!]?$/iu.exec(normalized);
+  if (english) {
+    const controller = english[1].trim();
+    const embedded = english[2].trim()
+      .replace(/^(?:the\s+)?(?:reports?|claims?)\s+(?:that\s+)?/iu, '')
+      .replace(/^(?:it|the company)\b/iu, controller);
+    return { controller, embedded, nominal_report: false };
+  }
+  const chinese = /^(.*?)(?:否认|驳斥|反驳|质疑|拒绝承认|称(?:相关)?(?:报道|消息|传闻)(?:为|是)?(?:虚假|不实|错误|误导))\s*(?:有关|关于)?(.+?)(?:的)?(?:报道|消息|传闻)?(?:不实|错误|虚假|误导)?[。！]?$/u.exec(normalized);
+  return chinese
+    ? { controller: chinese[1].trim(), embedded: chinese[2].trim(), nominal_report: false }
+    : null;
+}
+
+function denialTargetsCoreEvent(fact: ManualSourceAtomicFact, denial: DirectDenialClause): boolean {
+  const expectedSubject = canonicalSubjectIdentity(fact.atomic_fact.subject)
+    || canonicalEntityRoleKey(fact.atomic_fact.subject);
+  const controller = canonicalSubjectIdentity(denial.controller)
+    || canonicalEntityRoleKey(denial.controller);
+  if (!expectedSubject || controller !== expectedSubject) return false;
+  const reconstructed = `${fact.atomic_fact.subject} ${denial.embedded}`.trim();
+  if (structurallyMatchesFactIgnoringAssertionStatus(fact, reconstructed)) return true;
+  const expectedActions = factActionOccurrences(fact.atomic_fact.predicate);
+  const actualActions = factActionOccurrences(denial.embedded);
+  if (expectedActions.length !== 1
+    || !actualActions.some((action) => action.action === expectedActions[0].action)
+    || !sameCoreProductAndSubject(fact, reconstructed)) return false;
+  const expectedParticipants = bilingualParticipantRoles(fact.atomic_fact.object);
+  const actualParticipants = bilingualParticipantRoles(denial.embedded);
+  if (actualParticipants.length > 0) {
+    return canonicalJson(expectedParticipants) === canonicalJson(actualParticipants);
+  }
+  return denial.nominal_report && expectedActions[0].action === 'ban';
+}
+
+function structurallyMatchesFactIgnoringAssertionStatus(
+  fact: ManualSourceAtomicFact,
+  clause: string,
+): boolean {
+  const expectedActions = factActionOccurrences(fact.atomic_fact.predicate);
+  const actualActions = factActionOccurrences(clause);
+  if (expectedActions.length !== 1
+    || !actualActions.some((actual) => actual.action === expectedActions[0].action)) return false;
+  return sourceFactSubjectMatchesClause(fact, clause)
+    && sameStructuredEventTarget(fact, clause);
+}
+
+const EVIDENCE_RELATION_SCOPE_SIGNAL = /(?:仅限|只适用|仅适用|部分适用|范围缩小|限于)|\b(?:only applies|limited to|restricted to|scope was narrowed)\b/iu;
+const EVIDENCE_RELATION_STATUS_SIGNAL = /(?:恢复|取消|撤回|收回|撤销|反转|改为|随后更新|后来更新|状态变化)|\b(?:revers(?:e|es|ed)|updated|resum(?:e|es|ed)|withdrawn|withdrew|withdraws?|retract(?:s|ed)?|rescind(?:s|ed)?|cancelled|canceled|subsequently changed)\b/iu;
+const EVIDENCE_RELATION_DENIAL_SIGNAL = /(?:否认|驳斥|反驳|质疑|拒绝承认|不实|虚假|误导)|\b(?:denial|den(?:y|ies|ied|ying)|refut(?:e|es|ed|ing)|disput(?:e|es|ed|ing)|reject(?:s|ed|ing)?\s+(?:the\s+)?reports?|call(?:s|ed|ing)?\s+(?:the\s+)?reports?\s+.*\s+(?:false|misleading))\b/iu;
+
+function relationClauseHasUnexpectedSignal(
+  fact: ManualSourceAtomicFact,
+  clause: string,
+): boolean {
+  const pairs: ReadonlyArray<readonly [RegExp, RegExp]> = [
+    [EVIDENCE_RELATION_SCOPE_SIGNAL, EVIDENCE_RELATION_SCOPE_SIGNAL],
+    [EVIDENCE_RELATION_STATUS_SIGNAL, EVIDENCE_RELATION_STATUS_SIGNAL],
+    [EVIDENCE_RELATION_DENIAL_SIGNAL, EVIDENCE_RELATION_DENIAL_SIGNAL],
+  ];
+  return pairs.some(([clausePattern, factPattern]) =>
+    clausePattern.test(clause) && !factPattern.test(fact.text));
+}
+
+function relationSupportFallbackSafe(
+  fact: ManualSourceAtomicFact,
+  clause: AtomicEvidenceClause,
+): boolean {
+  if (!clause.reliable || relationClauseHasUnexpectedSignal(fact, clause.text)) return false;
+  const parsed = splitAtomicFactClauses(clause.text);
+  if (!parsed.reliable || parsed.has_unknown_compound || parsed.clauses.length !== 1) return false;
+  const expectedPredicateActions = factActionOccurrences(fact.atomic_fact.predicate);
+  const expectedActions = factActionOccurrences(fact.text);
+  const actualActions = factActionOccurrences(clause.text);
+  return expectedPredicateActions.length === 1
+    && canonicalJson(actualActions.map((action) => action.action))
+      === canonicalJson(expectedActions.map((action) => action.action))
+    && structuredFactUnitVerificationError(fact.text, clause.text) === null;
+}
+
+function evidenceClauseRelation(
+  clause: AtomicEvidenceClause,
+  evidence: Pick<ManualNewsEvidence, 'source_type' | 'reliable' | 'published_at'>,
+  sourceFacts: readonly ManualSourceAtomicFact[],
+  evidenceById: ReadonlyMap<string, ManualNewsEvidence>,
+): DeterministicEvidenceRelation {
+  if (leadingControllerIdentity(clause.text).ambiguous) return 'uncertain';
+  let relatedButUnresolved = false;
+  const trustedRelationSource = evidence.reliable && evidence.source_type !== 'other';
+  for (const fact of sourceFacts) {
+    const subjectMatches = sourceFactSubjectMatchesClause(fact, clause.text);
+    const targetMatches = subjectMatches && sameStructuredEventTarget(fact, clause.text);
+    const productTargetMatches = sameCoreProductAndSubject(fact, clause.text);
+    const questionFramed = isQuestionFramedEvidenceClause(clause.text);
+    if (questionFramed) {
+      if (targetMatches || productTargetMatches || mentionsCoreSubjectAndProduct(fact, clause.text)) {
+        relatedButUnresolved = true;
+      }
+      continue;
+    }
+    const exactError = structuredFactUnitVerificationError(fact.text, clause.text);
+    if (exactError === null) {
+      if (!relationSupportFallbackSafe(fact, clause)) {
+        relatedButUnresolved = true;
+        continue;
+      }
+      return evidence.reliable ? 'supports' : 'uncertain';
+    }
+    if (targetMatches && exactError === 'fact_verification_polarity_mismatch') {
+      return trustedRelationSource ? 'conflicts' : 'uncertain';
+    }
+    const denial = directDenialEmbeddedClause(clause.text);
+    if (denial && denialTargetsCoreEvent(fact, denial)) {
+      return trustedRelationSource ? 'conflicts' : 'uncertain';
+    }
+    const scopeChange = EVIDENCE_RELATION_SCOPE_SIGNAL.test(clause.text);
+    if ((targetMatches || productTargetMatches) && scopeChange) {
+      return trustedRelationSource ? 'conflicts' : 'uncertain';
+    }
+    const statusChange = EVIDENCE_RELATION_STATUS_SIGNAL.test(clause.text);
+    if ((targetMatches || productTargetMatches) && statusChange) {
+      if (!trustedRelationSource) return 'uncertain';
+      const citedTimes = sourceFacts.flatMap((sourceFact) => sourceFact.evidence_ids)
+        .map((id) => evidenceById.get(id)?.published_at || '')
+        .map((value) => Date.parse(value))
+        .filter(Number.isFinite);
+      const currentTime = Date.parse(evidence.published_at || '');
+      if (Number.isFinite(currentTime) && (!citedTimes.length || currentTime > Math.max(...citedTimes))) {
+        return 'updates';
+      }
+      return 'conflicts';
+    }
+    const unresolvedDenial = /(?:未(?:能)?(?:确认|证实|验证)|无法(?:确认|证实|验证)|拒绝(?:确认|证实|验证)|\b(?:would|could|did|can)\s+not\s+(?:confirm|verify|validate|substantiate)|\b(?:cannot|can't|won't)\s+(?:confirm|verify|validate|substantiate))/iu.test(clause.text);
+    if ((targetMatches || productTargetMatches) && unresolvedDenial) {
+      return 'uncertain';
+    }
+    const expectedActions = factActionOccurrences(fact.atomic_fact.predicate);
+    const actualActions = factActionOccurrences(clause.text);
+    if (productTargetMatches && expectedActions.length === 1
+      && actualActions.length === 1
+      && actualActions[0].action === expectedActions[0].action
+      && evidence.reliable
+      && relationSupportFallbackSafe(fact, clause)) {
+      return 'supports';
+    }
+    if (!clause.reliable) {
+      if (targetMatches || productTargetMatches) relatedButUnresolved = true;
+      continue;
+    }
+    if (targetMatches || productTargetMatches || (subjectMatches && highConfidenceLeadAnchors(fact.atomic_fact.object)
+      .some((anchor) => exactStructuredAnchorPresent(anchor, clause.text)))) {
+      relatedButUnresolved = true;
+    }
+  }
+  if (clause.linked_addition) return 'uncertain';
+  return relatedButUnresolved ? 'uncertain' : 'unrelated';
+}
+
+function aggregateEvidenceRelations(
+  relations: readonly DeterministicEvidenceRelation[],
+): DeterministicEvidenceRelation {
+  if (relations.includes('updates')) return 'updates';
+  if (relations.includes('conflicts')) return 'conflicts';
+  if (relations.includes('uncertain')) return 'uncertain';
+  if (relations.includes('supports')) return 'supports';
+  return 'unrelated';
+}
+
+function isRedundantContextExpansion(
+  supportingClause: string,
+  candidateClause: string,
+): boolean {
+  const support = normalizedSourceText(supportingClause).replace(/[.!。！]+$/u, '');
+  const candidate = normalizedSourceText(candidateClause).replace(/[.!。！]+$/u, '');
+  if (!support || !candidate.startsWith(support)) return false;
+  const residual = candidate.slice(support.length).trim();
+  if (!/^(?:in|under|within|as\s+part\s+of)\b/iu.test(residual)) return false;
+  if (new RegExp(EVIDENCE_RELATION_LINK_SOURCE, 'iu').test(residual)
+    || EVIDENCE_RELATION_DENIAL_SIGNAL.test(residual)
+    || EVIDENCE_RELATION_STATUS_SIGNAL.test(residual)
+    || EVIDENCE_RELATION_SCOPE_SIGNAL.test(residual)
+    || factActionOccurrences(residual).length
+    || normalizedFactDates(residual).length
+    || normalizedFactInstants(residual).length
+    || relativeFactTimeSpans(residual).length) return false;
+  const supportEntities = registeredEntityIdentities(support);
+  return [...registeredEntityIdentities(residual)].every((entity) => supportEntities.has(entity));
+}
+
+function deterministicEvidenceRelation(
+  evidence: ManualNewsEvidence,
+  sourceFacts: readonly ManualSourceAtomicFact[],
+  evidenceById: ReadonlyMap<string, ManualNewsEvidence>,
+): DeterministicEvidenceRelation {
+  const clauses = atomicEvidenceClauses(evidence);
+  if (!clauses.length) return 'uncertain';
+  const relations = clauses.map((clause) =>
+    evidenceClauseRelation(clause, evidence, sourceFacts, evidenceById));
+  const supportingClauses = clauses.filter((_, index) => relations[index] === 'supports');
+  const effectiveRelations = relations.filter((relation, index) => relation !== 'uncertain'
+    || !supportingClauses.some((supporting) =>
+      isRedundantContextExpansion(supporting.text, clauses[index].text)));
+  return aggregateEvidenceRelations(effectiveRelations);
+}
+
+function deterministicDispositionQuoteRelations(
+  quote: string,
+  evidence: ManualNewsEvidence,
+  sourceFacts: readonly ManualSourceAtomicFact[],
+  evidenceById: ReadonlyMap<string, ManualNewsEvidence>,
+): DeterministicEvidenceRelation[] {
+  const clauses = evidenceRelationUnitClauses(quote);
+  if (!clauses.length) return ['uncertain'];
+  return clauses.map((clause) => evidenceClauseRelation(clause, evidence, sourceFacts, evidenceById));
+}
+
+function validateGeneratedEvidenceDispositions(
+  raw: unknown,
+  evidence: readonly ManualNewsEvidence[],
+  sourceByRef: ReadonlyMap<string, ManualSourceAtomicFact>,
+  sourceFacts: readonly ManualSourceAtomicFact[],
+  recommendation: unknown,
+  uncertainties: unknown,
+): {
+  dispositions: ManualEvidenceDisposition[];
+  completeness: ManualEvidenceCompletenessResult[];
+} {
+  if (!Array.isArray(raw)) {
+    throw new Error('invalid_evidence_dispositions');
+  }
+  if (raw.length !== evidence.length) throw new Error('invalid_evidence_disposition_coverage');
+  const allowedEvidenceIds = new Set(evidence.map((item) => item.id));
+  const seenEvidenceIds = new Set<string>();
+  const allowedKinds = new Set<ManualEvidenceDispositionKind>([
+    'supports_core', 'contradicts_core', 'material_update', 'background', 'irrelevant',
+  ]);
+  const allowedReasons = new Set<ManualEvidenceDispositionReason>([
+    'unrelated_event', 'context_only', 'duplicate_context', 'insufficient_overlap',
+  ]);
+  const parsed = raw.map((item) => {
+    if (!isPlainObject(item)) throw new Error('invalid_evidence_disposition');
+    try {
+      strictKeys(item, ['evidence_id', 'disposition', 'source_fact_refs', 'reason_code']);
+    } catch {
+      throw new Error('invalid_evidence_disposition');
+    }
+    if (typeof item.evidence_id !== 'string' || !allowedEvidenceIds.has(item.evidence_id)
+      || seenEvidenceIds.has(item.evidence_id)
+      || typeof item.disposition !== 'string'
+      || !allowedKinds.has(item.disposition as ManualEvidenceDispositionKind)
+      || !Array.isArray(item.source_fact_refs)
+      || item.source_fact_refs.some((ref) => typeof ref !== 'string' || !sourceByRef.has(ref))
+      || new Set(item.source_fact_refs).size !== item.source_fact_refs.length) {
+      throw new Error('invalid_evidence_disposition_coverage');
+    }
+    seenEvidenceIds.add(item.evidence_id);
+    const disposition = item.disposition as ManualEvidenceDispositionKind;
+    const factIds = (item.source_fact_refs as string[]).map((ref) => sourceByRef.get(ref)!.fact_id);
+    const reasonCode = item.reason_code;
+    if (['supports_core', 'contradicts_core', 'material_update'].includes(disposition)) {
+      if (!factIds.length || reasonCode !== null) throw new Error('invalid_evidence_disposition');
+    } else if (factIds.length || typeof reasonCode !== 'string'
+      || !allowedReasons.has(reasonCode as ManualEvidenceDispositionReason)) {
+      throw new Error('invalid_evidence_disposition');
+    }
+    return {
+      evidence_id: item.evidence_id,
+      disposition,
+      source_fact_ids: factIds,
+      reason_code: reasonCode as ManualEvidenceDispositionReason | null,
+    };
+  });
+  if (seenEvidenceIds.size !== evidence.length) throw new Error('invalid_evidence_disposition_coverage');
+  const byEvidenceId = new Map(evidence.map((item) => [item.id, item]));
+  const parsedById = new Map(parsed.map((item) => [item.evidence_id, item]));
+  const completeness: ManualEvidenceCompletenessResult[] = [];
+  let hasConflict = false;
+  for (const evidenceItem of evidence) {
+    const disposition = parsedById.get(evidenceItem.id)!;
+    const relation = deterministicEvidenceRelation(evidenceItem, sourceFacts, byEvidenceId);
+    completeness.push({ evidence_id: evidenceItem.id, relation });
+    const referencedFacts = sourceFacts.filter((fact) => disposition.source_fact_ids.includes(fact.fact_id));
+    const referencedRelation = referencedFacts.length
+      ? deterministicEvidenceRelation(evidenceItem, referencedFacts, byEvidenceId)
+      : null;
+    if (relation === 'supports' && disposition.disposition !== 'supports_core') {
+      throw new Error('evidence_disposition_related_uncovered');
+    }
+    if (relation === 'conflicts' && disposition.disposition !== 'contradicts_core') {
+      throw new Error('evidence_disposition_conflict_uncovered');
+    }
+    if (relation === 'updates' && disposition.disposition !== 'material_update') {
+      throw new Error('evidence_disposition_update_uncovered');
+    }
+    if (relation === 'uncertain' && recommendation === 'recommended') {
+      throw new Error('evidence_disposition_classification_uncertain');
+    }
+    if (relation === 'uncertain' && disposition.disposition !== 'background') {
+      throw new Error('evidence_disposition_classification_uncertain');
+    }
+    if (relation === 'unrelated' && !['background', 'irrelevant'].includes(disposition.disposition)) {
+      throw new Error('evidence_disposition_unrelated_misclassified');
+    }
+    const expectedReferencedRelation = disposition.disposition === 'supports_core'
+      ? 'supports'
+      : disposition.disposition === 'contradicts_core'
+        ? 'conflicts'
+        : disposition.disposition === 'material_update'
+          ? 'updates'
+          : null;
+    if (expectedReferencedRelation && referencedRelation !== expectedReferencedRelation) {
+      throw new Error('evidence_disposition_fact_reference_mismatch');
+    }
+    if (['conflicts', 'updates'].includes(relation)) hasConflict = true;
+  }
+  if (hasConflict && (recommendation !== 'needs_review'
+    || !Array.isArray(uncertainties) || !uncertainties.some((item) => typeof item === 'string' && item.trim()))) {
+    throw new Error('evidence_disposition_conflict_requires_review');
+  }
+  for (const fact of sourceFacts) {
+    if (fact.evidence_ids.some((id) => {
+      const disposition = parsedById.get(id);
+      return disposition?.disposition !== 'supports_core'
+        || !disposition.source_fact_ids.includes(fact.fact_id);
+    })) {
+      throw new Error('evidence_disposition_claim_mismatch');
+    }
+  }
+  const order = new Map(evidence.map((item, index) => [item.id, index]));
+  return {
+    dispositions: parsed.sort((left, right) => order.get(left.evidence_id)! - order.get(right.evidence_id)!),
+    completeness,
+  };
+}
+
 /**
  * Validates the model-only assessment envelope and deterministically converts
  * its structured atomic fact rows into the persisted assessment schema. The
@@ -1495,7 +2297,8 @@ export function validateManualLeadGeneratedAssessment(
   evidence: readonly ManualNewsEvidence[],
   priorEventKeys?: readonly string[],
 ): ManualNewsLeadAssessment {
-  if (!isPlainObject(raw) || !Array.isArray(raw.source_facts) || !raw.source_facts.length) {
+  if (!isPlainObject(raw) || !Array.isArray(raw.source_facts)
+    || !raw.source_facts.length || raw.source_facts.length > 3) {
     throw new Error('invalid_claims');
   }
   const evidenceById = new Map(evidence.map((item) => [item.id, item]));
@@ -1512,17 +2315,24 @@ export function validateManualLeadGeneratedAssessment(
     if (!['zh', 'en', 'other'].includes(String(claim.source_language))) {
       throw new Error('invalid_claim_source_language');
     }
-    const atomicFact = generatedAtomicFact(claim.atomic_fact);
+    const context: GeneratedFactValidationContext = {
+      scope: 'source', base_path: `source_facts[${index}].atomic_fact`,
+    };
+    const atomicFact = generatedAtomicFact(claim.atomic_fact, context);
     if (!Array.isArray(claim.evidence_ids)
       || !claim.evidence_ids.length
       || claim.evidence_ids.some((id) => typeof id !== 'string' || !id)) {
       throw new Error('invalid_claim');
     }
-    const unknown = claim.evidence_ids.find((id) => !evidenceById.has(id));
-    if (unknown) throw new Error(`unknown_evidence_id:${unknown}`);
+    const unknownIndex = claim.evidence_ids.findIndex((id) => !evidenceById.has(id));
+    if (unknownIndex >= 0) {
+      throw new Error(`unknown_evidence_id:source_facts[${index}].evidence_ids[${unknownIndex}]`);
+    }
     const text = joinGeneratedFactSlots(atomicFact.subject, atomicFact.predicate, atomicFact.object);
     const atomic = splitAtomicFactClauses(text);
-    if (!atomic.reliable || atomic.clauses.length !== 1) throw new Error('non_atomic_claim');
+    if (!atomic.reliable || atomic.clauses.length !== 1) {
+      throw generatedFactValidationError('non_atomic_source_assembled', context, 'assembled');
+    }
     if (claim.source_language === 'en' && /\p{Script=Han}/u.test(text)) {
       throw new Error('invalid_claim_source_language');
     }
@@ -1557,13 +2367,18 @@ export function validateManualLeadGeneratedAssessment(
     throw new Error('invalid_editorial_projection');
   }
   const titleProjection = validatedProjectionSentence(
-    raw.editorial_projection.title, 'title-01', sourceByRef,
+    raw.editorial_projection.title, 'title-01', sourceByRef, 'editorial_projection.title',
   );
   if (titleProjection.source_fact_ids[0] !== sourceFacts[0].fact_id) {
     throw new Error('invalid_editorial_projection_mapping');
   }
   const summaryProjection = raw.editorial_projection.summary.map((item, index) =>
-    validatedProjectionSentence(item, `summary-${String(index + 1).padStart(2, '0')}`, sourceByRef));
+    validatedProjectionSentence(
+      item,
+      `summary-${String(index + 1).padStart(2, '0')}`,
+      sourceByRef,
+      `editorial_projection.summary[${index}]`,
+    ));
   if (summaryProjection.length !== sourceFacts.length
     || summaryProjection.some((projection, index) =>
       projection.source_fact_ids[0] !== sourceFacts[index].fact_id)) {
@@ -1572,8 +2387,14 @@ export function validateManualLeadGeneratedAssessment(
   const claims = sourceFacts.map((fact) => ({ text: fact.text, evidence_ids: fact.evidence_ids }));
   const {
     source_facts: _sourceFacts, editorial_projection: _editorialProjection,
+    evidence_dispositions: rawEvidenceDispositions,
     ...identity
   } = raw;
+  const { dispositions: evidenceDispositions, completeness: evidenceCompleteness }
+    = validateGeneratedEvidenceDispositions(
+    rawEvidenceDispositions, evidence, sourceByRef, sourceFacts,
+    identity.recommendation, identity.uncertainties,
+  );
   const assessment = validateManualLeadAssessment({
     ...identity,
     title: titleProjection.text_zh,
@@ -1585,8 +2406,11 @@ export function validateManualLeadGeneratedAssessment(
     generated_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
     source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
     editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+    evidence_disposition_contract: MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
     source_facts: sourceFacts,
     editorial_projection: { title: titleProjection, summary: summaryProjection },
+    evidence_dispositions: evidenceDispositions,
+    evidence_completeness: evidenceCompleteness,
   };
 }
 
@@ -1651,6 +2475,7 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
       '只使用 evidence 中明确出现的事实；每条 claim 必须引用实际支持它的 evidence_ids，不能用常识、线索原话或搜索摘要补齐。',
       'evidence_ids 中的每个字符串只能逐字复制 allowed_evidence_ids 中的完整 ID；allowed_evidence_ids 位于 user 顶层，禁止改写、截断、拼接、猜测或新造 ID。',
       'source_facts 不接受自由文本 text。每条 source fact 必须机械地填写 atomic_fact 的主体角色、主体、单一谓词、对象四个槽位；程序会按槽位顺序生成可签名事实，不会修补或拆分 raw JSON。',
+      '核心事件最小化：默认只输出 1 条 core source_fact，只保留足以决定本条线索推荐与去重的核心事件。仅当另一事实独立、必要且同样可由直接证据核验时才增加，总数最多 3 条 source_facts。禁止为了填充摘要加入原因、替代产品或背景信息。',
       'atomic_fact.subject 只能有一个完整主体；atomic_fact.predicate 只能有一个谓词，可包含紧邻该谓词的时态、否定、计划或“据报道”等限定；atomic_fact.object 只能有一个对象及其必要版本、地区和范围。',
       'source_facts.atomic_fact 必须沿用直接证据的源语言、实体原文与谓词表达：英文证据写英文 source fact，中文证据写中文 source fact，禁止先翻译再绑定连续原文。',
       'editorial_projection 是独立的严肃中文编辑投影。title 与 summary 的每个中文原子句必须填写自己的四槽 atomic_fact，并通过 source_fact_refs 显式映射且只映射一个 source fact；不得新增、删除或改变主体、动作、对象、版本、时间、地区、否定、情态或完成状态。',
@@ -1679,6 +2504,8 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
       '评分按事件重要性35、行业影响25、证据权威20、新鲜度20综合为0到100；证据不足不能靠高分变成 recommended。',
       'recommendation：证据充分且值得进入候选池为 recommended；事实可能成立但证据/范围仍缺为 needs_review；同事件无重要更新为 duplicate；已证伪、非新闻或与AI无关为 rejected。',
       '若证据相互冲突，在 uncertainties 逐项说明，并优先采用时间更晚且权威层级更高的原始来源，不得静默拼成确定结论。',
+      'evidence_dispositions 必须覆盖 allowed_evidence_ids 中每个 ID 恰好一次，不得遗漏或重复。supports_core、contradicts_core、material_update 必须引用相关 source_fact_refs 且 reason_code=null；background、irrelevant 不得引用 fact，只能使用 schema 给出的有界 reason_code。',
+      '任何共享核心主体/产品/动作/时间锚点的否认、撤回、反向事实、范围限制、状态变化或更晚更新都不得标为 background/irrelevant。冲突或更新必须显式分类、写入 uncertainties，并令 recommendation=needs_review；最小核心事实不能作为删除不利证据的理由。',
     ].join('\n'),
     user: JSON.stringify({
       task: '生成源语言原子事实、逐句映射的严肃中文编辑投影、事件身份与评分建议',
@@ -1691,7 +2518,7 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
         occurred_at: 'source-supported ISO-8601 date/time|null',
         uncertainties: ['string'],
         source_facts: [{
-          fact_ref: 'fact-01, fact-02 ... in deterministic primary-event order',
+          fact_ref: 'fact-01 by default; at most fact-01..fact-03 in deterministic primary-event order',
           source_language: 'zh|en|other; language of the directly quoted evidence',
           atomic_fact: {
             subject: 'exactly one subject; source-language entity text; no predicate or conjunction',
@@ -1700,6 +2527,12 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
             object: 'exactly one object with necessary version/region/scope; no second subject or predicate',
           },
           evidence_ids: ['one or more IDs copied character-for-character from allowed_evidence_ids'],
+        }],
+        evidence_dispositions: [{
+          evidence_id: 'each allowed_evidence_id exactly once',
+          disposition: 'supports_core|contradicts_core|material_update|background|irrelevant',
+          source_fact_refs: ['required for supports/contradicts/update; otherwise empty'],
+          reason_code: 'null for supports/contradicts/update; otherwise unrelated_event|context_only|duplicate_context|insufficient_overlap',
         }],
         editorial_projection: {
           title: {
@@ -1727,20 +2560,6 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
             },
             evidence_ids: ['<EXACT_ALLOWED_EVIDENCE_ID>'],
           },
-          {
-            fact_ref: 'fact-02', source_language: 'zh',
-            atomic_fact: {
-              subject: '阿里巴巴', subject_role: 'organization', predicate: '表示', object: '该决定与数据安全有关',
-            },
-            evidence_ids: ['<EXACT_ALLOWED_EVIDENCE_ID>'],
-          },
-          {
-            fact_ref: 'fact-03', source_language: 'zh',
-            atomic_fact: {
-              subject: '阿里巴巴', subject_role: 'organization', predicate: '要求', object: '员工改用其他产品',
-            },
-            evidence_ids: ['<EXACT_ALLOWED_EVIDENCE_ID>'],
-          },
         ],
         bad: [{
           claim: {
@@ -1752,7 +2571,7 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
             },
             evidence_ids: ['invented-evidence-id'],
           },
-          failure_codes: ['non_atomic_claim', 'unknown_evidence_id'],
+          failure_codes: ['non_atomic_source_predicate', 'non_atomic_source_object', 'unknown_evidence_id'],
         }],
         note: '<EXACT_ALLOWED_EVIDENCE_ID> 只是结构占位符；真实输出必须逐字复制 allowed ID。程序只连接已严格验证的四个槽位并生成稳定 fact id，不会从复合 prose 中猜测事实；示例不得在 evidence 未支持时复制。',
       },
@@ -1764,12 +2583,30 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
 export function buildManualLeadAssessmentRegenerationPrompt(
   input: ManualLeadAssessmentPromptInput,
   failureCode: string,
+  failurePath?: string,
 ): { system: string; user: string } {
   if (!isRegeneratableManualLeadAssessmentValidationCode(failureCode)) {
     throw new Error('assessment_regeneration_not_allowed');
   }
+  if (failurePath !== undefined && !SAFE_GENERATED_ASSESSMENT_PATH.test(failurePath)) {
+    throw new Error('assessment_regeneration_path_invalid');
+  }
+  if (/^non_atomic_(?:source|editorial)_(?:subject|predicate|object|assembled)$/u.test(failureCode)
+    && !failurePath) throw new Error('assessment_regeneration_path_invalid');
   const original = buildManualLeadAssessmentPrompt(input);
   const body = JSON.parse(original.user) as Record<string, unknown>;
+  const slot = failureCode.match(/_(subject|predicate|object|assembled)$/u)?.[1];
+  const mechanicalInstruction = slot === 'subject'
+    ? '只纠正同类 subject 槽：每个 subject 只能是一个完整主体实体，不得包含并列主体、动作、原因或背景。整份 schema 仍须从原证据重新生成。'
+    : slot === 'predicate'
+      ? '只纠正同类 predicate 槽：每个 predicate 只能有一个动作及其紧邻时态、否定、情态标记；多个动作必须拆成必要且可核验的独立 fact，否则删除非核心背景。整份 schema 仍须从原证据重新生成。'
+      : slot === 'object'
+        ? '只纠正同类 object 槽：对象若含逗号、同位语、并列、原因或第二动作，必须拆为必要且可核验的独立 fact，或删除非核心背景；不得把复合内容塞回一个 object。整份 schema 仍须从原证据重新生成。'
+        : slot === 'assembled'
+          ? '逐一检查 subject + predicate + object 连接后的完整句；若 assembled 句形成多个主体、动作或子句，拆为必要且可核验的独立 fact，或删除非核心背景。整份 schema 仍须从原证据重新生成。'
+          : failureCode === 'unknown_evidence_id'
+            ? '逐项从 allowed_evidence_ids 原样复制 evidence ID；不得猜测、改写或沿用任何旧 ID。整份 schema 仍须从原证据重新生成。'
+            : '仅纠正 failure_code 指向的 schema 契约类别；整份 schema 仍须从原证据重新生成，不得复用旧输出。';
   return {
     system: [
       original.system,
@@ -1781,7 +2618,9 @@ export function buildManualLeadAssessmentRegenerationPrompt(
       regeneration: {
         mode: 'validation_guided_regeneration',
         failure_code: failureCode,
+        ...(failurePath ? { failure_path: failurePath } : {}),
         instruction: '丢弃上一次输出；仅根据本 prompt 的原始任务与证据，从头生成完整 schema。',
+        mechanical_instruction: mechanicalInstruction,
       },
     }),
   };
@@ -1806,8 +2645,11 @@ export function manualLeadAssessmentCore(
       generated_claim_contract: assessment.generated_claim_contract,
       source_fact_contract: assessment.source_fact_contract,
       editorial_projection_contract: assessment.editorial_projection_contract,
+      evidence_disposition_contract: assessment.evidence_disposition_contract,
       source_facts: assessment.source_facts,
       editorial_projection: assessment.editorial_projection,
+      evidence_dispositions: assessment.evidence_dispositions,
+      evidence_completeness: assessment.evidence_completeness,
     } : {}),
   };
 }
@@ -1815,10 +2657,14 @@ export function manualLeadAssessmentCore(
 function validatePersistedAssessmentContracts(
   raw: ManualNewsLeadAssessment,
   evidence: readonly ManualNewsEvidence[],
-): Pick<ManualNewsLeadAssessment, 'generated_claim_contract' | 'source_fact_contract' | 'editorial_projection_contract' | 'source_facts' | 'editorial_projection'> {
+): Pick<ManualNewsLeadAssessment,
+  'generated_claim_contract' | 'source_fact_contract' | 'editorial_projection_contract'
+  | 'evidence_disposition_contract' | 'source_facts' | 'editorial_projection'
+  | 'evidence_dispositions' | 'evidence_completeness'> {
   if (raw.generated_claim_contract !== MANUAL_LEAD_GENERATED_CLAIM_CONTRACT
     || raw.source_fact_contract !== MANUAL_LEAD_SOURCE_FACT_CONTRACT
     || raw.editorial_projection_contract !== MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT
+    || raw.evidence_disposition_contract !== MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT
     || !Array.isArray(raw.source_facts) || !raw.source_facts.length
     || !raw.editorial_projection) throw new Error('invalid_processed_assessment_contract');
   const evidenceIds = new Set(evidence.map((item) => item.id));
@@ -1898,12 +2744,39 @@ function validatePersistedAssessmentContracts(
     || canonicalJson(raw.claims) !== canonicalJson(sourceFacts.map((fact) => ({
       text: fact.text, evidence_ids: fact.evidence_ids,
     })))) throw new Error('invalid_processed_assessment_contract');
+  const sourceRefById = new Map(sourceFacts.map((fact, index) => [
+    fact.fact_id, `fact-${String(index + 1).padStart(2, '0')}`,
+  ]));
+  if (!Array.isArray(raw.evidence_dispositions)) throw new Error('invalid_processed_assessment_contract');
+  const persistedDispositionInput = raw.evidence_dispositions.map((item) => ({
+    evidence_id: item.evidence_id,
+    disposition: item.disposition,
+    source_fact_refs: item.source_fact_ids.map((id) => sourceRefById.get(id) || ''),
+    reason_code: item.reason_code,
+  }));
+  const sourceByRef = new Map(sourceFacts.map((fact, index) => [
+    `fact-${String(index + 1).padStart(2, '0')}`, fact,
+  ]));
+  const { dispositions: evidenceDispositions, completeness: evidenceCompleteness }
+    = validateGeneratedEvidenceDispositions(
+    persistedDispositionInput, evidence, sourceByRef, sourceFacts,
+    raw.recommendation, raw.uncertainties,
+  );
+  if (canonicalJson(evidenceDispositions) !== canonicalJson(raw.evidence_dispositions)) {
+    throw new Error('invalid_processed_assessment_contract');
+  }
+  if (canonicalJson(evidenceCompleteness) !== canonicalJson(raw.evidence_completeness)) {
+    throw new Error('invalid_processed_assessment_contract');
+  }
   return {
     generated_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
     source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
     editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+    evidence_disposition_contract: MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
     source_facts: sourceFacts,
     editorial_projection: { title, summary },
+    evidence_dispositions: evidenceDispositions,
+    evidence_completeness: evidenceCompleteness,
   };
 }
 
@@ -1918,7 +2791,8 @@ export function validateManualNewsProcessedAssessment(
       'title', 'summary', 'event_key', 'event_type', 'material_update', 'score',
       'recommendation', 'occurred_at', 'uncertainties', 'claims', 'matched_event_key',
       'generated_claim_contract', 'source_fact_contract', 'editorial_projection_contract',
-      'source_facts', 'editorial_projection',
+      'evidence_disposition_contract', 'source_facts', 'editorial_projection', 'evidence_dispositions',
+      'evidence_completeness',
       'evidence_tier', 'duplicate_scope', 'matched_lead_id',
     ]);
   } catch {
@@ -1976,6 +2850,9 @@ function manualLeadVerificationFacts(assessment: ManualNewsLeadAssessment): Manu
   const contracted = assessment.generated_claim_contract === MANUAL_LEAD_GENERATED_CLAIM_CONTRACT
     && assessment.source_fact_contract === MANUAL_LEAD_SOURCE_FACT_CONTRACT
     && assessment.editorial_projection_contract === MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT
+    && assessment.evidence_disposition_contract === MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT
+    && !!assessment.evidence_dispositions?.length
+    && !!assessment.evidence_completeness?.length
     && !!assessment.source_facts?.length && !!assessment.editorial_projection;
   const addTextField = (field: 'title' | 'summary', value: string) => {
     const atomic = splitAtomicFactClauses(value);
@@ -2029,6 +2906,9 @@ function manualLeadProjectionDefinitions(assessment: ManualNewsLeadAssessment) {
   if (assessment.generated_claim_contract !== MANUAL_LEAD_GENERATED_CLAIM_CONTRACT
     || assessment.source_fact_contract !== MANUAL_LEAD_SOURCE_FACT_CONTRACT
     || assessment.editorial_projection_contract !== MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT
+    || assessment.evidence_disposition_contract !== MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT
+    || !assessment.evidence_dispositions?.length
+    || !assessment.evidence_completeness?.length
     || !assessment.source_facts?.length || !assessment.editorial_projection) return [];
   const sourceById = new Map(assessment.source_facts.map((fact) => [fact.fact_id, fact]));
   return [assessment.editorial_projection.title, ...assessment.editorial_projection.summary].map((projection) => ({
@@ -2078,8 +2958,8 @@ export function buildManualLeadFactVerificationPrompt(input: {
   const compactEvidence = promptEvidenceDocuments(input.evidence);
   const priorEvents = verifiedPriorContexts(input.prior_events || []);
   const factDefinitions = manualLeadVerificationFacts(input.assessment);
-  const citedEvidenceIds = new Set(factDefinitions.flatMap((fact) => fact.allowed_evidence_ids));
   const projectionDefinitions = manualLeadProjectionDefinitions(input.assessment);
+  const dispositionDefinitions = input.assessment.evidence_dispositions || [];
   const primaryFact = primaryFactIdentity(factDefinitions);
   const promptPrimaryFact = {
     fact_id: primaryFact.fact_id,
@@ -2127,7 +3007,12 @@ export function buildManualLeadFactVerificationPrompt(input: {
       'occurred_at 只能绑定系统给出的 primary_fact（中文 title 映射的首个源事实）；禁止用 summary 的次要源事实或另一个事件的时间替代主事件时间。',
       '先逐字核验 source fact 与来源 quote；随后独立核验 projections。每个中文投影只能使用其 source_fact_ids 映射且已经 supported 的源事实，必须在主体角色、主体、动作数量、对象、版本、时间、地区、否定、情态和完成状态上语义等价。',
       '中文投影新增事实用 fact_expansion，遗漏源事实槽位用 fact_omission，翻译改变语义用 translation_mismatch。不得把中文投影自身当证据，也不得用未映射 source fact 补齐。',
-      '只有所有 fact 都 supported=true 且 issue_code=none 时 overall_verdict 才能为 supported。',
+      'disposition_results 必须覆盖顶层每个 evidence disposition 恰好一次，并用该 evidence 自身的一段连续原文核验其 supports_core、contradicts_core、material_update、background 或 irrelevant 分类。不得只核验支持证据而忽略官方否认、撤回、范围限制或更晚更新。',
+      '每个 disposition quote 必须先按原子子句拆分，再在同一子句内完整对齐 source_fact 的主体、动作、完整产品 target tuple、否定/情态、参与者/数量范围、状态与时间；只有公司名、任意 not/否认词或跨子句拼接都不构成支持、冲突或更新。',
+      '若一个 disposition 返回多段 quote，或单段 quote 含多个子句，每一段 quote 的每一个实义原子子句都必须分别满足同一 disposition；禁止用其中一条正确引文掩盖其他无关、冲突或无法解析的引文。',
+      'deny/refute/dispute/reject reports/call reports false 等否认只有在其被否认的内嵌事件完整对齐 source_fact 时才是冲突；Why/是否等疑问式 rumor is misleading 标题不得当作主体正式否认。',
+      '官方撤回、取消或反转同一限制即使缺少 published_at 也必须按冲突/不确定性阻断；无法可靠解析的 relation 必须 unsupported/needs_review，低可靠标题不得伪造 supports_core。',
+      '只有所有 fact、projection 与 disposition 都 supported=true 且 issue_code=none 时才能形成有效结论；若存在已正确覆盖的 contradicts_core/material_update，overall_verdict 必须为 conflicted 且 assessment recommendation 必须为 needs_review，否则 overall_verdict 为 supported；任一未支持项则为 unsupported。',
     ].join('\n'),
     user: JSON.stringify({
       task: '独立核验每个事实字段，并返回可由程序逐字定位的来源引文',
@@ -2138,9 +3023,9 @@ export function buildManualLeadFactVerificationPrompt(input: {
           input.assessment.event_type === 'political_regulatory',
       },
       primary_fact: promptPrimaryFact,
-      untrusted_evidence: compactEvidence.filter((item) => citedEvidenceIds.has(item.id)),
+      untrusted_evidence: compactEvidence,
       output_schema: {
-        overall_verdict: 'supported|unsupported',
+        overall_verdict: 'supported|conflicted|unsupported',
         fact_results: [{
           fact_id: 'exact input fact_id, exactly once',
           supported: 'boolean',
@@ -2169,9 +3054,25 @@ export function buildManualLeadFactVerificationPrompt(input: {
           supported: 'boolean',
           issue_code: 'none|translation_mismatch|fact_expansion|fact_omission',
         }],
+        disposition_results: [{
+          evidence_id: 'exact disposition evidence_id, every evidence exactly once',
+          disposition: 'exact input disposition, unchanged',
+          supported: 'boolean',
+          issue_code: 'none|misclassified|conflict_ignored|update_ignored|not_found',
+          source_quotes: [{
+            evidence_id: 'must equal this disposition evidence_id',
+            quote: 'continuous quote from that evidence, 12..300 Unicode chars',
+          }],
+        }],
       },
       facts,
       projections: projectionDefinitions,
+      evidence_dispositions: dispositionDefinitions.map((item) => ({
+        evidence_id: item.evidence_id,
+        disposition: item.disposition,
+        source_fact_ids: [...item.source_fact_ids],
+        reason_code: item.reason_code,
+      })),
     }),
   };
 }
@@ -2198,6 +3099,11 @@ const FACT_VERIFICATION_ERROR_CODES = new Set([
   'invalid_projection_verification_result',
   'invalid_projection_verification_semantics',
   'invalid_projection_verification_source',
+  'invalid_disposition_verification_results',
+  'invalid_disposition_verification_coverage',
+  'invalid_disposition_verification_result',
+  'invalid_disposition_verification_quote',
+  'invalid_disposition_verification_semantics',
   'political_source_verification_missing',
   'unknown_fact_verification_evidence_id',
   'multiple_fact_quote_evidence',
@@ -2293,7 +3199,7 @@ const FACT_ACTION_PATTERNS: ReadonlyArray<FactActionPattern> = [
   ['discuss', /(?:讨论|商议|磋商)|\b(?:discuss(?:es|ed|ing)?|deliberat(?:e|es|ed|ing))\b/giu, /^(?:discuss(?:ing|ed|es)?|deliberat(?:ing|ed|es|e))\b/iu],
   ['deny', /(?:否认)|\b(?:den(?:y|ies|ied|ying))\b/giu, /^den(?:y|ies|ied|ying)/iu],
   ['open_access', /(?:开放)|\b(?:open(?:s|ed|ing)?\s+(?:access|service))\b/giu, /^open(?:ing|ed|s)?\b/iu],
-  ['limit_scope', /(?:受限|限定|限于|限制(?:为|在)?)|\b(?:limit(?:s|ed|ing)?|restrict(?:s|ed|ing)?|(?:cover|support)(?:s|ed|ing)?\s+[^.;,]{0,60}(?:\bonly\b|\bsupported\s+(?:models?|products?)\b))/giu, /^(?:limit(?:s|ed|ing)?|restrict(?:s|ed|ing)?|cover(?:s|ed|ing)?|support(?:s|ed|ing)?)/iu],
+  ['limit_scope', /(?:受限|限定|限于|限制(?:为|在)?)|\b(?:limit(?:s|ed|ing)?\b|restrict(?:s|ed|ing)?\b|(?:cover|support)(?:s|ed|ing)?\s+[^.;,]{0,60}(?:\bonly\b|\bsupported\s+(?:models?|products?)\b))/giu, /^(?:limit(?:s|ed|ing)?|restrict(?:s|ed|ing)?|cover(?:s|ed|ing)?|support(?:s|ed|ing)?)/iu],
 ];
 
 function factActions(value: string): Set<FactAction> {
@@ -3968,16 +4874,20 @@ export function validateManualLeadFactVerification(
   if (!isPlainObject(raw)) throw new Error('invalid_fact_verification');
   const projectionDefinitions = manualLeadProjectionDefinitions(assessment);
   const contracted = projectionDefinitions.length > 0;
+  const dispositionDefinitions = contracted ? (assessment.evidence_dispositions || []) : [];
   try {
     strictKeys(raw, options.persisted
-      ? ['overall_verdict', 'primary_fact', 'fact_results', ...(contracted ? ['projection_results'] : []), 'prior_context']
-      : ['overall_verdict', 'fact_results', ...(contracted ? ['projection_results'] : [])]);
+      ? ['overall_verdict', 'primary_fact', 'fact_results',
+        ...(contracted ? ['projection_results', 'disposition_results', 'completeness_results'] : []), 'prior_context']
+      : ['overall_verdict', 'fact_results',
+        ...(contracted ? ['projection_results', 'disposition_results'] : [])]);
   } catch {
     throw new Error('invalid_fact_verification_fields');
   }
-  if (raw.overall_verdict !== 'supported' && raw.overall_verdict !== 'unsupported') {
+  if (!['supported', 'conflicted', 'unsupported'].includes(String(raw.overall_verdict))) {
     throw new Error('invalid_fact_verification_verdict');
   }
+  const overallVerdict = raw.overall_verdict as ManualLeadFactVerification['overall_verdict'];
   if (!Array.isArray(raw.fact_results)) throw new Error('invalid_fact_verification_results');
   const byEvidenceId = new Map(evidence.map((item) => [item.id, item]));
   const facts = manualLeadVerificationFacts(assessment);
@@ -4268,12 +5178,130 @@ export function validateManualLeadFactVerification(
     projectionResults.sort((left, right) => projectionDefinitions.findIndex((item) => item.projection_id === left.projection_id)
       - projectionDefinitions.findIndex((item) => item.projection_id === right.projection_id));
   }
+  let dispositionResults: NonNullable<ManualLeadFactVerification['disposition_results']> | undefined;
+  if (contracted) {
+    if (!Array.isArray(raw.disposition_results)) throw new Error('invalid_disposition_verification_results');
+    const definitionsById = new Map(dispositionDefinitions.map((item) => [item.evidence_id, item]));
+    const seenEvidenceIds = new Set<string>();
+    const issueCodes = new Set(['none', 'misclassified', 'conflict_ignored', 'update_ignored', 'not_found']);
+    const sourceFacts = assessment.source_facts || [];
+    const parsedDispositionResults: NonNullable<ManualLeadFactVerification['disposition_results']>
+      = raw.disposition_results.map((item) => {
+      if (!isPlainObject(item)) throw new Error('invalid_disposition_verification_results');
+      try {
+        strictKeys(item, [
+          'evidence_id', 'disposition', 'supported', 'issue_code', 'source_quotes',
+          ...(options.persisted ? ['quote_relation'] : []),
+        ]);
+      } catch {
+        throw new Error('invalid_disposition_verification_results');
+      }
+      if (typeof item.evidence_id !== 'string' || seenEvidenceIds.has(item.evidence_id)) {
+        throw new Error('invalid_disposition_verification_coverage');
+      }
+      const evidenceId = item.evidence_id;
+      const definition = definitionsById.get(evidenceId);
+      if (!definition || item.disposition !== definition.disposition
+        || typeof item.supported !== 'boolean'
+        || typeof item.issue_code !== 'string' || !issueCodes.has(item.issue_code)
+        || (item.supported && item.issue_code !== 'none')
+        || (!item.supported && item.issue_code === 'none')
+        || !Array.isArray(item.source_quotes) || !item.source_quotes.length) {
+        throw new Error('invalid_disposition_verification_result');
+      }
+      const source = byEvidenceId.get(evidenceId);
+      if (!source) throw new Error('invalid_disposition_verification_result');
+      const sourceSegments = [source.title, source.excerpt, ...source.claims_supported]
+        .map(normalizedSourceText);
+      const sourceQuotes = item.source_quotes.map((quote) => {
+        if (!isPlainObject(quote) || quote.evidence_id !== evidenceId
+          || typeof quote.quote !== 'string') throw new Error('invalid_disposition_verification_quote');
+        const normalizedQuote = normalizedSourceText(quote.quote);
+        if (Array.from(normalizedQuote).length < 12 || Array.from(normalizedQuote).length > 300
+          || !sourceSegments.some((segment) => segment.includes(normalizedQuote))) {
+          throw new Error('invalid_disposition_verification_quote');
+        }
+        return { evidence_id: evidenceId, quote: normalizedQuote };
+      });
+      if (factTokens(sourceQuotes.map((quote) => quote.quote).join(' ')).size < 2) {
+        throw new Error('invalid_disposition_verification_quote');
+      }
+      const referencedFacts = sourceFacts.filter((fact) => definition.source_fact_ids.includes(fact.fact_id));
+      const quoteRelations = sourceQuotes.flatMap((quote) => deterministicDispositionQuoteRelations(
+        quote.quote,
+        source,
+        referencedFacts.length ? referencedFacts : sourceFacts,
+        byEvidenceId,
+      ));
+      const quoteRelation = aggregateEvidenceRelations(quoteRelations);
+      if (item.supported) {
+        const relation = deterministicEvidenceRelation(source, sourceFacts, byEvidenceId);
+        const referencedRelation = referencedFacts.length
+          ? deterministicEvidenceRelation(source, referencedFacts, byEvidenceId)
+          : null;
+        const quoteRelationMatches = definition.disposition === 'supports_core'
+          ? quoteRelations.every((relation) => relation === 'supports')
+          : definition.disposition === 'contradicts_core'
+            ? quoteRelations.every((relation) => relation === 'conflicts')
+            : definition.disposition === 'material_update'
+              ? quoteRelations.every((relation) => relation === 'updates')
+              : relation === 'uncertain'
+                ? definition.disposition === 'background'
+                  && quoteRelations.every((quoteRelation) => quoteRelation === 'uncertain')
+                : quoteRelations.every((quoteRelation) => quoteRelation === 'unrelated');
+        const locallyConsistent = (relation === 'supports'
+          ? definition.disposition === 'supports_core'
+          : relation === 'conflicts'
+            ? definition.disposition === 'contradicts_core'
+            : relation === 'updates'
+              ? definition.disposition === 'material_update'
+              : relation === 'unrelated'
+                ? ['background', 'irrelevant'].includes(definition.disposition)
+                : definition.disposition === 'background' && assessment.recommendation === 'needs_review')
+          && quoteRelationMatches
+          && (definition.disposition === 'supports_core'
+            ? referencedRelation === 'supports'
+            : definition.disposition === 'contradicts_core'
+              ? referencedRelation === 'conflicts'
+              : definition.disposition === 'material_update'
+                ? referencedRelation === 'updates'
+                : true);
+        if (!locallyConsistent) throw new Error('invalid_disposition_verification_semantics');
+      }
+      if (options.persisted && item.quote_relation !== quoteRelation) {
+        throw new Error('invalid_disposition_verification_semantics');
+      }
+      seenEvidenceIds.add(evidenceId);
+      return {
+        evidence_id: evidenceId,
+        disposition: definition.disposition,
+        supported: item.supported,
+        issue_code: item.issue_code as NonNullable<ManualLeadFactVerification['disposition_results']>[number]['issue_code'],
+        source_quotes: sourceQuotes,
+        quote_relation: quoteRelation,
+      };
+    });
+    if (parsedDispositionResults.length !== dispositionDefinitions.length
+      || seenEvidenceIds.size !== dispositionDefinitions.length) {
+      throw new Error('invalid_disposition_verification_coverage');
+    }
+    parsedDispositionResults.sort((left, right) => dispositionDefinitions.findIndex((item) => item.evidence_id === left.evidence_id)
+      - dispositionDefinitions.findIndex((item) => item.evidence_id === right.evidence_id));
+    dispositionResults = parsedDispositionResults;
+  }
   const allSupported = results.every((item) => item.supported)
-    && (!projectionResults || projectionResults.every((item) => item.supported));
-  if ((raw.overall_verdict === 'supported') !== allSupported) {
+    && (!projectionResults || projectionResults.every((item) => item.supported))
+    && (!dispositionResults || dispositionResults.every((item) => item.supported));
+  const hasCoveredConflict = dispositionDefinitions.some((item) =>
+    item.disposition === 'contradicts_core' || item.disposition === 'material_update');
+  const expectedVerdict = !allSupported ? 'unsupported' : hasCoveredConflict ? 'conflicted' : 'supported';
+  if (overallVerdict !== expectedVerdict) {
     throw new Error('fact_verification_verdict_mismatch');
   }
   const priorContext = availablePriorContexts.filter((context) => referencedPriorKeys.has(context.event_key));
+  const completenessResults = contracted
+    ? (assessment.evidence_completeness || []).map((item) => ({ ...item }))
+    : undefined;
   if (options.persisted) {
     if (!Array.isArray(raw.prior_context)) throw new Error('invalid_material_comparison_context');
     const persistedContext = verifiedPriorContexts(raw.prior_context as ManualLeadPriorEvent[]);
@@ -4281,12 +5309,17 @@ export function validateManualLeadFactVerification(
       || canonicalJson(persistedContext) !== canonicalJson(priorContext)) {
       throw new Error('invalid_material_comparison_context');
     }
+    if (contracted && canonicalJson(raw.completeness_results) !== canonicalJson(completenessResults)) {
+      throw new Error('invalid_disposition_verification_semantics');
+    }
   }
   return {
-    overall_verdict: raw.overall_verdict,
+    overall_verdict: overallVerdict,
     primary_fact: primaryFact,
     fact_results: results,
     ...(projectionResults ? { projection_results: projectionResults } : {}),
+    ...(dispositionResults ? { disposition_results: dispositionResults } : {}),
+    ...(completenessResults ? { completeness_results: completenessResults } : {}),
     prior_context: priorContext,
   };
 }
@@ -4307,6 +5340,9 @@ function canonicalJson(value: unknown): string {
 function bilingualSemanticProofContract(assessment: ManualNewsLeadAssessment) {
   if (assessment.source_fact_contract !== MANUAL_LEAD_SOURCE_FACT_CONTRACT
     || assessment.editorial_projection_contract !== MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT
+    || assessment.evidence_disposition_contract !== MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT
+    || !assessment.evidence_dispositions?.length
+    || !assessment.evidence_completeness?.length
     || !assessment.source_facts?.length || !assessment.editorial_projection) {
     throw new Error('manual_news_verification_contract_invalid');
   }
@@ -4346,8 +5382,16 @@ function bilingualSemanticProofContract(assessment: ManualNewsLeadAssessment) {
   return {
     source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
     editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+    evidence_disposition_contract: MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
     source_facts: sourceFacts,
     projections,
+    evidence_dispositions: assessment.evidence_dispositions.map((item) => ({
+      evidence_id: item.evidence_id,
+      disposition: item.disposition,
+      source_fact_ids: [...item.source_fact_ids],
+      reason_code: item.reason_code,
+    })),
+    evidence_completeness: assessment.evidence_completeness.map((item) => ({ ...item })),
   };
 }
 
@@ -4378,6 +5422,7 @@ function canonicalVerificationPayload(
       generated_claim_contract: assessment.generated_claim_contract ?? null,
       source_fact_contract: assessment.source_fact_contract ?? null,
       editorial_projection_contract: assessment.editorial_projection_contract ?? null,
+      evidence_disposition_contract: assessment.evidence_disposition_contract ?? null,
       source_facts: assessment.source_facts?.map((fact) => ({
         fact_id: fact.fact_id,
         source_language: fact.source_language,
@@ -4386,6 +5431,13 @@ function canonicalVerificationPayload(
         evidence_ids: [...fact.evidence_ids].sort(),
       })) ?? null,
       editorial_projection: assessment.editorial_projection ?? null,
+      evidence_dispositions: assessment.evidence_dispositions?.map((item) => ({
+        evidence_id: item.evidence_id,
+        disposition: item.disposition,
+        source_fact_ids: [...item.source_fact_ids],
+        reason_code: item.reason_code,
+      })) ?? null,
+      evidence_completeness: assessment.evidence_completeness?.map((item) => ({ ...item })) ?? null,
       bilingual_semantic_contract: bilingualSemanticProofContract(assessment),
     },
     evidence: canonicalEvidence(evidence),
@@ -4420,6 +5472,18 @@ function canonicalVerificationPayload(
         supported: projection.supported,
         issue_code: projection.issue_code,
       })) ?? null,
+      disposition_results: verification.disposition_results?.map((item) => ({
+        evidence_id: item.evidence_id,
+        disposition: item.disposition,
+        supported: item.supported,
+        issue_code: item.issue_code,
+        source_quotes: item.source_quotes.map((quote) => ({
+          evidence_id: quote.evidence_id,
+          quote: quote.quote,
+        })),
+        quote_relation: item.quote_relation,
+      })) ?? null,
+      completeness_results: verification.completeness_results?.map((item) => ({ ...item })) ?? null,
       prior_context: verification.prior_context,
     },
   });
@@ -4487,8 +5551,13 @@ export async function createManualLeadVerificationProof(
   if (input.assessment.generated_claim_contract !== MANUAL_LEAD_GENERATED_CLAIM_CONTRACT
     || input.assessment.source_fact_contract !== MANUAL_LEAD_SOURCE_FACT_CONTRACT
     || input.assessment.editorial_projection_contract !== MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT
+    || input.assessment.evidence_disposition_contract !== MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT
     || !input.assessment.source_facts?.length || !input.assessment.editorial_projection
-    || !input.verification.projection_results?.length) {
+    || !input.assessment.evidence_dispositions?.length
+    || !input.assessment.evidence_completeness?.length
+    || !input.verification.projection_results?.length
+    || !input.verification.disposition_results?.length
+    || !input.verification.completeness_results?.length) {
     throw new Error('manual_news_verification_contract_invalid');
   }
   const canonicalDigest = await sha256Hex(canonicalVerificationPayload(
@@ -4578,10 +5647,29 @@ const ASSESSMENT_VALIDATION_ERROR_CODES = new Set([
   'invalid_editorial_projection_time',
   'non_atomic_claim',
   'non_atomic_fact',
+  'non_atomic_source_subject',
+  'non_atomic_source_predicate',
+  'non_atomic_source_object',
+  'non_atomic_source_assembled',
+  'non_atomic_editorial_subject',
+  'non_atomic_editorial_predicate',
+  'non_atomic_editorial_object',
+  'non_atomic_editorial_assembled',
   'unknown_evidence_id',
   'invalid_matched_event_key',
   'unknown_matched_event_key',
   'matched_event_key_mismatch',
+  'invalid_evidence_dispositions',
+  'invalid_evidence_disposition',
+  'invalid_evidence_disposition_coverage',
+  'evidence_disposition_related_uncovered',
+  'evidence_disposition_conflict_uncovered',
+  'evidence_disposition_update_uncovered',
+  'evidence_disposition_classification_uncertain',
+  'evidence_disposition_unrelated_misclassified',
+  'evidence_disposition_fact_reference_mismatch',
+  'evidence_disposition_conflict_requires_review',
+  'evidence_disposition_claim_mismatch',
 ]);
 
 const REGENERATABLE_ASSESSMENT_VALIDATION_CODES = new Set([
@@ -4620,10 +5708,29 @@ const REGENERATABLE_ASSESSMENT_VALIDATION_CODES = new Set([
   'invalid_editorial_projection_time',
   'non_atomic_claim',
   'non_atomic_fact',
+  'non_atomic_source_subject',
+  'non_atomic_source_predicate',
+  'non_atomic_source_object',
+  'non_atomic_source_assembled',
+  'non_atomic_editorial_subject',
+  'non_atomic_editorial_predicate',
+  'non_atomic_editorial_object',
+  'non_atomic_editorial_assembled',
   'unknown_evidence_id',
   'invalid_matched_event_key',
   'unknown_matched_event_key',
   'matched_event_key_mismatch',
+  'invalid_evidence_dispositions',
+  'invalid_evidence_disposition',
+  'invalid_evidence_disposition_coverage',
+  'evidence_disposition_related_uncovered',
+  'evidence_disposition_conflict_uncovered',
+  'evidence_disposition_update_uncovered',
+  'evidence_disposition_classification_uncertain',
+  'evidence_disposition_unrelated_misclassified',
+  'evidence_disposition_fact_reference_mismatch',
+  'evidence_disposition_conflict_requires_review',
+  'evidence_disposition_claim_mismatch',
 ]);
 
 export function isRegeneratableManualLeadAssessmentValidationCode(code: string): boolean {
@@ -4631,9 +5738,109 @@ export function isRegeneratableManualLeadAssessmentValidationCode(code: string):
 }
 
 export function manualLeadAssessmentValidationErrorCode(error: unknown): string {
+  return manualLeadAssessmentValidationFailure(error).code;
+}
+
+const SAFE_GENERATED_ASSESSMENT_PATH = /^(?:source_facts\[(?:0|1|2)\]\.(?:fact_ref|source_language|atomic_fact\.(?:subject|subject_role|predicate|object|assembled)|evidence_ids\[(?:[0-9]|1[0-5])\])|editorial_projection\.(?:title|summary\[(?:0|1|2)\])\.(?:projection_ref|source_fact_refs\[0\]|atomic_fact\.(?:subject|subject_role|predicate|object|assembled)))$/u;
+
+export interface ManualLeadAssessmentValidationFailure {
+  code: string;
+  path?: string;
+}
+
+export function manualLeadAssessmentValidationFailure(
+  error: unknown,
+): ManualLeadAssessmentValidationFailure {
   const message = error instanceof Error ? error.message : String(error);
-  const code = message.split(':', 1)[0];
-  return ASSESSMENT_VALIDATION_ERROR_CODES.has(code) ? code : 'assessment_validation_failed';
+  const separator = message.indexOf(':');
+  const rawCode = separator < 0 ? message : message.slice(0, separator);
+  const code = ASSESSMENT_VALIDATION_ERROR_CODES.has(rawCode)
+    ? rawCode
+    : 'assessment_validation_failed';
+  const candidatePath = separator < 0 ? '' : message.slice(separator + 1);
+  return SAFE_GENERATED_ASSESSMENT_PATH.test(candidatePath)
+    ? { code, path: candidatePath }
+    : { code };
+}
+
+export interface ManualNewsAssessmentGenerationAudit {
+  assessment_generation_attempts: 1 | 2;
+  assessment_first_validation_code: string;
+  assessment_first_validation_path?: string;
+  assessment_last_validation_code: string;
+  assessment_last_validation_path?: string;
+  assessment_regeneration_trigger_code?: string;
+  assessment_regeneration_trigger_path?: string;
+}
+
+function safeAssessmentAuditCode(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length <= 80
+    && (value === 'valid' || value === 'not_validated'
+      || value === 'assessment_validation_failed'
+      || ASSESSMENT_VALIDATION_ERROR_CODES.has(value));
+}
+
+function assessmentAuditPathMatchesCode(code: string, path: unknown): boolean {
+  if (path !== undefined && (typeof path !== 'string' || !SAFE_GENERATED_ASSESSMENT_PATH.test(path))) {
+    return false;
+  }
+  if (code === 'valid' || code === 'not_validated') return path === undefined;
+  const atomic = /^non_atomic_(source|editorial)_(subject|predicate|object|assembled)$/u.exec(code);
+  if (!atomic) return true;
+  if (typeof path !== 'string' || !path.endsWith(`.atomic_fact.${atomic[2]}`)) return false;
+  return atomic[1] === 'source'
+    ? path.startsWith('source_facts[')
+    : path.startsWith('editorial_projection.');
+}
+
+export function manualNewsAssessmentGenerationAudit(
+  value: unknown,
+): ManualNewsAssessmentGenerationAudit | null {
+  if (!isPlainObject(value)) return null;
+  const attempts = value.assessment_generation_attempts;
+  if (attempts !== 1 && attempts !== 2) return null;
+  const firstCode = value.assessment_first_validation_code;
+  const lastCode = value.assessment_last_validation_code;
+  const triggerCode = value.assessment_regeneration_trigger_code;
+  if (!safeAssessmentAuditCode(firstCode) || !safeAssessmentAuditCode(lastCode)
+    || (attempts === 1 && (triggerCode !== undefined
+      || value.assessment_regeneration_trigger_path !== undefined))
+    || (attempts === 2 && (!safeAssessmentAuditCode(triggerCode)
+      || triggerCode !== firstCode
+      || value.assessment_regeneration_trigger_path !== value.assessment_first_validation_path))) {
+    return null;
+  }
+  for (const field of [
+    'assessment_first_validation_path',
+    'assessment_last_validation_path',
+    'assessment_regeneration_trigger_path',
+  ] as const) {
+    const path = value[field];
+    if (path !== undefined && (typeof path !== 'string' || !SAFE_GENERATED_ASSESSMENT_PATH.test(path))) {
+      return null;
+    }
+  }
+  if (!assessmentAuditPathMatchesCode(firstCode, value.assessment_first_validation_path)
+    || !assessmentAuditPathMatchesCode(lastCode, value.assessment_last_validation_path)
+    || (typeof triggerCode === 'string'
+      && !assessmentAuditPathMatchesCode(triggerCode, value.assessment_regeneration_trigger_path))) {
+    return null;
+  }
+  const audit: ManualNewsAssessmentGenerationAudit = {
+    assessment_generation_attempts: attempts,
+    assessment_first_validation_code: firstCode,
+    assessment_last_validation_code: lastCode,
+    ...(typeof value.assessment_first_validation_path === 'string'
+      ? { assessment_first_validation_path: value.assessment_first_validation_path } : {}),
+    ...(typeof value.assessment_last_validation_path === 'string'
+      ? { assessment_last_validation_path: value.assessment_last_validation_path } : {}),
+    ...(typeof triggerCode === 'string'
+      ? { assessment_regeneration_trigger_code: triggerCode } : {}),
+    ...(typeof value.assessment_regeneration_trigger_path === 'string'
+      ? { assessment_regeneration_trigger_path: value.assessment_regeneration_trigger_path } : {}),
+  };
+  return audit;
 }
 
 export function applyManualLeadEvidencePolicy(

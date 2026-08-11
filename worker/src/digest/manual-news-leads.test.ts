@@ -13,7 +13,9 @@ import {
   MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
   MANUAL_LEAD_SOURCE_FACT_CONTRACT,
   MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+  manualLeadAssessmentValidationFailure,
   manualLeadAssessmentValidationErrorCode,
+  manualNewsAssessmentGenerationAudit,
   mergeManualLeadCandidate,
   missingManualLeadEvidenceAnchors,
   validateManualLeadAssessment,
@@ -79,6 +81,19 @@ const techCrunchAlibabaBan: ManualNewsEvidence = {
   claims_supported: [
     'Alibaba reportedly bans employees from using Claude Code.',
   ],
+  reliable: true,
+};
+
+const officialAlibabaDenial: ManualNewsEvidence = {
+  id: 'ev-alibaba-official-denial',
+  url: 'https://alibaba.example/statement',
+  source_type: 'official_statement',
+  publisher: 'Alibaba',
+  published_at: '2026-08-11T03:00:00Z',
+  retrieved_at: 2,
+  title: 'Alibaba denies banning employees from using Claude Code',
+  excerpt: 'Alibaba denies banning employees from using Claude Code and says the reported restriction was withdrawn.',
+  claims_supported: ['Alibaba denies banning employees from using Claude Code.'],
   reliable: true,
 };
 
@@ -205,6 +220,12 @@ function alibabaBanGeneratedAssessment(
       },
       evidence_ids: [techCrunchAlibabaBan.id],
     }],
+    evidence_dispositions: [{
+      evidence_id: techCrunchAlibabaBan.id,
+      disposition: 'supports_core',
+      source_fact_refs: ['fact-01'],
+      reason_code: null,
+    }],
     editorial_projection: {
       title: {
         projection_ref: 'title-01',
@@ -290,15 +311,27 @@ async function createMaliciouslySupportedAlibabaProjectionProof(input: {
 async function createMaliciouslySupportedGeneratedProjectionProof(
   rawAssessment: unknown,
   quote: string,
+  factQuote = quote,
 ) {
+  const generatedInput = structuredClone(rawAssessment) as Record<string, any>;
+  const sourceAtomic = generatedInput.source_facts?.[0]?.atomic_fact as Record<string, string> | undefined;
+  const sourceQuote = sourceAtomic
+    ? `${sourceAtomic.subject} ${sourceAtomic.predicate} ${sourceAtomic.object}.`
+    : quote;
   const evidence = [{
     ...techCrunchAlibabaBan,
-    title: quote,
-    excerpt: quote,
-    claims_supported: [quote],
+    title: sourceQuote,
+    excerpt: sourceQuote === quote ? quote : `${sourceQuote} ${quote}`,
+    claims_supported: [...new Set([sourceQuote, quote])],
+  }];
+  generatedInput.evidence_dispositions ||= [{
+    evidence_id: evidence[0].id,
+    disposition: 'supports_core',
+    source_fact_refs: ['fact-01'],
+    reason_code: null,
   }];
   const generated = validateManualLeadGeneratedAssessment(
-    rawAssessment,
+    generatedInput,
     evidence,
   );
   const candidate: ManualNewsProcessedAssessment = {
@@ -312,15 +345,23 @@ async function createMaliciouslySupportedGeneratedProjectionProof(
   }).user) as {
     facts: Array<{ fact_id: string }>;
     projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+    evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
   };
   const verification = validateManualLeadFactVerification({
     overall_verdict: 'supported',
-    fact_results: prompt.facts.map((fact) => supportedFactResult(fact.fact_id, evidence[0].id, quote)),
+    fact_results: prompt.facts.map((fact) => supportedFactResult(fact.fact_id, evidence[0].id, factQuote)),
     projection_results: prompt.projections.map((projection) => ({
       projection_id: projection.projection_id,
       source_fact_ids: projection.source_fact_ids,
       supported: true,
       issue_code: 'none',
+    })),
+    disposition_results: prompt.evidence_dispositions.map((disposition) => ({
+      evidence_id: disposition.evidence_id,
+      disposition: disposition.disposition,
+      supported: true,
+      issue_code: 'none',
+      source_quotes: [{ evidence_id: disposition.evidence_id, quote }],
     })),
   }, candidate, evidence);
   const proofInput = {
@@ -335,7 +376,1105 @@ async function createMaliciouslySupportedGeneratedProjectionProof(
   return isCurrentManualLeadVerification(proofInput, proof, secret);
 }
 
+async function createMaliciouslySupportedControllerUpdateProof(quote: string) {
+  const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+  const sourceQuote = techCrunchAlibabaBan.claims_supported[0];
+  const updateEvidence: ManualNewsEvidence = {
+    ...officialAlibabaDenial,
+    id: 'ev-role-controller-update',
+    title: quote,
+    excerpt: quote,
+    claims_supported: [quote],
+  };
+  const evidence: ManualNewsEvidence[] = [techCrunchAlibabaBan, updateEvidence];
+  raw.recommendation = 'needs_review';
+  raw.uncertainties = ['该证据可能包含后续状态变化。'];
+  raw.evidence_dispositions.push({
+    evidence_id: updateEvidence.id, disposition: 'material_update',
+    source_fact_refs: ['fact-01'], reason_code: null,
+  });
+  const generated = validateManualLeadGeneratedAssessment(raw, evidence);
+  const candidate: ManualNewsProcessedAssessment = {
+    ...applyManualLeadEvidencePolicy(generated, evidence),
+    duplicate_scope: null,
+    matched_lead_id: null,
+  };
+  const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({
+    assessment: candidate,
+    evidence,
+  }).user) as {
+    facts: Array<{ fact_id: string }>;
+    projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+    evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
+  };
+  const verification = validateManualLeadFactVerification({
+    overall_verdict: 'conflicted',
+    fact_results: prompt.facts.map((fact) => supportedFactResult(
+      fact.fact_id, techCrunchAlibabaBan.id, sourceQuote,
+    )),
+    projection_results: prompt.projections.map((projection) => ({
+      projection_id: projection.projection_id,
+      source_fact_ids: projection.source_fact_ids,
+      supported: true,
+      issue_code: 'none',
+    })),
+    disposition_results: prompt.evidence_dispositions.map((disposition) => ({
+      evidence_id: disposition.evidence_id,
+      disposition: disposition.disposition,
+      supported: true,
+      issue_code: 'none',
+      source_quotes: [{
+        evidence_id: disposition.evidence_id,
+        quote: disposition.evidence_id === updateEvidence.id ? quote : sourceQuote,
+      }],
+    })),
+  }, candidate, evidence);
+  const proofInput = {
+    lead_id: 'ml-20260811-role-controller-update',
+    assessment_version: 9,
+    assessment: candidate,
+    evidence,
+    verification,
+  };
+  const secret = 'a'.repeat(64);
+  const proof = await createManualLeadVerificationProof(proofInput, secret);
+  return isCurrentManualLeadVerification(proofInput, proof, secret);
+}
+
 describe('manual news lead domain', () => {
+  test('requires exactly one bounded disposition for every allowed evidence id', () => {
+    const missing = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    delete missing.evidence_dispositions;
+    expect(() => validateManualLeadGeneratedAssessment(missing, [techCrunchAlibabaBan]))
+      .toThrow(/invalid_evidence_dispositions/);
+
+    const duplicate = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    duplicate.evidence_dispositions.push(structuredClone(duplicate.evidence_dispositions[0]));
+    expect(() => validateManualLeadGeneratedAssessment(duplicate, [techCrunchAlibabaBan]))
+      .toThrow(/invalid_evidence_disposition_coverage/);
+  });
+
+  test('fails closed when an official denial is hidden as irrelevant even if the verifier could say supported', () => {
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.evidence_dispositions.push({
+      evidence_id: officialAlibabaDenial.id,
+      disposition: 'irrelevant',
+      source_fact_refs: [],
+      reason_code: 'unrelated_event',
+    });
+    expect(() => validateManualLeadGeneratedAssessment(
+      raw, [techCrunchAlibabaBan, officialAlibabaDenial],
+    )).toThrow(/evidence_disposition_conflict_uncovered/);
+  });
+
+  test('keeps an explicit denial signed only as needs_review with bounded uncertainty', () => {
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.recommendation = 'needs_review';
+    raw.uncertainties = ['官方否认与独立报道冲突。'];
+    raw.evidence_dispositions.push({
+      evidence_id: officialAlibabaDenial.id,
+      disposition: 'contradicts_core',
+      source_fact_refs: ['fact-01'],
+      reason_code: null,
+    });
+    const validated = validateManualLeadGeneratedAssessment(
+      raw, [techCrunchAlibabaBan, officialAlibabaDenial],
+    );
+    expect(validated).toMatchObject({
+      recommendation: 'needs_review',
+      evidence_dispositions: [
+        { evidence_id: techCrunchAlibabaBan.id, disposition: 'supports_core' },
+        { evidence_id: officialAlibabaDenial.id, disposition: 'contradicts_core' },
+      ],
+      evidence_completeness: [
+        { evidence_id: techCrunchAlibabaBan.id, relation: 'supports' },
+        { evidence_id: officialAlibabaDenial.id, relation: 'conflicts' },
+      ],
+    });
+  });
+
+  test('verifies every evidence disposition and signs an explicit conflict without recommending it', () => {
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.recommendation = 'needs_review';
+    raw.uncertainties = ['官方否认与独立报道冲突。'];
+    raw.evidence_dispositions.push({
+      evidence_id: officialAlibabaDenial.id,
+      disposition: 'contradicts_core',
+      source_fact_refs: ['fact-01'],
+      reason_code: null,
+    });
+    const evidence = [techCrunchAlibabaBan, officialAlibabaDenial];
+    const generated = validateManualLeadGeneratedAssessment(raw, evidence);
+    const candidate: ManualNewsProcessedAssessment = {
+      ...applyManualLeadEvidencePolicy(generated, evidence), duplicate_scope: null, matched_lead_id: null,
+    };
+    const body = JSON.parse(buildManualLeadFactVerificationPrompt({ assessment: candidate, evidence }).user) as {
+      facts: Array<{ fact_id: string }>;
+      projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+      untrusted_evidence: Array<{ id: string }>;
+      evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
+    };
+    expect(body.untrusted_evidence.map((item) => item.id)).toEqual(evidence.map((item) => item.id));
+    expect(body.evidence_dispositions).toHaveLength(2);
+    const verification = validateManualLeadFactVerification({
+      overall_verdict: 'conflicted',
+      fact_results: body.facts.map((fact) => supportedFactResult(
+        fact.fact_id, techCrunchAlibabaBan.id, techCrunchAlibabaBan.claims_supported[0],
+      )),
+      projection_results: body.projections.map((projection) => ({
+        projection_id: projection.projection_id,
+        source_fact_ids: projection.source_fact_ids,
+        supported: true,
+        issue_code: 'none',
+      })),
+      disposition_results: [{
+        evidence_id: techCrunchAlibabaBan.id,
+        disposition: 'supports_core', supported: true, issue_code: 'none',
+        source_quotes: [{
+          evidence_id: techCrunchAlibabaBan.id, quote: techCrunchAlibabaBan.claims_supported[0],
+        }],
+      }, {
+        evidence_id: officialAlibabaDenial.id,
+        disposition: 'contradicts_core', supported: true, issue_code: 'none',
+        source_quotes: [{
+          evidence_id: officialAlibabaDenial.id, quote: officialAlibabaDenial.claims_supported[0],
+        }],
+      }],
+    }, candidate, evidence);
+    expect(verification).toMatchObject({
+      overall_verdict: 'conflicted',
+      completeness_results: [
+        { evidence_id: techCrunchAlibabaBan.id, relation: 'supports' },
+        { evidence_id: officialAlibabaDenial.id, relation: 'conflicts' },
+      ],
+    });
+  });
+
+  test('binds two supporting reports and an official denial into one conflicted current proof', async () => {
+    const secondReport: ManualNewsEvidence = {
+      ...techCrunchAlibabaBan,
+      id: 'ev-independent-alibaba-ban-2',
+      url: 'https://independent.example/alibaba-claude-code-ban',
+      publisher: 'Independent AI News',
+      published_at: '2026-08-11T02:00:00Z',
+    };
+    const evidence = [techCrunchAlibabaBan, secondReport, officialAlibabaDenial];
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.recommendation = 'needs_review';
+    raw.uncertainties = ['两家独立媒体报道与阿里巴巴官方否认相冲突。'];
+    raw.source_facts[0].evidence_ids.push(secondReport.id);
+    raw.evidence_dispositions.push({
+      evidence_id: secondReport.id, disposition: 'supports_core',
+      source_fact_refs: ['fact-01'], reason_code: null,
+    }, {
+      evidence_id: officialAlibabaDenial.id, disposition: 'contradicts_core',
+      source_fact_refs: ['fact-01'], reason_code: null,
+    });
+    const generated = validateManualLeadGeneratedAssessment(raw, evidence);
+    const candidate: ManualNewsProcessedAssessment = {
+      ...applyManualLeadEvidencePolicy(generated, evidence), duplicate_scope: null, matched_lead_id: null,
+    };
+    const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({ assessment: candidate, evidence }).user) as {
+      facts: Array<{ fact_id: string }>;
+      projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+      evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
+    };
+    const byId = new Map(evidence.map((item) => [item.id, item]));
+    const verification = validateManualLeadFactVerification({
+      overall_verdict: 'conflicted',
+      fact_results: prompt.facts.map((fact) => supportedFactResult(
+        fact.fact_id, techCrunchAlibabaBan.id, techCrunchAlibabaBan.claims_supported[0],
+      )),
+      projection_results: prompt.projections.map((projection) => ({
+        projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
+        supported: true, issue_code: 'none',
+      })),
+      disposition_results: prompt.evidence_dispositions.map((disposition) => ({
+        evidence_id: disposition.evidence_id, disposition: disposition.disposition,
+        supported: true, issue_code: 'none',
+        source_quotes: [{
+          evidence_id: disposition.evidence_id,
+          quote: byId.get(disposition.evidence_id)!.claims_supported[0],
+        }],
+      })),
+    }, candidate, evidence);
+    const secret = 'a'.repeat(64);
+    const proofInput = {
+      lead_id: 'ml-20260811-conflicted-proof', assessment_version: 9,
+      assessment: candidate, evidence, verification,
+    };
+    const proof = await createManualLeadVerificationProof(proofInput, secret);
+    await expect(isCurrentManualLeadVerification(proofInput, proof, secret)).resolves.toBe(true);
+    expect(candidate).toMatchObject({ recommendation: 'needs_review' });
+    expect(verification).toMatchObject({ overall_verdict: 'conflicted' });
+  });
+
+  test('requires explicit conflict and update dispositions for scope limits and later status changes', () => {
+    const scopeLimit: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: 'ev-alibaba-scope-limit',
+      title: 'Alibaba says the restriction only applies to contractors using Claude Code',
+      excerpt: 'Alibaba says the restriction only applies to contractors using Claude Code.',
+      claims_supported: ['Alibaba says the restriction only applies to contractors using Claude Code.'],
+    };
+    const laterUpdate: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: 'ev-alibaba-later-update',
+      published_at: '2026-08-11T05:00:00Z',
+      title: 'Alibaba subsequently changed the Claude Code restriction',
+      excerpt: 'Alibaba subsequently changed the Claude Code restriction and resumed employee access.',
+      claims_supported: ['Alibaba subsequently changed the Claude Code restriction and resumed employee access.'],
+    };
+    const withdrawalUpdate: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: 'ev-alibaba-withdrawal-update',
+      published_at: '2026-08-11T06:00:00Z',
+      title: 'Alibaba withdrew the Claude Code restriction',
+      excerpt: 'Alibaba withdrew the Claude Code restriction for employees.',
+      claims_supported: ['Alibaba withdrew the Claude Code restriction for employees.'],
+    };
+
+    const hiddenScope = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    hiddenScope.evidence_dispositions.push({
+      evidence_id: scopeLimit.id, disposition: 'background',
+      source_fact_refs: [], reason_code: 'context_only',
+    });
+    expect(() => validateManualLeadGeneratedAssessment(
+      hiddenScope, [techCrunchAlibabaBan, scopeLimit],
+    )).toThrow(/evidence_disposition_conflict_uncovered/);
+
+    const hiddenUpdate = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    hiddenUpdate.evidence_dispositions.push({
+      evidence_id: laterUpdate.id, disposition: 'background',
+      source_fact_refs: [], reason_code: 'context_only',
+    });
+    expect(() => validateManualLeadGeneratedAssessment(
+      hiddenUpdate, [techCrunchAlibabaBan, laterUpdate],
+    )).toThrow(/evidence_disposition_update_uncovered/);
+
+    const hiddenWithdrawal = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    hiddenWithdrawal.evidence_dispositions.push({
+      evidence_id: withdrawalUpdate.id, disposition: 'irrelevant',
+      source_fact_refs: [], reason_code: 'unrelated_event',
+    });
+    expect(() => validateManualLeadGeneratedAssessment(
+      hiddenWithdrawal, [techCrunchAlibabaBan, withdrawalUpdate],
+    )).toThrow(/evidence_disposition_update_uncovered/);
+
+    const coveredUpdate = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    coveredUpdate.recommendation = 'needs_review';
+    coveredUpdate.uncertainties = ['更晚的官方信息显示限制状态已经变化。'];
+    coveredUpdate.evidence_dispositions.push({
+      evidence_id: laterUpdate.id, disposition: 'material_update',
+      source_fact_refs: ['fact-01'], reason_code: null,
+    });
+    expect(validateManualLeadGeneratedAssessment(
+      coveredUpdate, [techCrunchAlibabaBan, laterUpdate],
+    )).toMatchObject({
+      recommendation: 'needs_review',
+      evidence_dispositions: expect.arrayContaining([
+        expect.objectContaining({ evidence_id: laterUpdate.id, disposition: 'material_update' }),
+      ]),
+    });
+  });
+
+  test('allows a truly unrelated evidence item only with an explicit bounded disposition', () => {
+    const unrelated: ManualNewsEvidence = {
+      ...techCrunchAlibabaBan,
+      id: 'ev-unrelated-openai-model',
+      url: 'https://independent.example/openai-model',
+      publisher: 'Independent Model News',
+      title: 'OpenAI releases GPT-6 image model',
+      excerpt: 'OpenAI releases GPT-6 image model for developers.',
+      claims_supported: ['OpenAI releases GPT-6 image model for developers.'],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.evidence_dispositions.push({
+      evidence_id: unrelated.id, disposition: 'irrelevant',
+      source_fact_refs: [], reason_code: 'unrelated_event',
+    });
+    expect(validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan, unrelated]))
+      .toMatchObject({ evidence_dispositions: expect.arrayContaining([
+        expect.objectContaining({
+          evidence_id: unrelated.id, disposition: 'irrelevant', reason_code: 'unrelated_event',
+        }),
+      ]) });
+  });
+
+  test.each([
+    {
+      label: 'same-company cloud pricing negation',
+      evidence: {
+        ...techCrunchAlibabaBan,
+        id: 'ev-alibaba-cloud-pricing',
+        title: 'Alibaba cloud pricing was not affected by an older discount',
+        excerpt: 'Alibaba cloud pricing was not affected by an older discount.',
+        claims_supported: ['Alibaba cloud pricing was not affected by an older discount.'],
+      },
+    },
+    {
+      label: 'old Qwen 2 negative',
+      evidence: {
+        ...techCrunchAlibabaBan,
+        id: 'ev-alibaba-qwen2-old-negative',
+        title: 'Alibaba says Qwen 2 was not affected by an old cloud pricing change',
+        excerpt: 'Alibaba says Qwen 2 was not affected by an old cloud pricing change.',
+        claims_supported: ['Alibaba says Qwen 2 was not affected by an old cloud pricing change.'],
+      },
+    },
+  ])('does not turn an unrelated negative clause into a core conflict: $label', ({ evidence }) => {
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.evidence_dispositions.push({
+      evidence_id: evidence.id, disposition: 'irrelevant',
+      source_fact_refs: [], reason_code: 'unrelated_event',
+    });
+    expect(validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan, evidence]))
+      .toMatchObject({ evidence_completeness: expect.arrayContaining([
+        { evidence_id: evidence.id, relation: 'unrelated' },
+      ]) });
+  });
+
+  test('treats a question-framed misleading rumor headline as uncertain, not a declarative denial', () => {
+    const rumorQuestion: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: 'ev-alibaba-rumor-question',
+      title: 'Why the Alibaba Claude Code ban rumor is misleading?',
+      excerpt: 'A commentary asks why the Alibaba Claude Code ban rumor is misleading.',
+      claims_supported: ['Why the Alibaba Claude Code ban rumor is misleading?'],
+      reliable: false,
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.evidence_dispositions.push({
+      evidence_id: rumorQuestion.id, disposition: 'background',
+      source_fact_refs: [], reason_code: 'insufficient_overlap',
+    });
+    expect(validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan, rumorQuestion]))
+      .toMatchObject({
+        recommendation: 'needs_review',
+        evidence_completeness: expect.arrayContaining([
+          { evidence_id: rumorQuestion.id, relation: 'uncertain' },
+        ]),
+      });
+  });
+
+  test('recognizes a direct official statement calling the matching reports false as a conflict', () => {
+    const officialFalseReport: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: 'ev-alibaba-official-false-report',
+      title: 'Alibaba calls reports that it banned employees from using Claude Code false',
+      excerpt: 'Alibaba calls reports that it banned employees from using Claude Code false.',
+      claims_supported: ['Alibaba calls reports that it banned employees from using Claude Code false.'],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.uncertainties = ['阿里巴巴官方声明与媒体报道冲突。'];
+    raw.evidence_dispositions.push({
+      evidence_id: officialFalseReport.id, disposition: 'contradicts_core',
+      source_fact_refs: ['fact-01'], reason_code: null,
+    });
+    expect(validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan, officialFalseReport]))
+      .toMatchObject({ evidence_completeness: expect.arrayContaining([
+        { evidence_id: officialFalseReport.id, relation: 'conflicts' },
+      ]) });
+  });
+
+  test('does not let a supporting clause hide a related unparsed denial in the same evidence', () => {
+    const ambiguousDenial: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: 'ev-alibaba-support-plus-unparsed-denial',
+      title: 'Alibaba reportedly bans employees from using Claude Code',
+      excerpt: 'Alibaba reportedly bans employees from using Claude Code. Alibaba would not validate the Claude Code ban report.',
+      claims_supported: [
+        'Alibaba reportedly bans employees from using Claude Code.',
+        'Alibaba would not validate the Claude Code ban report.',
+      ],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.recommendation = 'recommended';
+    raw.source_facts[0].evidence_ids = [techCrunchAlibabaBan.id];
+    raw.evidence_dispositions.push({
+      evidence_id: ambiguousDenial.id, disposition: 'background',
+      source_fact_refs: [], reason_code: 'insufficient_overlap',
+    });
+    expect(() => validateManualLeadGeneratedAssessment(
+      raw, [techCrunchAlibabaBan, ambiguousDenial],
+    )).toThrow(/evidence_disposition_classification_uncertain/);
+  });
+
+  test.each([
+    'Alibaba reportedly bans employees from using Claude Code despite calling reports of the ban false.',
+    'Alibaba reportedly bans employees from using Claude Code notwithstanding its denial of the restriction.',
+    'Alibaba reportedly bans employees from using Claude Code although it denied the report.',
+    'Alibaba reportedly bans employees from using Claude Code alongside an Alibaba cloud price increase.',
+    'Alibaba reportedly bans employees from using Claude Code, not to mention Alibaba layoffs.',
+    'Alibaba reportedly bans employees from using Claude Code while Alibaba customer service remains available.',
+    'Alibaba reportedly bans employees from using Claude Code whereas Alibaba customer service remains available.',
+    'Alibaba reportedly bans employees from using Claude Code，但阿里巴巴否认相关报道。',
+    'Alibaba reportedly bans employees from using Claude Code，尽管阿里巴巴否认相关报道。',
+    'Alibaba reportedly bans employees from using Claude Code，虽然阿里巴巴否认相关报道。',
+    'Alibaba reportedly bans employees from using Claude Code，以及客服仍可用。',
+  ])('blocks an additive or concessive support unit before a malicious verifier can mint a current v9 proof: %s', async (quote) => {
+    await expect(createMaliciouslySupportedGeneratedProjectionProof(
+      alibabaBanGeneratedAssessment(),
+      quote,
+      techCrunchAlibabaBan.claims_supported[0],
+    )).rejects.toThrow(/evidence_disposition|verification_semantics/);
+  });
+
+  test('gives a reliable direct denial precedence over a supporting clause in the same evidence and proof', async () => {
+    const mixedOfficial: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: 'ev-alibaba-support-plus-official-denial',
+      title: 'Alibaba reportedly bans employees from using Claude Code',
+      excerpt: 'Alibaba reportedly bans employees from using Claude Code. Alibaba called reports of a Claude Code ban false.',
+      claims_supported: [
+        'Alibaba reportedly bans employees from using Claude Code.',
+        'Alibaba called reports of a Claude Code ban false.',
+      ],
+    };
+    const evidence = [techCrunchAlibabaBan, mixedOfficial];
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.recommendation = 'needs_review';
+    raw.uncertainties = ['同一官方证据包含对媒体报道的明确否认。'];
+    raw.evidence_dispositions.push({
+      evidence_id: mixedOfficial.id, disposition: 'contradicts_core',
+      source_fact_refs: ['fact-01'], reason_code: null,
+    });
+    const generated = validateManualLeadGeneratedAssessment(raw, evidence);
+    expect(generated.evidence_completeness).toContainEqual({
+      evidence_id: mixedOfficial.id, relation: 'conflicts',
+    });
+    const candidate: ManualNewsProcessedAssessment = {
+      ...applyManualLeadEvidencePolicy(generated, evidence), duplicate_scope: null, matched_lead_id: null,
+    };
+    const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({ assessment: candidate, evidence }).user) as {
+      facts: Array<{ fact_id: string }>;
+      projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+      evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
+    };
+    const verification = validateManualLeadFactVerification({
+      overall_verdict: 'conflicted',
+      fact_results: prompt.facts.map((fact) => supportedFactResult(
+        fact.fact_id, techCrunchAlibabaBan.id, techCrunchAlibabaBan.claims_supported[0],
+      )),
+      projection_results: prompt.projections.map((projection) => ({
+        projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
+        supported: true, issue_code: 'none',
+      })),
+      disposition_results: prompt.evidence_dispositions.map((disposition) => ({
+        evidence_id: disposition.evidence_id, disposition: disposition.disposition,
+        supported: true, issue_code: 'none', source_quotes: [{
+          evidence_id: disposition.evidence_id,
+          quote: disposition.evidence_id === mixedOfficial.id
+            ? mixedOfficial.claims_supported[1]
+            : techCrunchAlibabaBan.claims_supported[0],
+        }],
+      })),
+    }, candidate, evidence);
+    const secret = 'a'.repeat(64);
+    const proofInput = {
+      lead_id: 'ml-20260811-mixed-denial-proof', assessment_version: 9,
+      assessment: candidate, evidence, verification,
+    };
+    const proof = await createManualLeadVerificationProof(proofInput, secret);
+    await expect(isCurrentManualLeadVerification(proofInput, proof, secret)).resolves.toBe(true);
+  });
+
+  test.each([
+    'OpenAI cancelled its integration with Alibaba and Claude Code.',
+    'Microsoft withdrew a plugin connecting Alibaba with Claude Code.',
+  ])('does not treat an object-position Alibaba mention as the controller of an update: %s', (statement) => {
+    const unrelatedController: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: `ev-unrelated-controller-${statement.startsWith('OpenAI') ? 'openai' : 'microsoft'}`,
+      title: statement, excerpt: statement, claims_supported: [statement],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.evidence_dispositions.push({
+      evidence_id: unrelatedController.id, disposition: 'irrelevant',
+      source_fact_refs: [], reason_code: 'unrelated_event',
+    });
+    expect(validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan, unrelatedController]))
+      .toMatchObject({ evidence_completeness: expect.arrayContaining([
+        { evidence_id: unrelatedController.id, relation: 'unrelated' },
+      ]) });
+  });
+
+  test.each([
+    'Alibaba partner OpenAI cancelled its Claude Code restriction.',
+    'Alibaba investor Microsoft withdrew its Claude Code restriction.',
+    'Alibaba customer OpenAI cancelled its Claude Code restriction.',
+    'Alibaba supplier Microsoft withdrew its Claude Code restriction.',
+    'Alibaba’s partner OpenAI cancelled its Claude Code restriction.',
+    'Alibaba‘s investor Microsoft withdrew its Claude Code restriction.',
+    'Alibabaʼs customer OpenAI cancelled its Claude Code restriction.',
+    'Alibaba strategic partner OpenAI cancelled its Claude Code restriction.',
+    'Alibaba long-time investor Microsoft withdrew its Claude Code restriction.',
+    'Alibaba enterprise customer OpenAI cancelled its Claude Code restriction.',
+    '阿里巴巴的合作伙伴OpenAI取消了Claude Code限制。',
+    '阿里巴巴的投资方Microsoft撤回了Claude Code限制。',
+    '阿里巴巴重要客户OpenAI取消了Claude Code限制。',
+    '阿里巴巴合作伙伴OpenAI取消了Claude Code限制。',
+    'Alibaba strategic ally OpenAI cancelled its Claude Code restriction.',
+    'Alibaba partner representative OpenAI cancelled its Claude Code restriction.',
+    'Alibaba OpenAI cancelled its Claude Code restriction.',
+    '阿里巴巴OpenAI取消了Claude Code限制。',
+  ])('does not mint a current v9 update proof when a role noun phrase makes the second organization the controller: %s', async (statement) => {
+    await expect(createMaliciouslySupportedControllerUpdateProof(statement))
+      .rejects.toThrow(/evidence_disposition|verification_semantics/);
+  });
+
+  test.each([
+    'Alibaba long-time investor was Microsoft, which withdrew its Claude Code restriction.',
+    'Alibaba partner company OpenAI cancelled its Claude Code restriction.',
+    '阿里巴巴的重要客户是OpenAI，后者取消了Claude Code限制。',
+    '阿里巴巴重要客户，OpenAI取消了Claude Code限制。',
+    '阿里巴巴的合作伙伴——OpenAI取消了Claude Code限制。',
+  ])('does not mint a current v9 material-update proof through a bridged role controller: %s', async (statement) => {
+    await expect(createMaliciouslySupportedControllerUpdateProof(statement))
+      .rejects.toThrow(/evidence_disposition|verification_semantics/);
+  });
+
+  test.each([
+    'Alibaba long-time investor was Microsoft, which withdrew its Claude Code restriction.',
+    'Alibaba partner company OpenAI cancelled its Claude Code restriction.',
+    '阿里巴巴的重要客户是OpenAI，后者取消了Claude Code限制。',
+    '阿里巴巴重要客户，OpenAI取消了Claude Code限制。',
+    '阿里巴巴的合作伙伴——OpenAI取消了Claude Code限制。',
+  ])('resolves a bounded role bridge to the second organization, never the first: %s', (statement) => {
+    const bridgedControllerEvidence: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: `ev-bridged-role-controller-${statement.length}`,
+      title: statement,
+      excerpt: statement,
+      claims_supported: [statement],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.uncertainties = ['角色桥接后的控制主体不是阿里巴巴。'];
+    raw.evidence_dispositions.push({
+      evidence_id: bridgedControllerEvidence.id,
+      disposition: 'background',
+      source_fact_refs: [],
+      reason_code: 'insufficient_overlap',
+    });
+    expect(validateManualLeadGeneratedAssessment(
+      raw, [techCrunchAlibabaBan, bridgedControllerEvidence],
+    )).toMatchObject({ evidence_completeness: expect.arrayContaining([
+      { evidence_id: bridgedControllerEvidence.id, relation: 'unrelated' },
+    ]) });
+  });
+
+  test.each([
+    'Alibaba partner OpenAI cancelled its integration with Claude Code.',
+    'Alibaba investor Microsoft withdrew its plugin for Claude Code.',
+    'Alibaba customer OpenAI cancelled its Claude Code integration.',
+    'Alibaba supplier Microsoft withdrew its Claude Code plugin.',
+  ])('treats a role-linked second organization as controller or uncertain, never Alibaba: %s', (statement) => {
+    const roleControllerEvidence: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: `ev-role-controller-${statement.split(' ')[1]}`,
+      title: statement,
+      excerpt: statement,
+      claims_supported: [statement],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.uncertainties = ['角色名词短语的控制主体不是阿里巴巴。'];
+    raw.evidence_dispositions.push({
+      evidence_id: roleControllerEvidence.id,
+      disposition: 'background',
+      source_fact_refs: [],
+      reason_code: 'insufficient_overlap',
+    });
+    expect(validateManualLeadGeneratedAssessment(
+      raw, [techCrunchAlibabaBan, roleControllerEvidence],
+    )).toMatchObject({
+      evidence_completeness: expect.arrayContaining([
+        { evidence_id: roleControllerEvidence.id, relation: 'unrelated' },
+      ]),
+    });
+  });
+
+  test.each([
+    'Alibaba’s partner OpenAI cancelled its Claude Code restriction.',
+    'Alibaba‘s investor Microsoft withdrew its Claude Code restriction.',
+    'Alibabaʼs customer OpenAI cancelled its Claude Code restriction.',
+    'Alibaba‘s long-time investor Microsoft withdrew its Claude Code restriction.',
+    'Alibabaʼs enterprise customer OpenAI cancelled its Claude Code restriction.',
+    'Alibaba strategic partner OpenAI cancelled its Claude Code restriction.',
+    '阿里巴巴重要客户OpenAI取消了Claude Code限制。',
+    '阿里巴巴合作伙伴OpenAI取消了Claude Code限制。',
+  ])('normalizes possessives and role modifiers before choosing the second organization controller: %s', (statement) => {
+    const roleControllerEvidence: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: `ev-normalized-role-controller-${statement.length}`,
+      title: statement,
+      excerpt: statement,
+      claims_supported: [statement],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.uncertainties = ['角色短语的控制主体不是阿里巴巴。'];
+    raw.evidence_dispositions.push({
+      evidence_id: roleControllerEvidence.id,
+      disposition: 'background',
+      source_fact_refs: [],
+      reason_code: 'insufficient_overlap',
+    });
+    expect(validateManualLeadGeneratedAssessment(
+      raw, [techCrunchAlibabaBan, roleControllerEvidence],
+    )).toMatchObject({ evidence_completeness: expect.arrayContaining([
+      { evidence_id: roleControllerEvidence.id, relation: 'unrelated' },
+    ]) });
+  });
+
+  test.each([
+    'Alibaba strategic ally OpenAI cancelled its Claude Code restriction.',
+    'Alibaba partner representative OpenAI cancelled its Claude Code restriction.',
+    'Alibaba OpenAI cancelled its Claude Code restriction.',
+    '阿里巴巴业务盟友OpenAI取消了Claude Code限制。',
+    '阿里巴巴OpenAI取消了Claude Code限制。',
+  ])('fails closed when two pre-predicate organizations leave the controller ambiguous: %s', (statement) => {
+    const ambiguousControllerEvidence: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: `ev-ambiguous-controller-${statement.length}`,
+      title: statement,
+      excerpt: statement,
+      claims_supported: [statement],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.uncertainties = ['双组织控制主体无法唯一确定。'];
+    raw.evidence_dispositions.push({
+      evidence_id: ambiguousControllerEvidence.id,
+      disposition: 'background',
+      source_fact_refs: [],
+      reason_code: 'insufficient_overlap',
+    });
+    expect(validateManualLeadGeneratedAssessment(
+      raw, [techCrunchAlibabaBan, ambiguousControllerEvidence],
+    )).toMatchObject({ evidence_completeness: expect.arrayContaining([
+      { evidence_id: ambiguousControllerEvidence.id, relation: 'uncertain' },
+    ]) });
+  });
+
+  test('does not misread ordinary Alibaba employees as a role-linked second controller', () => {
+    expect(validateManualLeadGeneratedAssessment(
+      alibabaBanGeneratedAssessment(), [techCrunchAlibabaBan],
+    )).toMatchObject({
+      evidence_completeness: [{ evidence_id: techCrunchAlibabaBan.id, relation: 'supports' }],
+    });
+  });
+
+  test('keeps Alibaba itself as the controller of a status change', () => {
+    const itselfUpdate: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: 'ev-alibaba-itself-update',
+      title: 'Alibaba itself cancelled its Claude Code restriction.',
+      excerpt: 'Alibaba itself cancelled its Claude Code restriction.',
+      claims_supported: ['Alibaba itself cancelled its Claude Code restriction.'],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.recommendation = 'needs_review';
+    raw.uncertainties = ['阿里巴巴已取消该限制。'];
+    raw.evidence_dispositions.push({
+      evidence_id: itselfUpdate.id,
+      disposition: 'material_update',
+      source_fact_refs: ['fact-01'],
+      reason_code: null,
+    });
+    expect(validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan, itselfUpdate]))
+      .toMatchObject({ evidence_completeness: expect.arrayContaining([
+        { evidence_id: itselfUpdate.id, relation: 'updates' },
+      ]) });
+  });
+
+  test('keeps a genuine Alibaba itself update current through the material-update proof path', async () => {
+    await expect(createMaliciouslySupportedControllerUpdateProof(
+      'Alibaba itself cancelled its Claude Code restriction.',
+    )).resolves.toBe(true);
+  });
+
+  test.each([
+    { source_type: 'other' as const, reliable: true },
+    { source_type: 'official_statement' as const, reliable: false },
+  ])('keeps an untrusted denial uncertain instead of promoting it to conflict: $source_type/$reliable', (trust) => {
+    const rumorDenial: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      ...trust,
+      id: `ev-untrusted-denial-${trust.source_type}-${trust.reliable}`,
+      title: 'Alibaba called reports of a Claude Code ban false',
+      excerpt: 'Alibaba called reports of a Claude Code ban false.',
+      claims_supported: ['Alibaba called reports of a Claude Code ban false.'],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.recommendation = 'needs_review';
+    raw.uncertainties = ['该否认来源不足以确定冲突。'];
+    raw.evidence_dispositions.push({
+      evidence_id: rumorDenial.id, disposition: 'background',
+      source_fact_refs: [], reason_code: 'insufficient_overlap',
+    });
+    expect(validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan, rumorDenial]))
+      .toMatchObject({ evidence_completeness: expect.arrayContaining([
+        { evidence_id: rumorDenial.id, relation: 'uncertain' },
+      ]) });
+  });
+
+  test.each([
+    { source_type: 'other' as const, reliable: true },
+    { source_type: 'official_statement' as const, reliable: false },
+  ])('keeps an untrusted withdrawal uncertain instead of promoting it to an update: $source_type/$reliable', (trust) => {
+    const rumorWithdrawal: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      ...trust,
+      id: `ev-untrusted-withdrawal-${trust.source_type}-${trust.reliable}`,
+      title: 'Alibaba withdrew the restriction on employees using Claude Code',
+      excerpt: 'Alibaba withdrew the restriction on employees using Claude Code.',
+      claims_supported: ['Alibaba withdrew the restriction on employees using Claude Code.'],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.recommendation = 'needs_review';
+    raw.uncertainties = ['该撤回消息的来源类型或可靠性不足。'];
+    raw.evidence_dispositions.push({
+      evidence_id: rumorWithdrawal.id, disposition: 'background',
+      source_fact_refs: [], reason_code: 'insufficient_overlap',
+    });
+    expect(validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan, rumorWithdrawal]))
+      .toMatchObject({ evidence_completeness: expect.arrayContaining([
+        { evidence_id: rumorWithdrawal.id, relation: 'uncertain' },
+      ]) });
+  });
+
+  test.each([
+    'Alibaba refutes reports that it banned employees from using Claude Code.',
+    'Alibaba disputes reports that it banned employees from using Claude Code.',
+    'Alibaba rejects reports that it banned employees from using Claude Code.',
+  ])('recognizes a declarative denial of the complete embedded event: %s', (statement) => {
+    const denial: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: `ev-denial-${statement.split(' ')[1]}`,
+      title: statement, excerpt: statement, claims_supported: [statement],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.uncertainties = ['官方否认与媒体报道冲突。'];
+    raw.evidence_dispositions.push({
+      evidence_id: denial.id, disposition: 'contradicts_core',
+      source_fact_refs: ['fact-01'], reason_code: null,
+    });
+    expect(validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan, denial]))
+      .toMatchObject({ evidence_completeness: expect.arrayContaining([
+        { evidence_id: denial.id, relation: 'conflicts' },
+      ]) });
+  });
+
+  test('does not allow an unreliable headline to become supporting evidence by exact wording alone', () => {
+    const clickbait: ManualNewsEvidence = {
+      ...techCrunchAlibabaBan,
+      id: 'ev-unreliable-clickbait', source_type: 'other', reliable: false,
+      publisher: 'Rumor Aggregator',
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.source_facts[0].evidence_ids.push(clickbait.id);
+    raw.evidence_dispositions.push({
+      evidence_id: clickbait.id, disposition: 'supports_core',
+      source_fact_refs: ['fact-01'], reason_code: null,
+    });
+    expect(() => validateManualLeadGeneratedAssessment(
+      raw, [techCrunchAlibabaBan, clickbait],
+    )).toThrow(/evidence_disposition_classification_uncertain/);
+  });
+
+  test('blocks an official withdrawal of the matching restriction even without published_at', () => {
+    const withdrawalWithoutTime: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: 'ev-alibaba-withdrawal-no-time',
+      published_at: null,
+      title: 'Alibaba withdrew the restriction on employees using Claude Code',
+      excerpt: 'Alibaba withdrew the restriction on employees using Claude Code.',
+      claims_supported: ['Alibaba withdrew the restriction on employees using Claude Code.'],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.evidence_dispositions.push({
+      evidence_id: withdrawalWithoutTime.id, disposition: 'irrelevant',
+      source_fact_refs: [], reason_code: 'unrelated_event',
+    });
+    expect(() => validateManualLeadGeneratedAssessment(
+      raw, [techCrunchAlibabaBan, withdrawalWithoutTime],
+    )).toThrow(/evidence_disposition_(?:conflict|classification)_/);
+  });
+
+  test('requires each disposition quote itself to prove the structured relation', () => {
+    const mixedEvidence: ManualNewsEvidence = {
+      ...techCrunchAlibabaBan,
+      excerpt: 'Alibaba reportedly bans employees from using Claude Code. Alibaba cloud pricing was not affected. Alibaba issued an official statement today.',
+      claims_supported: [
+        'Alibaba reportedly bans employees from using Claude Code.',
+        'Alibaba cloud pricing was not affected by an older discount.',
+        'Alibaba issued an official statement today.',
+      ],
+    };
+    const generated = validateManualLeadGeneratedAssessment(
+      alibabaBanGeneratedAssessment(), [mixedEvidence],
+    );
+    const candidate: ManualNewsProcessedAssessment = {
+      ...applyManualLeadEvidencePolicy(generated, [mixedEvidence]),
+      duplicate_scope: null, matched_lead_id: null,
+    };
+    const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: candidate, evidence: [mixedEvidence],
+    }).user) as {
+      facts: Array<{ fact_id: string }>;
+      projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+      evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
+    };
+    const supportingQuote = mixedEvidence.claims_supported[0];
+    for (const unrelatedQuote of mixedEvidence.claims_supported.slice(1)) {
+      expect(() => validateManualLeadFactVerification({
+        overall_verdict: 'supported',
+        fact_results: prompt.facts.map((fact) => supportedFactResult(
+          fact.fact_id, mixedEvidence.id, supportingQuote,
+        )),
+        projection_results: prompt.projections.map((projection) => ({
+          projection_id: projection.projection_id,
+          source_fact_ids: projection.source_fact_ids,
+          supported: true, issue_code: 'none',
+        })),
+        disposition_results: prompt.evidence_dispositions.map((disposition) => ({
+          evidence_id: disposition.evidence_id,
+          disposition: disposition.disposition,
+          supported: true, issue_code: 'none',
+          source_quotes: [{ evidence_id: mixedEvidence.id, quote: unrelatedQuote }],
+        })),
+      }, candidate, [mixedEvidence])).toThrow(/invalid_disposition_verification_semantics/);
+    }
+  });
+
+  test('rejects a disposition when one of multiple verifier quotes is unrelated', () => {
+    const mixedEvidence: ManualNewsEvidence = {
+      ...techCrunchAlibabaBan,
+      excerpt: 'Alibaba reportedly bans employees from using Claude Code. Alibaba customer service remains available.',
+      claims_supported: [
+        'Alibaba reportedly bans employees from using Claude Code.',
+        'Alibaba customer service remains available.',
+      ],
+    };
+    const generated = validateManualLeadGeneratedAssessment(alibabaBanGeneratedAssessment(), [mixedEvidence]);
+    const candidate: ManualNewsProcessedAssessment = {
+      ...applyManualLeadEvidencePolicy(generated, [mixedEvidence]), duplicate_scope: null, matched_lead_id: null,
+    };
+    const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: candidate, evidence: [mixedEvidence],
+    }).user) as {
+      facts: Array<{ fact_id: string }>;
+      projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+      evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
+    };
+    expect(() => validateManualLeadFactVerification({
+      overall_verdict: 'supported',
+      fact_results: prompt.facts.map((fact) => supportedFactResult(
+        fact.fact_id, mixedEvidence.id, mixedEvidence.claims_supported[0],
+      )),
+      projection_results: prompt.projections.map((projection) => ({
+        projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
+        supported: true, issue_code: 'none',
+      })),
+      disposition_results: prompt.evidence_dispositions.map((disposition) => ({
+        evidence_id: disposition.evidence_id, disposition: disposition.disposition,
+        supported: true, issue_code: 'none', source_quotes: mixedEvidence.claims_supported.map((quote) => ({
+          evidence_id: mixedEvidence.id, quote,
+        })),
+      })),
+    }, candidate, [mixedEvidence])).toThrow(/invalid_disposition_verification_semantics/);
+  });
+
+  test('rejects a single verifier quote containing a valid clause plus unrelated customer-service text', () => {
+    const combined = 'Alibaba reportedly bans employees from using Claude Code. Alibaba customer service remains available.';
+    const mixedEvidence: ManualNewsEvidence = {
+      ...techCrunchAlibabaBan,
+      excerpt: combined,
+      claims_supported: [combined],
+    };
+    const generated = validateManualLeadGeneratedAssessment(alibabaBanGeneratedAssessment(), [mixedEvidence]);
+    const candidate: ManualNewsProcessedAssessment = {
+      ...applyManualLeadEvidencePolicy(generated, [mixedEvidence]), duplicate_scope: null, matched_lead_id: null,
+    };
+    const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: candidate, evidence: [mixedEvidence],
+    }).user) as {
+      facts: Array<{ fact_id: string }>;
+      projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+      evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
+    };
+    expect(() => validateManualLeadFactVerification({
+      overall_verdict: 'supported',
+      fact_results: prompt.facts.map((fact) => supportedFactResult(
+        fact.fact_id, mixedEvidence.id, techCrunchAlibabaBan.claims_supported[0],
+      )),
+      projection_results: prompt.projections.map((projection) => ({
+        projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
+        supported: true, issue_code: 'none',
+      })),
+      disposition_results: prompt.evidence_dispositions.map((disposition) => ({
+        evidence_id: disposition.evidence_id, disposition: disposition.disposition,
+        supported: true, issue_code: 'none',
+        source_quotes: [{ evidence_id: mixedEvidence.id, quote: combined }],
+      })),
+    }, candidate, [mixedEvidence])).toThrow(/invalid_disposition_verification_semantics/);
+  });
+
+  test('does not let an unrelated quote stand in for a whole-evidence official conflict', () => {
+    const mixedDenial: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      claims_supported: [
+        officialAlibabaDenial.claims_supported[0],
+        'Alibaba cloud pricing was not affected by an older discount.',
+      ],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.uncertainties = ['官方否认与独立报道冲突。'];
+    raw.evidence_dispositions.push({
+      evidence_id: mixedDenial.id, disposition: 'contradicts_core',
+      source_fact_refs: ['fact-01'], reason_code: null,
+    });
+    const evidence = [techCrunchAlibabaBan, mixedDenial];
+    const generated = validateManualLeadGeneratedAssessment(raw, evidence);
+    const candidate: ManualNewsProcessedAssessment = {
+      ...applyManualLeadEvidencePolicy(generated, evidence), duplicate_scope: null, matched_lead_id: null,
+    };
+    const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({ assessment: candidate, evidence }).user) as {
+      facts: Array<{ fact_id: string }>;
+      projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+      evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
+    };
+    expect(() => validateManualLeadFactVerification({
+      overall_verdict: 'conflicted',
+      fact_results: prompt.facts.map((fact) => supportedFactResult(
+        fact.fact_id, techCrunchAlibabaBan.id, techCrunchAlibabaBan.claims_supported[0],
+      )),
+      projection_results: prompt.projections.map((projection) => ({
+        projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
+        supported: true, issue_code: 'none',
+      })),
+      disposition_results: prompt.evidence_dispositions.map((disposition) => ({
+        evidence_id: disposition.evidence_id, disposition: disposition.disposition,
+        supported: true, issue_code: 'none',
+        source_quotes: [{
+          evidence_id: disposition.evidence_id,
+          quote: disposition.evidence_id === mixedDenial.id
+            ? mixedDenial.claims_supported[1]
+            : techCrunchAlibabaBan.claims_supported[0],
+        }],
+      })),
+    }, candidate, evidence)).toThrow(/invalid_disposition_verification_semantics/);
+  });
+
+  test('rejects an all-supported verifier verdict when a covered conflict requires conflicted', () => {
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.recommendation = 'needs_review';
+    raw.uncertainties = ['官方否认与报道冲突。'];
+    raw.evidence_dispositions.push({
+      evidence_id: officialAlibabaDenial.id, disposition: 'contradicts_core',
+      source_fact_refs: ['fact-01'], reason_code: null,
+    });
+    const evidence = [techCrunchAlibabaBan, officialAlibabaDenial];
+    const candidate = validateManualLeadGeneratedAssessment(raw, evidence);
+    const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({ assessment: candidate, evidence }).user) as {
+      facts: Array<{ fact_id: string }>;
+      projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+      evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
+    };
+    const byId = new Map(evidence.map((item) => [item.id, item]));
+    expect(() => validateManualLeadFactVerification({
+      overall_verdict: 'supported',
+      fact_results: prompt.facts.map((fact) => supportedFactResult(
+        fact.fact_id, techCrunchAlibabaBan.id, techCrunchAlibabaBan.claims_supported[0],
+      )),
+      projection_results: prompt.projections.map((projection) => ({
+        projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
+        supported: true, issue_code: 'none',
+      })),
+      disposition_results: prompt.evidence_dispositions.map((disposition) => ({
+        evidence_id: disposition.evidence_id, disposition: disposition.disposition,
+        supported: true, issue_code: 'none', source_quotes: [{
+          evidence_id: disposition.evidence_id,
+          quote: byId.get(disposition.evidence_id)!.claims_supported[0],
+        }],
+      })),
+    }, candidate, evidence)).toThrow(/fact_verification_verdict_mismatch/);
+  });
+  test.each([
+    ['source subject', 'source_facts[0].atomic_fact.subject', 'Alibaba, Anthropic', 'non_atomic_source_subject'],
+    ['source predicate', 'source_facts[0].atomic_fact.predicate', 'reportedly bans, requires', 'non_atomic_source_predicate'],
+    ['source object', 'source_facts[0].atomic_fact.object', 'employees from using Claude Code, because of security concerns', 'non_atomic_source_object'],
+    ['editorial subject', 'editorial_projection.title.atomic_fact.subject', '阿里巴巴、Anthropic', 'non_atomic_editorial_subject'],
+    ['editorial predicate', 'editorial_projection.title.atomic_fact.predicate', '据称禁止并要求', 'non_atomic_editorial_predicate'],
+    ['editorial object', 'editorial_projection.title.atomic_fact.object', '员工使用Claude Code，因为安全原因', 'non_atomic_editorial_object'],
+    ['editorial summary object', 'editorial_projection.summary[0].atomic_fact.object', '员工使用Claude Code，并改用其他产品', 'non_atomic_editorial_object'],
+  ])('reports a bounded generated-output path for %s atomicity failures', (
+    _label,
+    path,
+    invalidValue,
+    expectedCode,
+  ) => {
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    const segments = path.replace(/\[(\d+)\]/gu, '.$1').split('.');
+    let target: Record<string, any> = raw;
+    for (const segment of segments.slice(0, -1)) target = target[segment];
+    target[segments.at(-1)!] = invalidValue;
+
+    let failure: unknown;
+    try {
+      validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan]);
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(manualLeadAssessmentValidationFailure(failure)).toEqual({
+      code: expectedCode,
+      path,
+    });
+  });
+
+  test('attributes multiple hidden object actions to the object slot rather than the predicate', () => {
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.source_facts[0].atomic_fact.object = 'employees launch Claude Code train GPT 5';
+    let failure: unknown;
+    try {
+      validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan]);
+    } catch (error) {
+      failure = error;
+    }
+    expect(manualLeadAssessmentValidationFailure(failure)).toEqual({
+      code: 'non_atomic_source_object',
+      path: 'source_facts[0].atomic_fact.object',
+    });
+  });
+
+  test.each([
+    ['source', 'source_facts[0].atomic_fact.assembled'],
+    ['editorial', 'editorial_projection.title.atomic_fact.assembled'],
+  ])('reports assembled split failures separately for %s output', (scope, path) => {
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    if (scope === 'source') {
+      raw.source_facts[0].atomic_fact = {
+        subject: 'Alibaba', subject_role: 'organization', predicate: 'releases',
+        object: 'Claude Code Acme transforms workflows',
+      };
+    } else {
+      raw.editorial_projection.title.atomic_fact = {
+        subject: '阿里巴巴', subject_role: 'organization', predicate: '发布',
+        object: 'Claude Code Acme transforms workflows',
+      };
+    }
+
+    let failure: unknown;
+    try {
+      validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan]);
+    } catch (error) {
+      failure = error;
+    }
+    expect(manualLeadAssessmentValidationFailure(failure)).toEqual({
+      code: scope === 'source' ? 'non_atomic_source_assembled' : 'non_atomic_editorial_assembled',
+      path,
+    });
+  });
+
   test('accepts text-only and URL-only leads, but rejects empty or ambiguous inputs', () => {
     expect(validateManualNewsLeadInput({ date: '2026-08-11', text: 'Anthropic 输出水印', note: '' }))
       .toMatchObject({ input_type: 'text', text: 'Anthropic 输出水印' });
@@ -582,7 +1721,9 @@ describe('manual news lead domain', () => {
           predicate: '将禁止并要求改用',
         }),
       }),
-      failure_codes: expect.arrayContaining(['non_atomic_claim', 'unknown_evidence_id']),
+      failure_codes: expect.arrayContaining([
+        'non_atomic_source_predicate', 'non_atomic_source_object', 'unknown_evidence_id',
+      ]),
     }));
     expect(body.output_schema.source_facts[0]).toEqual(expect.objectContaining({
       atomic_fact: {
@@ -619,6 +1760,10 @@ describe('manual news lead domain', () => {
           object: 'employees from using Claude Code',
         },
         evidence_ids: ['ev-techcrunch-alibaba-ban'],
+      }],
+      evidence_dispositions: [{
+        evidence_id: 'ev-techcrunch-alibaba-ban', disposition: 'supports_core',
+        source_fact_refs: ['fact-01'], reason_code: null,
       }],
       editorial_projection: {
         title: {
@@ -670,6 +1815,7 @@ describe('manual news lead domain', () => {
     const promptBody = JSON.parse(verifierPrompt.user) as {
       facts: Array<{ fact_id: string; untrusted_candidate_value: string | boolean }>;
       projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+      evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
     };
     expect(promptBody.facts).toContainEqual(expect.objectContaining({
       fact_id: validated.source_facts?.[0].fact_id,
@@ -697,6 +1843,11 @@ describe('manual news lead domain', () => {
         source_fact_ids: projection.source_fact_ids,
         supported: true,
         issue_code: 'none',
+      })),
+      disposition_results: promptBody.evidence_dispositions.map((disposition) => ({
+        evidence_id: disposition.evidence_id, disposition: disposition.disposition,
+        supported: true, issue_code: 'none',
+        source_quotes: [{ evidence_id: disposition.evidence_id, quote }],
       })),
     }, validated, [techCrunchAlibabaBan])).toMatchObject({
       overall_verdict: 'supported',
@@ -843,7 +1994,7 @@ describe('manual news lead domain', () => {
       source: { predicate: sourcePredicate },
       projection: { predicate: projectionPredicate },
       quote: `Alibaba ${quotePredicate} employees from using Claude Code.`,
-    })).rejects.toThrow(/fact_verification_modality_mismatch/);
+    })).rejects.toThrow(/fact_verification_modality_mismatch|evidence_disposition_classification_uncertain/);
   });
 
   test.each([
@@ -860,7 +2011,7 @@ describe('manual news lead domain', () => {
       source: { predicate: 'bans' },
       projection: { predicate: '禁止' },
       quote: `Alibaba ${quotePredicate} employees from using Claude Code.`,
-    })).rejects.toThrow(/fact_verification_modality_mismatch/);
+    })).rejects.toThrow(/fact_verification_modality_mismatch|evidence_disposition_classification_uncertain/);
   });
 
   test.each([
@@ -906,7 +2057,7 @@ describe('manual news lead domain', () => {
     await expect(createMaliciouslySupportedGeneratedProjectionProof(
       raw,
       `Anthropic ${quotePredicate} Claude model.`,
-    )).rejects.toThrow(/fact_verification_(?:modality|action)_mismatch/);
+    )).rejects.toThrow(/(?:fact_verification_(?:modality|action)_mismatch|evidence_disposition_(?:conflict_uncovered|classification_uncertain))/);
   });
 
   test.each([
@@ -937,7 +2088,7 @@ describe('manual news lead domain', () => {
         source: { object: sourceObject },
         projection: { object: '员工使用' },
         quote: `Alibaba reportedly bans ${sourceObject}.`,
-      })).rejects.toThrow(/(?:non_atomic_claim|invalid_claim_object|invalid_editorial_projection_object)/);
+      })).rejects.toThrow(/(?:non_atomic_(?:claim|source_object)|invalid_claim_object|invalid_editorial_projection_object)/);
     },
   );
 
@@ -979,7 +2130,7 @@ describe('manual news lead domain', () => {
       source: { object: 'employees from using Claude Code Pro' },
       projection: { object: '员工使用Claude Code Pro' },
       quote: 'Alibaba reportedly bans employees from using Claude Pro Code.',
-    })).rejects.toThrow(/fact_verification_entity_slot_missing/);
+    })).rejects.toThrow(/fact_verification_entity_slot_missing|evidence_disposition_classification_uncertain/);
   });
 
   test.each([
@@ -1199,7 +2350,7 @@ describe('manual news lead domain', () => {
           fact_ref: 'fact-01', source_language: 'en', atomic_fact,
           evidence_ids: [techCrunchAlibabaBan.id],
         }],
-      }, [techCrunchAlibabaBan])).toThrow(/(?:non_atomic_claim|invalid_claim_(?:subject|predicate|object|fact))/);
+      }, [techCrunchAlibabaBan])).toThrow(/(?:non_atomic_(?:claim|source_(?:subject|predicate|object|assembled))|invalid_claim_(?:subject|predicate|object|fact))/);
     }
   });
 
@@ -1214,6 +2365,10 @@ describe('manual news lead domain', () => {
           subject: 'Alibaba', subject_role: 'organization', predicate: 'reportedly bans',
           object: 'employees from using Claude Code',
         }, evidence_ids: [techCrunchAlibabaBan.id],
+      }],
+      evidence_dispositions: [{
+        evidence_id: techCrunchAlibabaBan.id, disposition: 'supports_core',
+        source_fact_refs: ['fact-01'], reason_code: null,
       }],
       editorial_projection: {
         title: {
@@ -1240,6 +2395,11 @@ describe('manual news lead domain', () => {
         projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
         supported: true, issue_code: 'none',
       })),
+      disposition_results: [{
+        evidence_id: techCrunchAlibabaBan.id, disposition: 'supports_core',
+        supported: true, issue_code: 'none',
+        source_quotes: [{ evidence_id: techCrunchAlibabaBan.id, quote }],
+      }],
     };
     expect(validateManualLeadFactVerification(raw, candidate, [techCrunchAlibabaBan]))
       .toMatchObject({ overall_verdict: 'supported', projection_results: expect.any(Array) });
@@ -1285,6 +2445,10 @@ describe('manual news lead domain', () => {
           predicate: 'reportedly bans', object: 'employees from using Claude Code',
         },
         evidence_ids: [techCrunchAlibabaBan.id],
+      }],
+      evidence_dispositions: [{
+        evidence_id: techCrunchAlibabaBan.id, disposition: 'supports_core',
+        source_fact_refs: ['fact-01'], reason_code: null,
       }],
       editorial_projection: {
         title: { projection_ref: 'title-01', source_fact_refs: ['fact-01'], atomic_fact: projection },
@@ -1340,7 +2504,7 @@ describe('manual news lead domain', () => {
           atomic_fact: { subject_role: 'organization', ...atomic_fact },
           evidence_ids: ['ev-techcrunch-alibaba-ban'],
         }],
-      }, [techCrunchAlibabaBan])).toThrow(/(?:non_atomic_claim|invalid_claim_(?:subject|predicate|object|fact))/);
+      }, [techCrunchAlibabaBan])).toThrow(/(?:non_atomic_(?:claim|source_(?:subject|predicate|object|assembled))|invalid_claim_(?:subject|predicate|object|fact))/);
     }
     expect(() => validateManualLeadGeneratedAssessment({
       ...base,
@@ -1356,10 +2520,13 @@ describe('manual news lead domain', () => {
     const prompt = buildManualLeadAssessmentRegenerationPrompt({
       date: '2026-08-11', text: 'TechCrunch称阿里巴巴将禁止员工使用Claude Code', note: '',
       evidence: [officialAnthropic], prior_events: [],
-    }, 'unknown_evidence_id');
+    }, 'non_atomic_source_object', 'source_facts[0].atomic_fact.object');
     const body = JSON.parse(prompt.user) as {
       allowed_evidence_ids: string[];
-      regeneration: { mode: string; failure_code: string; instruction: string };
+      regeneration: {
+        mode: string; failure_code: string; failure_path: string;
+        instruction: string; mechanical_instruction: string;
+      };
       untrusted_data: { evidence: ManualNewsEvidence[] };
     };
 
@@ -1373,11 +2540,92 @@ describe('manual news lead domain', () => {
     expect(body.untrusted_data.evidence[0]).not.toHaveProperty('url');
     expect(body.untrusted_data.evidence[0]).not.toHaveProperty('fetch_audit');
     expect(body.regeneration).toEqual(expect.objectContaining({
-      mode: 'validation_guided_regeneration', failure_code: 'unknown_evidence_id',
+      mode: 'validation_guided_regeneration',
+      failure_code: 'non_atomic_source_object',
+      failure_path: 'source_facts[0].atomic_fact.object',
     }));
     expect(body.regeneration.instruction).toContain('从头生成完整 schema');
+    expect(body.regeneration.mechanical_instruction).toContain('逗号');
+    expect(body.regeneration.mechanical_instruction).toContain('第二动作');
+    expect(body.regeneration.mechanical_instruction).toContain('删除非核心背景');
     expect(prompt.user).not.toContain('ev-private-output');
     expect(prompt.system).toContain('不得回忆、修补或复用上一次原始输出');
+  });
+
+  test('rejects an unsafe regeneration path instead of echoing it', () => {
+    expect(() => buildManualLeadAssessmentRegenerationPrompt({
+      date: '2026-08-11', text: '线索', note: '', evidence: [officialAnthropic], prior_events: [],
+    }, 'non_atomic_source_object', 'source_facts[99].atomic_fact.object;MODEL_RAW'))
+      .toThrow(/assessment_regeneration_path_invalid/);
+  });
+
+  test('asks for one core fact by default and never fills summaries with background facts', () => {
+    const prompt = buildManualLeadAssessmentPrompt({
+      date: '2026-08-11', text: 'TechCrunch称阿里巴巴限制员工使用Claude Code', note: '',
+      evidence: [techCrunchAlibabaBan], prior_events: [],
+    });
+    const body = JSON.parse(prompt.user) as {
+      output_schema: { source_facts: Array<Record<string, unknown>> };
+      claim_contract_examples: { good: unknown[] };
+    };
+
+    expect(prompt.system).toContain('默认只输出 1 条 core source_fact');
+    expect(prompt.system).toContain('最多 3 条 source_facts');
+    expect(prompt.system).toContain('禁止为了填充摘要加入原因、替代产品或背景信息');
+    expect(body.output_schema.source_facts).toHaveLength(1);
+    expect(body.claim_contract_examples.good).toHaveLength(1);
+  });
+
+  test.each([
+    ['non_atomic_source_subject', 'source_facts[0].atomic_fact.subject', '一个完整主体'],
+    ['non_atomic_source_predicate', 'source_facts[0].atomic_fact.predicate', '一个动作'],
+    ['non_atomic_source_object', 'source_facts[0].atomic_fact.object', '第二动作'],
+    ['non_atomic_source_assembled', 'source_facts[0].atomic_fact.assembled', '连接后的完整句'],
+    ['non_atomic_editorial_object', 'editorial_projection.summary[0].atomic_fact.object', '第二动作'],
+  ])('gives %s a path-specific mechanical regeneration instruction', (code, path, marker) => {
+    const prompt = buildManualLeadAssessmentRegenerationPrompt({
+      date: '2026-08-11', text: '线索', note: '', evidence: [officialAnthropic], prior_events: [],
+    }, code, path);
+    const body = JSON.parse(prompt.user) as {
+      regeneration: { failure_code: string; failure_path: string; mechanical_instruction: string };
+    };
+    expect(body.regeneration).toMatchObject({ failure_code: code, failure_path: path });
+    expect(body.regeneration.mechanical_instruction).toContain(marker);
+  });
+
+  test('rejects unsafe or unbounded assessment-generation audit diagnostics', () => {
+    const base = {
+      assessment_generation_attempts: 2,
+      assessment_first_validation_code: 'non_atomic_source_object',
+      assessment_first_validation_path: 'source_facts[0].atomic_fact.object',
+      assessment_last_validation_code: 'valid',
+      assessment_regeneration_trigger_code: 'non_atomic_source_object',
+      assessment_regeneration_trigger_path: 'source_facts[0].atomic_fact.object',
+    };
+    expect(manualNewsAssessmentGenerationAudit(base)).toEqual(base);
+    expect(manualNewsAssessmentGenerationAudit({
+      ...base, assessment_first_validation_path: 'source_facts[99].atomic_fact.object;MODEL_RAW',
+    })).toBeNull();
+    expect(manualNewsAssessmentGenerationAudit({
+      ...base, assessment_last_validation_code: 'x'.repeat(81),
+    })).toBeNull();
+    expect(manualNewsAssessmentGenerationAudit({
+      ...base, assessment_first_validation_path: 'editorial_projection.title.atomic_fact.object',
+    })).toBeNull();
+    expect(manualNewsAssessmentGenerationAudit({
+      ...base, assessment_regeneration_trigger_code: 'non_atomic_source_predicate',
+      assessment_regeneration_trigger_path: 'source_facts[0].atomic_fact.predicate',
+    })).toBeNull();
+  });
+
+  test('rejects more than three generated source facts without accepting partial output', () => {
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.source_facts = Array.from({ length: 4 }, (_value, index) => ({
+      ...structuredClone(raw.source_facts[0]),
+      fact_ref: `fact-${String(index + 1).padStart(2, '0')}`,
+    }));
+    expect(() => validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan]))
+      .toThrow(/invalid_claims/);
   });
 
   test('assessment and verifier prompts require atomic final facts without similarity fallback', () => {
@@ -1417,6 +2665,10 @@ describe('manual news lead domain', () => {
     expect(verifierPrompt.system).toContain('未绑定产品 qualifier');
     expect(verifierPrompt.system).toContain('has/have/had + 过去分词、have/had to');
     expect(verifierPrompt.system).toContain('有序 descriptor/qualifier/version tuple');
+    expect(verifierPrompt.system).toContain('每个 disposition quote 必须先按原子子句拆分');
+    expect(verifierPrompt.system).toContain('每一段 quote 的每一个实义原子子句都必须分别满足同一 disposition');
+    expect(verifierPrompt.system).toContain('被否认的内嵌事件完整对齐');
+    expect(verifierPrompt.system).toContain('低可靠标题不得伪造 supports_core');
     expect(body.facts.map((fact) => fact.fact_id)).toEqual(expect.arrayContaining([
       'field:title:0', 'field:title:1', 'field:summary:0', 'field:summary:1',
       'claim:0', 'claim:1',
@@ -1970,6 +3222,7 @@ describe('manual news lead domain', () => {
     };
     expect(body.untrusted_evidence).toEqual([
       expect.objectContaining({ id: 'ev-official', excerpt: officialAnthropic.excerpt }),
+      expect.objectContaining({ id: 'ev-media', excerpt: unrelated.excerpt }),
     ]);
     expect(body.facts.map((fact) => fact.fact_id)).toEqual([
       'field:title', 'field:summary', 'field:event_key', 'field:event_type',
@@ -1977,7 +3230,8 @@ describe('manual news lead domain', () => {
     ]);
     expect(body.facts.every((fact) => fact.allowed_evidence_ids.join(',') === 'ev-official'))
       .toBe(true);
-    expect(prompt.user).not.toContain('Ignore prior rules');
+    expect(prompt.user).toContain('Ignore prior rules');
+    expect(prompt.system).toContain('不可信数据');
     expect(prompt.user.split(officialAnthropic.excerpt).length - 1).toBe(1);
   });
 
@@ -3388,6 +4642,10 @@ describe('manual news lead domain', () => {
         },
         evidence_ids: [techCrunchAlibabaBan.id],
       }],
+      evidence_dispositions: [{
+        evidence_id: techCrunchAlibabaBan.id, disposition: 'supports_core',
+        source_fact_refs: ['fact-01'], reason_code: null,
+      }],
       editorial_projection: {
         title: {
           projection_ref: 'title-01', source_fact_refs: ['fact-01'],
@@ -3408,6 +4666,7 @@ describe('manual news lead domain', () => {
     }).user) as {
       facts: Array<{ fact_id: string }>;
       projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+      evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
     };
     const facts = verificationPrompt.facts;
     const verification = validateManualLeadFactVerification({
@@ -3418,6 +4677,13 @@ describe('manual news lead domain', () => {
       projection_results: verificationPrompt.projections.map((projection) => ({
         projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
         supported: true, issue_code: 'none',
+      })),
+      disposition_results: verificationPrompt.evidence_dispositions.map((disposition) => ({
+        evidence_id: disposition.evidence_id, disposition: disposition.disposition,
+        supported: true, issue_code: 'none',
+        source_quotes: [{
+          evidence_id: disposition.evidence_id, quote: techCrunchAlibabaBan.claims_supported[0],
+        }],
       })),
     }, candidate, evidence);
     const secret = 'a'.repeat(64);
@@ -3446,6 +4712,18 @@ describe('manual news lead domain', () => {
       { ...candidate, duplicate_scope: 'cross_day' },
       { ...candidate, matched_lead_id: 'changed-lead' },
       { ...candidate, generated_claim_contract: undefined },
+      {
+        ...candidate,
+        evidence_dispositions: candidate.evidence_dispositions?.map((item, index) => index === 0
+          ? { ...item, disposition: 'background', source_fact_ids: [], reason_code: 'context_only' }
+          : item),
+      } as ManualNewsProcessedAssessment,
+      {
+        ...candidate,
+        evidence_completeness: candidate.evidence_completeness?.map((item, index) => index === 0
+          ? { ...item, relation: 'unrelated' }
+          : item),
+      } as ManualNewsProcessedAssessment,
     ];
     for (const changed of assessmentMutations) {
       await expect(isCurrentManualLeadVerification({ ...input, assessment: changed }, proof, secret))
@@ -3492,9 +4770,27 @@ describe('manual news lead domain', () => {
     verificationTamper.projection_results![0].issue_code = 'translation_mismatch';
     await expect(isCurrentManualLeadVerification({ ...input, verification: verificationTamper }, proof, secret))
       .resolves.toBe(false);
+    const dispositionVerificationTamper = structuredClone(verification);
+    dispositionVerificationTamper.disposition_results![0].source_quotes[0].quote = 'tampered disposition quote';
+    await expect(isCurrentManualLeadVerification({
+      ...input, verification: dispositionVerificationTamper,
+    }, proof, secret)).resolves.toBe(false);
+    const dispositionRelationTamper = structuredClone(verification);
+    dispositionRelationTamper.disposition_results![0].quote_relation = 'unrelated';
+    await expect(isCurrentManualLeadVerification({
+      ...input, verification: dispositionRelationTamper,
+    }, proof, secret)).resolves.toBe(false);
+    const completenessVerificationTamper = structuredClone(verification);
+    completenessVerificationTamper.completeness_results![0].relation = 'unrelated';
+    await expect(isCurrentManualLeadVerification({
+      ...input, verification: completenessVerificationTamper,
+    }, proof, secret)).resolves.toBe(false);
     expect(proof.policy_version).toBe(MANUAL_LEAD_VERIFICATION_POLICY_VERSION);
     await expect(isCurrentManualLeadVerification(input, {
       ...proof, policy_version: 'fact-evidence-hmac-v7',
+    }, secret)).resolves.toBe(false);
+    await expect(isCurrentManualLeadVerification(input, {
+      ...proof, policy_version: 'fact-evidence-projection-hmac-v8',
     }, secret)).resolves.toBe(false);
     await expect(isCurrentManualLeadVerification({
       ...input,

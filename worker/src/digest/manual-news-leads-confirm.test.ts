@@ -53,6 +53,10 @@ async function fakeConfirmationEnv() {
       },
       evidence_ids: ['ev-1'],
     }],
+    evidence_dispositions: [{
+      evidence_id: 'ev-1', disposition: 'supports_core',
+      source_fact_refs: ['fact-01'], reason_code: null,
+    }],
     editorial_projection: {
       title: {
         projection_ref: 'title-01', source_fact_refs: ['fact-01'],
@@ -108,6 +112,7 @@ async function fakeConfirmationEnv() {
   }).user) as {
     facts: Array<{ fact_id: string }>;
     projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+    evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
   };
   const facts = promptBody.facts;
   const factVerification = validateManualLeadFactVerification({
@@ -127,6 +132,13 @@ async function fakeConfirmationEnv() {
     projection_results: promptBody.projections.map((projection) => ({
       projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
       supported: true, issue_code: 'none',
+    })),
+    disposition_results: promptBody.evidence_dispositions.map((disposition) => ({
+      evidence_id: disposition.evidence_id,
+      disposition: disposition.disposition,
+      supported: true,
+      issue_code: 'none',
+      source_quotes: [{ evidence_id: evidenceForMarker.id, quote: evidenceForMarker.excerpt }],
     })),
   }, assessment, [evidenceForMarker]);
   const assessmentVersion = 7;
