@@ -4,6 +4,7 @@ import {
   applyManualLeadEvidencePolicy,
   assertManualLeadTransition,
   buildManualLeadAssessmentPrompt,
+  buildManualLeadAssessmentRegenerationPrompt,
   buildManualLeadFactVerificationPrompt,
   classifyManualLeadDuplicate,
   createManualLeadVerificationProof,
@@ -266,6 +267,58 @@ describe('manual news lead domain', () => {
     const user = JSON.parse(prompt.user) as { output_schema: { event_key: string } };
     expect(user.output_schema.event_key).toContain('ASCII lowercase');
     expect(user.output_schema.event_key).toContain('^[a-z0-9][a-z0-9:_-]{5,199}$');
+  });
+
+  test('publishes allowed evidence ids and executable atomic claim examples at prompt top level', () => {
+    const prompt = buildManualLeadAssessmentPrompt({
+      date: '2026-08-11',
+      text: 'TechCrunch称阿里巴巴将禁止员工使用Claude Code，并建议改用其他产品',
+      note: '', evidence: [officialAnthropic], prior_events: [],
+    });
+    const body = JSON.parse(prompt.user) as {
+      allowed_evidence_ids: string[];
+      claim_contract_examples: {
+        good: Array<{ text: string; evidence_ids: string[] }>;
+        bad: Array<{ claim: { text: string; evidence_ids: string[] }; failure_codes: string[] }>;
+      };
+    };
+
+    expect(body.allowed_evidence_ids).toEqual(['ev-official']);
+    expect(body.claim_contract_examples.good).toContainEqual({
+      text: '阿里巴巴将禁止员工使用Claude Code。',
+      evidence_ids: ['<EXACT_ALLOWED_EVIDENCE_ID>'],
+    });
+    expect(body.claim_contract_examples.bad).toContainEqual(expect.objectContaining({
+      claim: expect.objectContaining({
+        text: '阿里巴巴将禁止员工使用Claude Code，因为担忧数据安全，并要求改用其他产品。',
+      }),
+      failure_codes: expect.arrayContaining(['non_atomic_claim', 'unknown_evidence_id']),
+    }));
+    expect(prompt.system).toContain('evidence_ids 中的每个字符串只能逐字复制 allowed_evidence_ids');
+    expect(prompt.system).toContain('原因、改用其他产品等内容必须拆成各自独立的 claim');
+    expect(prompt.system).toContain('title 必须是单一原子句');
+    expect(prompt.system).toContain('summary 中多个事实必须用句号拆成多个完整原子句');
+  });
+
+  test('builds validation-guided regeneration from original context without echoing invalid raw output', () => {
+    const prompt = buildManualLeadAssessmentRegenerationPrompt({
+      date: '2026-08-11', text: 'TechCrunch称阿里巴巴将禁止员工使用Claude Code', note: '',
+      evidence: [officialAnthropic], prior_events: [],
+    }, 'unknown_evidence_id');
+    const body = JSON.parse(prompt.user) as {
+      allowed_evidence_ids: string[];
+      regeneration: { mode: string; failure_code: string; instruction: string };
+      untrusted_data: { evidence: ManualNewsEvidence[] };
+    };
+
+    expect(body.allowed_evidence_ids).toEqual(['ev-official']);
+    expect(body.untrusted_data.evidence).toEqual([officialAnthropic]);
+    expect(body.regeneration).toEqual(expect.objectContaining({
+      mode: 'validation_guided_regeneration', failure_code: 'unknown_evidence_id',
+    }));
+    expect(body.regeneration.instruction).toContain('从头生成完整 schema');
+    expect(prompt.user).not.toContain('ev-private-output');
+    expect(prompt.system).toContain('不得回忆、修补或复用上一次原始输出');
   });
 
   test('assessment and verifier prompts require atomic final facts without similarity fallback', () => {

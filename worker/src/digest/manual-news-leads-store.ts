@@ -21,6 +21,7 @@ import {
 } from './manual-news-leads-verification';
 import type {
   ManualLeadProcessingStore,
+  ManualLeadTransitionPatch,
   ManualNewsLeadRecord,
 } from './manual-news-leads-pipeline';
 import {
@@ -71,6 +72,25 @@ async function sha256Hex(value: string): Promise<string> {
 
 function createMutationNonce(action: string): string {
   return `${action}:${crypto.randomUUID()}`;
+}
+
+function validatedTransitionAuditMetadata(
+  metadata: ManualLeadTransitionPatch['audit_metadata'],
+): Record<string, unknown> {
+  if (!metadata) return {};
+  const allowed = new Set([
+    'assessment_generation_attempts',
+    'assessment_last_validation_code',
+    'assessment_regeneration_trigger_code',
+  ]);
+  if (Object.keys(metadata).some((key) => !allowed.has(key))
+    || (metadata.assessment_generation_attempts !== 1 && metadata.assessment_generation_attempts !== 2)
+    || !/^[a-z0-9_]{1,80}$/.test(metadata.assessment_last_validation_code)
+    || (metadata.assessment_regeneration_trigger_code !== undefined
+      && !/^[a-z0-9_]{1,80}$/.test(metadata.assessment_regeneration_trigger_code))) {
+    throw new Error('invalid_transition_audit_metadata');
+  }
+  return { ...metadata };
 }
 
 export function manualNewsLeadProcessingOwner(id: string, version: number): string {
@@ -520,7 +540,7 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     id: string,
     from: ManualNewsLeadStatus,
     to: ManualNewsLeadStatus,
-    patch: Partial<Pick<ManualNewsLeadRecord, 'error_code' | 'error_message'>> = {},
+    patch: ManualLeadTransitionPatch = {},
   ): Promise<ManualNewsLeadRecord> {
     assertManualLeadTransition(from, to);
     const now = Date.now();
@@ -532,6 +552,7 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     if (!current) throw new Error('lead_transition_conflict');
     const terminal = ['recommended', 'needs_review', 'duplicate', 'rejected', 'failed'].includes(to);
     const mutationNonce = createMutationNonce('status_transition');
+    const auditMetadata = validatedTransitionAuditMetadata(patch.audit_metadata);
     const mutation = this.env.DB.prepare(
       `/* manual_lead:transition */ UPDATE manual_news_leads SET
          status = ?, version = version + 1, error_code = ?, error_message = ?,
@@ -548,7 +569,7 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     const changed = await runAuditedMutation(this.env, mutation, auditMutationStatement(this.env, {
       leadId: id, action: 'status_transition', mutationKind: 'status_transition', mutationNonce,
       fromStatus: from, toStatus: to,
-      resultingVersion: Number(current.version) + 1, createdAt: now,
+      resultingVersion: Number(current.version) + 1, metadata: auditMetadata, createdAt: now,
     }));
     if (!changed) throw new Error('lead_transition_conflict');
     const updated = await getManualNewsLead(this.env, id);

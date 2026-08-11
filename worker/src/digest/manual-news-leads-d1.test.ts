@@ -1028,6 +1028,79 @@ describe('manual lead D1-backed dedupe', () => {
     expect(verifyCalls).toBe(0);
   });
 
+  test('persists one HMAC verification after validation-guided assessment regeneration', async () => {
+    const state = fixture('verifying', 9);
+    const baseAdapters = verifyingAdapters();
+    let assessCalls = 0;
+    let verifyCalls = 0;
+    const result = await processManualNewsLead(
+      state.leadId,
+      new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1),
+      {
+        ...baseAdapters,
+        assess: async () => {
+          assessCalls += 1;
+          return assessCalls === 1
+            ? { ...assessment(), claims: [{ text: fixtureFact, evidence_ids: ['ev-model-invented'] }] }
+            : assessment();
+        },
+        verify: async (prompt) => {
+          verifyCalls += 1;
+          return baseAdapters.verify(prompt);
+        },
+      },
+    );
+
+    expect(result).toMatchObject({ status: 'recommended', assessment: { score: 82 } });
+    expect(assessCalls).toBe(2);
+    expect(verifyCalls).toBe(1);
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_assessment_verifications
+      WHERE lead_id = ? AND status = 'active'`).get(state.leadId)).toEqual({ count: 1 });
+    const audit = state.db.sqlite.prepare(`SELECT metadata_json FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'status_transition'
+        AND from_status = 'verifying' AND to_status = 'clustering'`).get(state.leadId) as { metadata_json: string };
+    expect(JSON.parse(audit.metadata_json)).toEqual({
+      assessment_generation_attempts: 2,
+      assessment_last_validation_code: 'valid',
+      assessment_regeneration_trigger_code: 'unknown_evidence_id',
+    });
+  });
+
+  test('audits exhausted assessment generations without creating assessment or verification rows', async () => {
+    const state = fixture('verifying', 9);
+    let assessCalls = 0;
+    const result = await processManualNewsLead(
+      state.leadId,
+      new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1),
+      {
+        ...verifyingAdapters(),
+        assess: async () => {
+          assessCalls += 1;
+          return { ...assessment(), claims: [{ text: fixtureFact, evidence_ids: ['ev-model-invented'] }] };
+        },
+        verify: async () => { throw new Error('unexpected_verify'); },
+      },
+    );
+
+    expect(result).toMatchObject({
+      status: 'needs_review', assessment: null,
+      error_code: 'assessment_validation_failed', error_message: 'unknown_evidence_id',
+    });
+    expect(assessCalls).toBe(2);
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_event_assessments
+      WHERE lead_id = ?`).get(state.leadId)).toEqual({ count: 0 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_assessment_verifications
+      WHERE lead_id = ?`).get(state.leadId)).toEqual({ count: 0 });
+    const audit = state.db.sqlite.prepare(`SELECT metadata_json FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'status_transition'
+        AND from_status = 'verifying' AND to_status = 'needs_review'`).get(state.leadId) as { metadata_json: string };
+    expect(JSON.parse(audit.metadata_json)).toEqual({
+      assessment_generation_attempts: 2,
+      assessment_last_validation_code: 'unknown_evidence_id',
+      assessment_regeneration_trigger_code: 'unknown_evidence_id',
+    });
+  });
+
   test('a lone lead cannot classify itself as a same-day duplicate after its assessment is saved', async () => {
     const state = fixture();
     const result = await processManualNewsLead(

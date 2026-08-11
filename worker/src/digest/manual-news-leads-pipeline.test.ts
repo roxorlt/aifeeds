@@ -1,6 +1,7 @@
-import { describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import {
+  isTransientManualLeadError,
   processManualNewsLead,
   type ManualLeadProcessingStore,
   type ManualNewsLeadRecord,
@@ -13,6 +14,12 @@ import {
   type ManualNewsProcessedAssessment,
 } from './manual-news-leads';
 import type { PublicDocument } from '../security/safe-url-fetch';
+import { callDeepSeekJson, DEEPSEEK_PRO } from '../hf-paper/llm';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 function documentFixture(
   url: string,
@@ -72,6 +79,8 @@ function memoryStore(initial = lead()) {
   let current = structuredClone(initial);
   const transitions: string[] = [];
   let invalidateCalls = 0;
+  let saveCalls = 0;
+  const transitionPatches: Array<Record<string, unknown>> = [];
   const priorEvents: ManualLeadPriorEvent[] = [];
   const store: ManualLeadProcessingStore = {
     async getLead() { return structuredClone(current); },
@@ -79,6 +88,7 @@ function memoryStore(initial = lead()) {
     async transition(_id, from, to, patch = {}) {
       expect(current.status).toBe(from);
       transitions.push(`${from}->${to}`);
+      transitionPatches.push(structuredClone(patch as Record<string, unknown>));
       current = { ...current, ...patch, status: to, version: current.version + 1 };
       return structuredClone(current);
     },
@@ -90,6 +100,7 @@ function memoryStore(initial = lead()) {
     async findPriorEventsByEventKey() { return structuredClone(priorEvents); },
     async saveVerifiedAssessment(_id, expectedVersion, assessment) {
       expect(current.version).toBe(expectedVersion);
+      saveCalls += 1;
       current.assessment = structuredClone(assessment);
       return { assessment_version: expectedVersion };
     },
@@ -99,7 +110,10 @@ function memoryStore(initial = lead()) {
       current.assessment = null;
     },
   };
-  return { store, transitions, current: () => current, priorEvents, invalidateCalls: () => invalidateCalls };
+  return {
+    store, transitions, transitionPatches, current: () => current, priorEvents,
+    invalidateCalls: () => invalidateCalls, saveCalls: () => saveCalls,
+  };
 }
 
 const officialEvidence: ManualNewsEvidence = {
@@ -186,6 +200,20 @@ function verifiedFromPrompt(prompt: { user: string }) {
 function processed(overrides: Record<string, unknown> = {}): ManualNewsProcessedAssessment {
   const core = applyManualLeadEvidencePolicy(validateManualLeadAssessment(assessed(), [officialEvidence]), [officialEvidence]);
   return { ...core, duplicate_scope: null, matched_lead_id: null, ...overrides } as ManualNewsProcessedAssessment;
+}
+
+function deepSeekJsonResponse(value: unknown): Response {
+  return new Response(JSON.stringify({
+    choices: [{ message: { content: typeof value === 'string' ? value : JSON.stringify(value) } }],
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+}
+
+async function assessThroughRealDeepSeekJson(): Promise<unknown> {
+  const result = await callDeepSeekJson<unknown>('test-key', DEEPSEEK_PRO, '{}', {
+    retries: 0, timeoutMs: 1_000, systemPrompt: 'test-contract',
+  });
+  if (!result.data) throw new Error(result.error || 'empty_model_assessment');
+  return result.data;
 }
 
 describe('manual lead processing pipeline', () => {
@@ -336,7 +364,7 @@ describe('manual lead processing pipeline', () => {
       verify: async () => { throw new Error('unexpected_verify'); },
     });
 
-    expect(calls).toBe(1);
+    expect(calls).toBe(2);
     expect(memory.invalidateCalls()).toBe(1);
     expect(memory.current()).toMatchObject({
       status: 'needs_review',
@@ -344,6 +372,174 @@ describe('manual lead processing pipeline', () => {
       error_message: 'invalid_assessment_identity',
       assessment: null,
     });
+  });
+
+  test('regenerates once after an unknown evidence id and verifies only the valid replacement', async () => {
+    const memory = memoryStore();
+    const prompts: Array<{ system: string; user: string }> = [];
+    let assessCalls = 0;
+    let verifyCalls = 0;
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: async (prompt) => {
+        prompts.push(prompt);
+        assessCalls += 1;
+        return assessCalls === 1
+          ? assessed({ claims: [{ text: supportedAssessmentFact, evidence_ids: ['ev-missing'] }] })
+          : assessed();
+      },
+      verify: async (prompt) => { verifyCalls += 1; return verifiedFromPrompt(prompt); },
+    });
+
+    expect(assessCalls).toBe(2);
+    expect(verifyCalls).toBe(1);
+    expect(memory.saveCalls()).toBe(1);
+    expect(memory.current()).toMatchObject({ status: 'recommended', assessment: { score: 82 } });
+    const regeneration = JSON.parse(prompts[1].user) as {
+      regeneration: { failure_code: string };
+      allowed_evidence_ids: string[];
+    };
+    expect(regeneration).toMatchObject({
+      regeneration: { failure_code: 'unknown_evidence_id' },
+      allowed_evidence_ids: ['ev-official'],
+    });
+    expect(prompts[1].user).not.toContain('ev-missing');
+    expect(memory.transitionPatches).toContainEqual(expect.objectContaining({
+      audit_metadata: {
+        assessment_generation_attempts: 2,
+        assessment_last_validation_code: 'valid',
+        assessment_regeneration_trigger_code: 'unknown_evidence_id',
+      },
+    }));
+  });
+
+  test('regenerates once after a non-atomic claim and keeps the TechCrunch-style control action atomic', async () => {
+    const memory = memoryStore();
+    let assessCalls = 0;
+    let verifyCalls = 0;
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: async () => {
+        assessCalls += 1;
+        return assessCalls === 1 ? assessed({
+          claims: [{
+            text: '阿里巴巴将禁止员工使用Claude Code，因为担忧数据安全，并要求改用其他产品。',
+            evidence_ids: ['ev-official'],
+          }],
+        }) : assessed();
+      },
+      verify: async (prompt) => { verifyCalls += 1; return verifiedFromPrompt(prompt); },
+    });
+
+    expect(assessCalls).toBe(2);
+    expect(verifyCalls).toBe(1);
+    expect(memory.current()).toMatchObject({ status: 'recommended' });
+    expect(memory.transitionPatches).toContainEqual(expect.objectContaining({
+      audit_metadata: expect.objectContaining({
+        assessment_generation_attempts: 2,
+        assessment_regeneration_trigger_code: 'non_atomic_claim',
+      }),
+    }));
+  });
+
+  test('stops after two invalid assessment generations without verification or HMAC persistence', async () => {
+    const memory = memoryStore();
+    let assessCalls = 0;
+    let verifyCalls = 0;
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: async () => {
+        assessCalls += 1;
+        return assessCalls === 1
+          ? assessed({ claims: [{ text: supportedAssessmentFact, evidence_ids: ['ev-missing'] }] })
+          : assessed({ claims: [{
+            text: 'OpenAI发布GPT 5，并暂停GPT 6。', evidence_ids: ['ev-official'],
+          }] });
+      },
+      verify: async () => { verifyCalls += 1; throw new Error('unexpected_verify'); },
+    });
+
+    expect(assessCalls).toBe(2);
+    expect(verifyCalls).toBe(0);
+    expect(memory.saveCalls()).toBe(0);
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review', assessment: null,
+      error_code: 'assessment_validation_failed', error_message: 'non_atomic_claim',
+    });
+    expect(memory.transitionPatches.at(-1)).toMatchObject({
+      audit_metadata: {
+        assessment_generation_attempts: 2,
+        assessment_last_validation_code: 'non_atomic_claim',
+        assessment_regeneration_trigger_code: 'unknown_evidence_id',
+      },
+    });
+  });
+
+  test('does not regenerate a valid assessment to disguise independent fact insufficiency', async () => {
+    const memory = memoryStore();
+    let assessCalls = 0;
+    let verifyCalls = 0;
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: async () => { assessCalls += 1; return assessed(); },
+      verify: async (prompt) => {
+        verifyCalls += 1;
+        const result = verifiedFromPrompt(prompt);
+        return {
+          ...result,
+          overall_verdict: 'unsupported',
+          fact_results: result.fact_results.map((fact, index) => index === 0
+            ? { ...fact, supported: false, issue_code: 'not_found' }
+            : fact),
+        };
+      },
+    });
+
+    expect(assessCalls).toBe(1);
+    expect(verifyCalls).toBe(1);
+    expect(memory.saveCalls()).toBe(0);
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review', assessment: null, error_code: 'fact_verification_failed',
+    });
+  });
+
+  test('a Workflow retry regenerates from scratch and never accepts raw output from the failed run', async () => {
+    const memory = memoryStore();
+    let assessCalls = 0;
+    let verifyCalls = 0;
+    const adapters = {
+      search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: async () => {
+        assessCalls += 1;
+        if (assessCalls === 1) {
+          return assessed({ claims: [{ text: supportedAssessmentFact, evidence_ids: ['ev-missing'] }] });
+        }
+        if (assessCalls === 2) throw new Error('trusted_gateway_http_503');
+        return assessed();
+      },
+      verify: async (prompt: { system: string; user: string }) => {
+        verifyCalls += 1;
+        return verifiedFromPrompt(prompt);
+      },
+    };
+
+    await expect(processManualNewsLead(memory.current().id, memory.store, adapters))
+      .rejects.toThrow(
+        /assessment_model_retryable_attempt_2_after_unknown_evidence_id/,
+      );
+    expect(memory.current()).toMatchObject({ status: 'verifying', assessment: null });
+    expect(memory.saveCalls()).toBe(0);
+
+    await processManualNewsLead(memory.current().id, memory.store, adapters);
+    expect(assessCalls).toBe(3);
+    expect(verifyCalls).toBe(1);
+    expect(memory.saveCalls()).toBe(1);
+    expect(memory.current()).toMatchObject({ status: 'recommended', assessment: { score: 82 } });
   });
 
   test('does not promote an unsupported political claim and surfaces uncertainty', async () => {
@@ -733,8 +929,107 @@ describe('manual lead processing pipeline', () => {
       memory.current().input_url = '';
     }
     await expect(processManualNewsLead(memory.current().id, memory.store, adapters))
-      .rejects.toThrow(/gateway_timeout|trusted_gateway_http_503/);
+      .rejects.toThrow(/gateway_timeout|assessment_model_retryable_attempt_1_after_not_validated/);
     expect(memory.current().status).not.toBe('failed');
     expect(['researching', 'verifying']).toContain(memory.current().status);
+  });
+
+  test.each([
+    ['HTTP 503', 503],
+    ['HTTP 502', 502],
+    ['HTTP 429', 429],
+    ['HTTP 408', 408],
+    ['TypeError', 'TypeError'],
+    ['AbortError', 'AbortError'],
+    ['TimeoutError', 'TimeoutError'],
+  ] as const)('uses the real callDeepSeekJson %s contract for Workflow retry', async (expectedError, outcome) => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      if (typeof outcome === 'number') return new Response('provider failure', { status: outcome });
+      const error = outcome === 'TypeError'
+        ? new TypeError('transport failure')
+        : new Error('transport failure');
+      error.name = outcome;
+      throw error;
+    }));
+    const memory = memoryStore();
+
+    await expect(processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: assessThroughRealDeepSeekJson,
+      verify: async () => { throw new Error('unexpected_verify'); },
+    })).rejects.toThrow(/assessment_model_retryable_attempt_1_after_not_validated/);
+
+    expect(isTransientManualLeadError(new Error(expectedError))).toBe(true);
+    expect(memory.current()).toMatchObject({ status: 'verifying', assessment: null });
+    expect(memory.transitions).not.toContain('verifying->failed');
+  });
+
+  test.each([400, 401, 403, 422])(
+    'keeps permanent DeepSeek HTTP %i on the terminal assessment failure path',
+    async (status) => {
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      vi.stubGlobal('fetch', vi.fn(async () => new Response('permanent provider rejection', { status })));
+      const memory = memoryStore();
+
+      await processManualNewsLead(memory.current().id, memory.store, {
+        search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+        extract: async () => officialEvidence,
+        assess: assessThroughRealDeepSeekJson,
+        verify: async () => { throw new Error('unexpected_verify'); },
+      });
+
+      expect(isTransientManualLeadError(new Error(`HTTP ${status}`))).toBe(false);
+      expect(memory.current()).toMatchObject({
+        status: 'failed', error_code: 'assessment_failed', error_message: `HTTP ${status}`,
+      });
+    },
+  );
+
+  test('keeps real callDeepSeekJson parse failure on deterministic needs-review path', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.stubGlobal('fetch', vi.fn(async () => deepSeekJsonResponse('{not-json')));
+    const memory = memoryStore();
+
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: assessThroughRealDeepSeekJson,
+      verify: async () => { throw new Error('unexpected_verify'); },
+    });
+
+    expect(isTransientManualLeadError(new Error('json_parse_fail'))).toBe(false);
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review', assessment: null,
+      error_code: 'assessment_validation_failed', error_message: 'invalid_assessment',
+    });
+  });
+
+  test('never classifies strict unknown evidence validation as transient from model or d1 substrings', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const invalid = assessed({
+      claims: [{ text: supportedAssessmentFact, evidence_ids: ['ev-model-d1-invented'] }],
+    });
+    const fetchMock = vi.fn(async () => deepSeekJsonResponse(invalid));
+    vi.stubGlobal('fetch', fetchMock);
+    const memory = memoryStore();
+
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: assessThroughRealDeepSeekJson,
+      verify: async () => { throw new Error('unexpected_verify'); },
+    });
+
+    expect(isTransientManualLeadError(
+      new Error('unknown_evidence_id:ev-model-d1-invented'),
+    )).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review', assessment: null,
+      error_code: 'assessment_validation_failed', error_message: 'unknown_evidence_id',
+    });
   });
 });
