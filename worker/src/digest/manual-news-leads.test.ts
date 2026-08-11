@@ -400,6 +400,45 @@ describe('manual news lead domain', () => {
   });
 
   test.each([
+    '法院命令OpenAI停止发布GPT 6。',
+    '法院命令OpenAI停止开源GPT 6权重。',
+    '法院命令OpenAI停止支持Claude 5。',
+    '监管机构命令OpenAI禁止开源GPT 6权重。',
+  ])('accepts one nested control-to-stop-to-complement action chain: %s', (text) => {
+    const fixture = supportedTextVerification(text, text);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    '法院命令OpenAI停止发布GPT 6百度升级文心模型。',
+    '法院命令OpenAI停止开源GPT 6权重anthropic部署Claude模型。',
+    '法院命令OpenAI停止支持GPT 6月之暗面重塑Kimi模型。',
+    '法院命令OpenAI停止发布GPT 6anthropic commercializes Claude。',
+  ])('rejects an unconsumed second subject and unknown predicate after a valid control chain: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
+  test.each([
+    '百度升级文心模型法院命令OpenAI停止发布GPT 6。',
+    'anthropic commercializes Claude法院命令OpenAI停止开源GPT 6权重。',
+  ])('rejects an unknown predicate in the unconsumed prefix before a valid control chain: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
+  test('still rejects an independent known action after a valid control chain', () => {
+    const text = '法院命令OpenAI停止发布GPT 6百度投资文心模型。';
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
+  test.each([
     'OpenAI发布模型训练工具。',
     'OpenAI发布开源模型。',
     'OpenAI发布合作平台。',
@@ -423,6 +462,15 @@ describe('manual news lead domain', () => {
     expect(validateManualLeadFactVerification(
       fixture.raw, fixture.candidate, fixture.evidence,
     ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    'OpenAI发布 百度投资分析工具。',
+    'OpenAI发布\u2003腾讯融资服务。',
+  ])('does not extend a release object noun phrase across a second subject and predicate: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
   });
 
   test('does not hide real actions behind a post-release compound noun phrase', () => {
@@ -1133,6 +1181,17 @@ describe('manual news lead domain', () => {
   });
 
   test.each([
+    { candidate: 'OpenAI发布了一个GPT 6模型。', quote: 'OpenAI发布GPT 6模型。' },
+    { candidate: 'OpenAI发布了该Claude 5模型。', quote: 'OpenAI发布Claude 5模型。' },
+    { candidate: 'OpenAI发布了一个新工具。', quote: 'OpenAI发布新工具。' },
+  ])('normalizes consecutive post-action Chinese function words to a fixed point: $candidate', ({ candidate, quote }) => {
+    const fixture = supportedTextVerification(candidate, quote);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
     { candidate: 'OpenAI expanded Mongolia operations.', quote: 'OpenAI expanded operations in Mongolia.' },
     { candidate: 'OpenAI expanded Freedonia operations.', quote: 'OpenAI expanded operations in Freedonia.' },
   ])('normalizes an unlisted capitalized location only in a location context: $candidate', ({ candidate, quote }) => {
@@ -1146,6 +1205,36 @@ describe('manual news lead domain', () => {
     const fixture = supportedTextVerification(
       'OpenAI expanded Mongolia operations.',
       'OpenAI expanded operations in Freedonia.',
+    );
+    expect(() => validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    )).toThrow(/fact_verification_entity_slot_missing/);
+  });
+
+  test.each([
+    {
+      candidate: 'OpenAI expanded Costa Rica operations.',
+      quote: 'OpenAI expanded operations in Costa Rica.',
+    },
+    {
+      candidate: 'OpenAI expanded New Zealand business.',
+      quote: 'OpenAI expanded business within New Zealand.',
+    },
+    {
+      candidate: 'OpenAI expanded San Marino market.',
+      quote: 'OpenAI expanded market into San Marino.',
+    },
+  ])('normalizes a multi-word English location phrase around a market noun: $candidate', ({ candidate, quote }) => {
+    const fixture = supportedTextVerification(candidate, quote);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test('keeps different multi-word English locations distinct', () => {
+    const fixture = supportedTextVerification(
+      'OpenAI expanded Costa Rica operations.',
+      'OpenAI expanded operations in New Zealand.',
     );
     expect(() => validateManualLeadFactVerification(
       fixture.raw, fixture.candidate, fixture.evidence,
