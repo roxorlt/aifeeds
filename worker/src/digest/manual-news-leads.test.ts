@@ -63,8 +63,8 @@ const independentReport: ManualNewsEvidence = {
 
 function assessment(overrides: Record<string, unknown> = {}) {
   return {
-    title: 'Anthropic披露支持范围内Claude输出的水印与来源标记',
-    summary: '官方文档说明，部分受支持文本可加入不可见水印，部分文件可带C2PA来源信息。',
+    title: 'Anthropic披露受支持Claude文本的不可见水印',
+    summary: 'Anthropic披露受支持Claude文本的不可见水印。',
     event_key: 'anthropic-supported-output-provenance-2026-08',
     event_type: 'product_documentation',
     material_update: false,
@@ -73,12 +73,19 @@ function assessment(overrides: Record<string, unknown> = {}) {
     occurred_at: '2026-08-10',
     uncertainties: ['文档未说明所有模型均适用。'],
     claims: [{
-      text: 'Anthropic官方文档说明，部分受支持的Claude文本可加入不可见水印，部分文件可带C2PA来源信息，范围仅限受支持的模型和产品。',
+      text: 'Anthropic披露受支持Claude文本的不可见水印。',
       evidence_ids: ['ev-official'],
     }],
     matched_event_key: null,
     ...overrides,
   };
+}
+
+function atomicTestClaim(value: string): string {
+  const clause = value
+    .split(/[。！？!?；;\n]|\s*[—–]{1,2}\s*|[，,、]|(?:并且|并(?!未|不|非)|随后|继而|然后|后又)|\b(?:and|but|then|subsequently|afterwards?)\b/iu)[0]
+    ?.trim();
+  return clause || value.trim();
 }
 
 function supportedFactResult(factId: string, evidenceId: string, quote: string) {
@@ -116,7 +123,7 @@ function supportedTextVerification(
     event_key: 'structured-fact-verification-2026-08-11',
     event_type: 'other',
     occurred_at: null,
-    claims: [{ text: factText, evidence_ids: [evidence[0].id] }],
+    claims: [{ text: atomicTestClaim(factText), evidence_ids: [evidence[0].id] }],
     ...overrides,
   }), evidence);
   const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
@@ -243,6 +250,47 @@ describe('manual news lead domain', () => {
     const user = JSON.parse(prompt.user) as { output_schema: { event_key: string } };
     expect(user.output_schema.event_key).toContain('ASCII lowercase');
     expect(user.output_schema.event_key).toContain('^[a-z0-9][a-z0-9:_-]{5,199}$');
+  });
+
+  test('assessment and verifier prompts require atomic final facts without similarity fallback', () => {
+    const assessmentPrompt = buildManualLeadAssessmentPrompt({
+      date: '2026-08-11', text: 'OpenAI发布GPT 5并暂停GPT 6', note: '',
+      evidence: [officialAnthropic], prior_events: [],
+    });
+    expect(assessmentPrompt.system).toContain('每条 claim 必须是单一原子事实');
+    expect(assessmentPrompt.system).toContain('拆成多条 claims');
+
+    const candidate = validateManualLeadAssessment(assessment({
+      title: 'OpenAI发布GPT 5，随后暂停GPT 6。',
+      summary: 'OpenAI发布GPT 5；OpenAI随后暂停GPT 6。',
+      claims: [
+        { text: 'OpenAI发布GPT 5。', evidence_ids: ['ev-official'] },
+        { text: 'OpenAI暂停GPT 6。', evidence_ids: ['ev-official'] },
+      ],
+    }), [officialAnthropic]);
+    const verifierPrompt = buildManualLeadFactVerificationPrompt({
+      assessment: candidate, evidence: [officialAnthropic],
+    });
+    const body = JSON.parse(verifierPrompt.user) as {
+      facts: Array<{ fact_id: string; untrusted_candidate_value: string | boolean }>;
+    };
+    expect(verifierPrompt.system).toContain('每个输入 fact 已被确定性拆成单一原子子句');
+    expect(verifierPrompt.system).toContain('禁止用词面相似度');
+    expect(body.facts.map((fact) => fact.fact_id)).toEqual(expect.arrayContaining([
+      'field:title:0', 'field:title:1', 'field:summary:0', 'field:summary:1',
+      'claim:0', 'claim:1',
+    ]));
+    expect(body.facts).not.toContainEqual(expect.objectContaining({ fact_id: 'field:title' }));
+  });
+
+  test.each([
+    'OpenAI发布GPT 5，并暂停GPT 6。',
+    'OpenAI released GPT 5; Anthropic paused Claude.',
+    'OpenAI整合Acme——随后重构核心平台。',
+  ])('rejects a non-atomic assessment claim before independent verification: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
   });
 
   test('builds isolated untrusted evidence contexts for every factual assessment field and claim', () => {
@@ -378,10 +426,10 @@ describe('manual news lead domain', () => {
     ]), candidate, [officialAnthropic, negativeEvidence])).toThrow(/multiple_fact_quote_evidence/);
     expect(() => validateManualLeadFactVerification(replaceSummaryQuotes([{
       evidence_id: 'ev-official', quote: 'Documentation for supported models and products.',
-    }]), candidate, [officialAnthropic, negativeEvidence])).toThrow(/fact_verification_anchor_missing/);
+    }]), candidate, [officialAnthropic, negativeEvidence])).toThrow(/fact_verification_(?:anchor_missing|entity_slot_missing)/);
     expect(() => validateManualLeadFactVerification(replaceSummaryQuotes([{
       evidence_id: 'ev-media', quote: negativeEvidence.claims_supported[0],
-    }]), candidate, [officialAnthropic, negativeEvidence])).toThrow(/fact_verification_polarity_mismatch/);
+    }]), candidate, [officialAnthropic, negativeEvidence])).toThrow(/fact_verification_(?:polarity|action)_mismatch/);
   });
 
   test('rejects a long but generic same-language quote with no distinctive fact signal', () => {
@@ -407,7 +455,7 @@ describe('manual news lead domain', () => {
     };
 
     expect(() => validateManualLeadFactVerification(result, candidate, [genericEvidence]))
-      .toThrow(/fact_verification_fact_signal_missing/);
+      .toThrow(/fact_verification_(?:fact_signal_missing|action_mismatch)/);
   });
 
   test('rejects Chinese positive facts backed by an explicitly negative quote', () => {
@@ -465,7 +513,7 @@ describe('manual news lead domain', () => {
         event_key: 'regulator-ai-action-2026-08-11',
         event_type: 'political_regulatory',
         occurred_at: null,
-        claims: [{ text: item.candidate, evidence_ids: [evidence[0].id] }],
+        claims: [{ text: atomicTestClaim(item.candidate), evidence_ids: [evidence[0].id] }],
       }), evidence);
       const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
         assessment: candidate, evidence,
@@ -474,7 +522,10 @@ describe('manual news lead domain', () => {
         overall_verdict: 'supported',
         fact_results: facts.map((fact) => supportedFactResult(fact.fact_id, evidence[0].id, item.quote)),
       };
-      expect(() => validateManualLeadFactVerification(result, candidate, evidence)).toThrow(item.error);
+      expect(() => validateManualLeadFactVerification(result, candidate, evidence))
+        .toThrow(item.error.source.includes('polarity')
+          ? /fact_verification_(?:polarity|action)_mismatch/
+          : item.error);
     }
   });
 
@@ -508,7 +559,7 @@ describe('manual news lead domain', () => {
       summary: positiveFact,
       event_key: 'anthropic-c2pa-provenance-2026-08-11',
       occurred_at: null,
-      claims: [{ text: positiveFact, evidence_ids: [evidence[0].id] }],
+      claims: [{ text: atomicTestClaim(positiveFact), evidence_ids: [evidence[0].id] }],
     }), evidence);
     const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
       assessment: candidate, evidence,
@@ -533,7 +584,7 @@ describe('manual news lead domain', () => {
       event_key: 'regulator-safety-pilot-2026-08-11',
       event_type: 'political_regulatory',
       occurred_at: null,
-      claims: [{ text: unsupportedFact, evidence_ids: [evidence[0].id] }],
+      claims: [{ text: atomicTestClaim(unsupportedFact), evidence_ids: [evidence[0].id] }],
     }), evidence);
     const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
       assessment: candidate, evidence,
@@ -544,13 +595,13 @@ describe('manual news lead domain', () => {
     };
 
     expect(() => validateManualLeadFactVerification(result, candidate, evidence))
-      .toThrow(/fact_verification_fact_signal_missing/);
+      .toThrow(/fact_verification_(?:fact_signal_missing|action_mismatch)/);
   });
 
   test.each([
     {
-      candidate: 'OpenAI收购Acme以扩大数据业务。',
-      quote: 'OpenAI出售Acme并退出数据业务。',
+      candidate: 'OpenAI收购Acme。',
+      quote: 'OpenAI出售Acme。',
       error: /fact_verification_action_mismatch/,
     },
     {
@@ -565,7 +616,7 @@ describe('manual news lead domain', () => {
       summary: factText,
       event_key: 'company-transaction-scope-2026-08-11',
       occurred_at: null,
-      claims: [{ text: factText, evidence_ids: [evidence[0].id] }],
+      claims: [{ text: atomicTestClaim(factText), evidence_ids: [evidence[0].id] }],
     }), evidence);
     const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
       assessment: candidate, evidence,
@@ -586,7 +637,7 @@ describe('manual news lead domain', () => {
       summary: factText,
       event_key: 'openai-acquires-acme-2026-08-11',
       occurred_at: '2026-08-11',
-      claims: [{ text: factText, evidence_ids: [evidence[0].id] }],
+      claims: [{ text: atomicTestClaim(factText), evidence_ids: [evidence[0].id] }],
     }), evidence);
     const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
       assessment: candidate, evidence,
@@ -612,7 +663,7 @@ describe('manual news lead domain', () => {
       summary: factText,
       event_key: 'openai-completes-acme-acquisition-2026-08',
       occurred_at: null,
-      claims: [{ text: factText, evidence_ids: [evidence[0].id] }],
+      claims: [{ text: atomicTestClaim(factText), evidence_ids: [evidence[0].id] }],
     }), evidence);
     const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
       assessment: candidate, evidence,
@@ -623,7 +674,7 @@ describe('manual news lead domain', () => {
     };
 
     expect(() => validateManualLeadFactVerification(raw, candidate, evidence))
-      .toThrow(/fact_verification_(?:polarity|modality)_mismatch/);
+      .toThrow(/fact_verification_(?:polarity|modality|action|entity_slot)_mismatch/);
   });
 
   test('requires every asserted action slot instead of accepting one overlapping action', () => {
@@ -635,7 +686,7 @@ describe('manual news lead domain', () => {
       summary: factText,
       event_key: 'openai-acquires-acme-exits-europe-2026-08',
       occurred_at: null,
-      claims: [{ text: factText, evidence_ids: [evidence[0].id] }],
+      claims: [{ text: atomicTestClaim(factText), evidence_ids: [evidence[0].id] }],
     }), evidence);
     const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
       assessment: candidate, evidence,
@@ -658,7 +709,7 @@ describe('manual news lead domain', () => {
       summary: factText,
       event_key: 'openai-acquires-acme-expands-europe-2026-08',
       occurred_at: null,
-      claims: [{ text: factText, evidence_ids: [evidence[0].id] }],
+      claims: [{ text: atomicTestClaim(factText), evidence_ids: [evidence[0].id] }],
     }), evidence);
     const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
       assessment: candidate, evidence,
@@ -713,6 +764,62 @@ describe('manual news lead domain', () => {
   });
 
   test.each([
+    { candidate: 'GPT 5已正式发布人工智能模型。', quote: 'GPT 6已正式发布人工智能模型。' },
+    { candidate: 'alpha has paused training.', quote: 'beta has paused training.' },
+    { candidate: 'deepseek released r2.', quote: 'moonshot released r2.' },
+    { candidate: 'OpenAI released GPT 6.', quote: 'OpenAI released GPT 5.' },
+    { candidate: '月之暗面计划发布Kimi K3。', quote: '深度求索计划发布Kimi K3。' },
+  ])('binds the complete positioned subject/object span for an atomic unit: $candidate', ({ candidate, quote }) => {
+    const fixture = supportedTextVerification(candidate, quote);
+    expect(() => validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    )).toThrow(/fact_verification_(?:entity_slot_missing|anchor_missing)/);
+  });
+
+  test.each([
+    'GPT 5已正式发布人工智能模型。',
+    'alpha has paused training.',
+    'deepseek released r2.',
+    'OpenAI released GPT 6.',
+    '月之暗面计划发布Kimi K3。',
+  ])('accepts an exact positioned single-action unit: %s', (factText) => {
+    const fixture = supportedTextVerification(factText, factText);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test('does not exchange atomic units across a multi-clause quote', () => {
+    const fixture = supportedTextVerification(
+      'GPT 5已正式发布人工智能模型。',
+      'GPT 6已正式发布人工智能模型；GPT 5并未正式发布人工智能模型。',
+    );
+    expect(() => validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    )).toThrow(/fact_verification_(?:polarity_mismatch|entity_slot_missing)/);
+  });
+
+  test('fails closed when an unstructured object/context slot changes under the same action', () => {
+    const mismatch = supportedTextVerification(
+      '国家人工智能监管机构已经禁止模型部署活动。',
+      '国家人工智能监管机构已经禁止模型训练活动。',
+      { event_type: 'political_regulatory' },
+    );
+    expect(() => validateManualLeadFactVerification(
+      mismatch.raw, mismatch.candidate, mismatch.evidence,
+    )).toThrow(/fact_verification_entity_slot_missing/);
+
+    const matching = supportedTextVerification(
+      '国家人工智能监管机构已经禁止模型部署活动。',
+      '国家人工智能监管机构已经禁止模型部署活动。',
+      { event_type: 'political_regulatory' },
+    );
+    expect(validateManualLeadFactVerification(
+      matching.raw, matching.candidate, matching.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
     {
       candidate: 'OpenAI正式扩大加拿大企业人工智能服务业务。',
       quote: 'OpenAI正式扩大澳大利亚企业人工智能服务业务。',
@@ -744,6 +851,35 @@ describe('manual news lead domain', () => {
     'OpenAI宣布GPT-6巴西市场上线企业服务。',
   ])('accepts the same generic non-prepositional region in the supporting unit: %s', (factText) => {
     const fixture = supportedTextVerification(factText, factText);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    { candidate: 'OpenAI expanded canadian operations.', quote: 'OpenAI expanded australian operations.' },
+    { candidate: 'OpenAI扩大加拿大运营。', quote: 'OpenAI扩大澳大利亚运营。' },
+    {
+      candidate: 'Anthropic launched its service for the Japanese market.',
+      quote: 'Anthropic launched its service for the Korean market.',
+    },
+    { candidate: 'OpenAI扩大北方群岛市场。', quote: 'OpenAI扩大南方群岛市场。' },
+  ])('canonicalizes regions from any atomic-clause position and rejects a different market: $candidate', ({ candidate, quote }) => {
+    const fixture = supportedTextVerification(candidate, quote);
+    expect(() => validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    )).toThrow(/fact_verification_entity_slot_missing/);
+  });
+
+  test.each([
+    { candidate: 'OpenAI expanded Canadian operations.', quote: 'OpenAI expanded operations in Canada.' },
+    {
+      candidate: 'Anthropic launched its service in the United Kingdom.',
+      quote: 'Anthropic launched its service for the British market.',
+    },
+    { candidate: 'OpenAI扩大加拿大运营。', quote: 'OpenAI在加拿大扩大运营。' },
+  ])('accepts canonical aliases for the same market: $candidate', ({ candidate, quote }) => {
+    const fixture = supportedTextVerification(candidate, quote);
     expect(validateManualLeadFactVerification(
       fixture.raw, fixture.candidate, fixture.evidence,
     ).overall_verdict).toBe('supported');
@@ -876,6 +1012,35 @@ describe('manual news lead domain', () => {
     ).overall_verdict).toBe('supported');
   });
 
+  test.each([
+    { candidate: 'OpenAI整合Acme。', quote: 'OpenAI重构Acme。' },
+    { candidate: 'openai orchestrates alpha.', quote: 'openai coordinates alpha.' },
+  ])('does not verify a single unknown action through token similarity: $candidate', ({ candidate, quote }) => {
+    const fixture = supportedTextVerification(candidate, quote, { event_type: 'industry_event' });
+    expect(() => validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    )).toThrow(/fact_verification_action_mismatch/);
+  });
+
+  test.each([
+    { candidate: 'OpenAI整合Acme。', quote: '  OpenAI整合Acme！ ' },
+    { candidate: 'openai orchestrates alpha.', quote: 'OpenAI ORCHESTRATES alpha!' },
+  ])('accepts only the same normalized critical span for a single unknown action: $candidate', ({ candidate, quote }) => {
+    const fixture = supportedTextVerification(candidate, quote, { event_type: 'industry_event' });
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    'OpenAI整合Acme——重构核心平台。',
+    'openai orchestrates alpha, then reworks beta.',
+  ])('rejects an unknown compound even when its source quote is identical: %s', (factText) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text: factText, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
   test('requires full occurred_at instant precision and normalizes timezone-equivalent evidence', () => {
     const dateOnly = supportedTextVerification(
       'OpenAI于2026-08-11发布模型。',
@@ -952,6 +1117,58 @@ describe('manual news lead domain', () => {
     expect(() => validateManualLeadFactVerification(
       dateOnly.raw, dateOnly.candidate, dateOnly.evidence,
     )).toThrow(/fact_verification_instant_precision_mismatch/);
+  });
+
+  test.each([
+    {
+      quote: 'OpenAI于2026年8月11日上午8时北京时间正式发布模型。',
+      instant: '2026-08-11T00:00:00Z',
+    },
+    {
+      quote: 'OpenAI于2026年8月11日中午12点中国标准时间正式发布模型。',
+      instant: '2026-08-11T04:00:00Z',
+    },
+    {
+      quote: 'OpenAI released the model on 11 August 2026 at 3:30 PM GMT+8.',
+      instant: '2026-08-11T07:30:00Z',
+    },
+    {
+      quote: 'OpenAI released the model on August 12 2026 at 12:00 AM UTC+08:00.',
+      instant: '2026-08-11T16:00:00Z',
+    },
+    {
+      quote: 'OpenAI于2026年8月11日凌晨1点30分+08:00发布模型。',
+      instant: '2026-08-10T17:30:00Z',
+    },
+  ])('normalizes Chinese day periods and both English date orders: $quote', ({ quote, instant }) => {
+    const fixture = supportedTextVerification('OpenAI发布模型。', quote, { occurred_at: instant });
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test('rejects an AM/PM instant with the wrong normalized time', () => {
+    const fixture = supportedTextVerification(
+      'OpenAI发布模型。',
+      'OpenAI released the model on 11 August 2026 at 3:30 AM GMT+8.',
+      { occurred_at: '2026-08-11T07:30:00Z' },
+    );
+    expect(() => validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    )).toThrow(/fact_verification_instant_mismatch/);
+  });
+
+  test.each([
+    'OpenAI发布GPT 5。',
+    'OpenAI暂停GPT 5训练。',
+    'Moonshot raised funding.',
+    'The regulator banned AI training.',
+    'OpenAI plans to release GPT 6.',
+  ])('keeps common atomic release, pause, funding, ban, and planned-release facts valid: %s', (factText) => {
+    const fixture = supportedTextVerification(factText, factText, { event_type: 'industry_event' });
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
   });
 
   test('validates material updates against an exact verified prior context and persists that context', () => {
@@ -1147,10 +1364,16 @@ describe('manual news lead domain', () => {
       summary: '这是单名参议员发出的请求，并非国会通过的约束性命令。',
       event_key: 'sanders-ai-pause-letter-2026-08-10',
       event_type: 'political_regulatory',
-      claims: [{
-        text: '美国参议员桑德斯向OpenAI、Anthropic和Meta负责人发出暂停AI开发的请求；这是单名参议员的呼吁，并非国会通过的约束性命令。',
-        evidence_ids: ['ev-letter', 'ev-media'],
-      }],
+      claims: [
+        {
+          text: '美国参议员桑德斯向OpenAI、Anthropic和Meta负责人发出暂停AI开发的请求。',
+          evidence_ids: ['ev-letter', 'ev-media'],
+        },
+        {
+          text: '这是一名参议员发出的呼吁。',
+          evidence_ids: ['ev-letter', 'ev-media'],
+        },
+      ],
     }), [sandersLetter, independentReport]);
     expect(applyManualLeadEvidencePolicy(political, [sandersLetter]))
       .toMatchObject({ recommendation: 'needs_review', evidence_tier: 'insufficient' });

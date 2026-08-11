@@ -133,13 +133,13 @@ function candidates(prefix: string): NewsReviewCandidate[] {
 }
 
 async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Promise<void> {
-  const supportingText = `On 2026-08-11, official release documentation for ${eventKey} describes the product and published scope.`;
+  const supportingText = `Anthropic released ${eventKey} on 2026-08-11.`;
   const rawAssessment = {
-    title: 'Official product release documentation',
-    summary: 'Official release documentation describes the product and published scope.', event_key: eventKey,
+    title: supportingText,
+    summary: supportingText, event_key: eventKey,
     event_type: 'product_release', material_update: false, score: 90,
     recommendation: 'recommended', occurred_at: '2026-08-11', uncertainties: [],
-    claims: [{ text: 'Official release documentation describes the product and published scope.', evidence_ids: [`ev-${id}`] }], matched_event_key: null,
+    claims: [{ text: supportingText, evidence_ids: [`ev-${id}`] }], matched_event_key: null,
   };
   const evidence = {
     id: `ev-${id}`,

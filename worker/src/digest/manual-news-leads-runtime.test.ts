@@ -299,10 +299,16 @@ describe('manual lead evidence extraction', () => {
       event_key: 'sanders-ai-pause-letter-2026-08-10', event_type: 'political_regulatory',
       material_update: false, score: 88, recommendation: 'recommended', occurred_at: null,
       uncertainties: ['公开信未提供有约束力的法律措施。'],
-      claims: [{
-        text: '美国参议员伯尼·桑德斯向OpenAI、Anthropic和Meta负责人提出暂停AI开发的请求；这不是有约束力的国会命令。',
-        evidence_ids: evidence.map((item) => item.id),
-      }],
+      claims: [
+        {
+          text: '美国参议员伯尼·桑德斯向OpenAI、Anthropic和Meta负责人提出暂停AI开发的请求。',
+          evidence_ids: evidence.map((item) => item.id),
+        },
+        {
+          text: '这不是有约束力的国会命令。',
+          evidence_ids: evidence.map((item) => item.id),
+        },
+      ],
       matched_event_key: null,
     }, evidence);
     expect(applyManualLeadEvidencePolicy(assessed, evidence))

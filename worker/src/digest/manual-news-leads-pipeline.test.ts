@@ -112,15 +112,17 @@ const officialEvidence: ManualNewsEvidence = {
   title: 'How Claude marks AI-generated content',
   excerpt: 'Only supported models and products are covered.',
   claims_supported: [
-    'On 2026-08-10, Anthropic Claude supported output provenance documentation covers watermark features for supported models and products.',
+    'On 2026-08-10, Anthropic documented Claude watermark provenance.',
   ],
   reliable: true,
 };
 
+const supportedAssessmentFact = officialEvidence.claims_supported[0];
+
 function assessed(overrides = {}) {
   return {
-    title: 'Anthropic披露部分Claude输出的水印与来源标记',
-    summary: '官方文档把范围限定在受支持的模型和产品。',
+    title: supportedAssessmentFact,
+    summary: supportedAssessmentFact,
     event_key: 'anthropic-output-provenance-2026-08',
     event_type: 'product_documentation',
     material_update: false,
@@ -128,10 +130,7 @@ function assessed(overrides = {}) {
     recommendation: 'recommended',
     occurred_at: '2026-08-10',
     uncertainties: ['并非所有Claude输出均适用。'],
-    claims: [{
-      text: 'Anthropic官方文档披露部分受支持Claude输出的水印与来源标记，范围限定在受支持的模型和产品。',
-      evidence_ids: ['ev-official'],
-    }],
+    claims: [{ text: supportedAssessmentFact, evidence_ids: ['ev-official'] }],
     matched_event_key: null,
     ...overrides,
   };

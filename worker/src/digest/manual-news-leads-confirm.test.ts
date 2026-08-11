@@ -40,13 +40,14 @@ import { getActiveNewsReviewBatch, newsReviewExpiresAt } from './news-review';
 
 async function fakeConfirmationEnv() {
   const verificationSecret = 'a'.repeat(64);
+  const supportedFact = 'On 2026-08-10, Anthropic provenance documentation covers supported Claude outputs only.';
   const rawAssessment = {
-    title: 'Anthropic披露部分Claude输出的水印与来源标记',
-    summary: '官方文档将范围限定为受支持的模型与产品。',
+    title: supportedFact,
+    summary: supportedFact,
     event_key: 'anthropic-output-provenance-2026-08', event_type: 'product_documentation',
     material_update: false, score: 82, recommendation: 'recommended',
     occurred_at: '2026-08-10', uncertainties: [],
-    claims: [{ text: '范围受限。', evidence_ids: ['ev-1'] }], matched_event_key: null,
+    claims: [{ text: supportedFact, evidence_ids: ['ev-1'] }], matched_event_key: null,
   };
   const row: Record<string, any> = {
     id: 'ml-20260811-abc123def456', review_date: '2026-08-11', input_type: 'url', input_text: '',
@@ -58,10 +59,8 @@ async function fakeConfirmationEnv() {
   const evidence = {
     evidence_id: 'ev-1', url: row.input_url, source_type: 'official_help', publisher: 'Anthropic',
     published_at: null, retrieved_at: 2, title: 'Documentation',
-    excerpt: 'On 2026-08-10, Anthropic Claude provenance documentation supports documented outputs only.',
-    claims_supported_json: JSON.stringify([
-      'On 2026-08-10, Anthropic Claude provenance documentation supports documented outputs only.',
-    ]), reliable: 1,
+    excerpt: supportedFact,
+    claims_supported_json: JSON.stringify([supportedFact]), reliable: 1,
   };
   const evidenceForMarker = {
     id: evidence.evidence_id,
@@ -72,7 +71,7 @@ async function fakeConfirmationEnv() {
     retrieved_at: evidence.retrieved_at,
     title: evidence.title,
     excerpt: evidence.excerpt,
-    claims_supported: ['On 2026-08-10, Anthropic Claude provenance documentation supports documented outputs only.'],
+    claims_supported: [supportedFact],
     reliable: true,
     fetch_audit: null,
   };

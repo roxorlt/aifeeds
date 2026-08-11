@@ -213,17 +213,16 @@ function fixture(status = 'verifying', version = 4, processingOwner: string | nu
   };
 }
 
+const fixtureFact = 'On 2026-08-10, Anthropic Claude provenance documentation covers supported products only.';
+
 function assessment() {
   return {
-    title: 'Anthropic披露支持范围内Claude输出的来源标记',
-    summary: '官方帮助文档将能力范围限定为受支持产品。',
+    title: fixtureFact,
+    summary: fixtureFact,
     event_key: 'anthropic-supported-output-provenance-2026-08-10',
     event_type: 'product_documentation', material_update: false, score: 82,
     recommendation: 'recommended', occurred_at: '2026-08-10', uncertainties: [],
-    claims: [{
-      text: 'Anthropic官方帮助文档披露支持范围内Claude输出的来源标记，并将能力范围限定为受支持产品。',
-      evidence_ids: ['ev-official'],
-    }], matched_event_key: null,
+    claims: [{ text: fixtureFact, evidence_ids: ['ev-official'] }], matched_event_key: null,
   };
 }
 
@@ -231,8 +230,8 @@ function processedAssessment() {
   const evidence = [{
     id: 'ev-official', url: 'https://support.claude.com/example', source_type: 'official_help' as const,
     publisher: 'claude.com', published_at: '2026-08-10T13:30:00.000Z', retrieved_at: 2,
-    title: 'Official help', excerpt: 'On 2026-08-10, Anthropic Claude provenance documentation covers supported products only.',
-    claims_supported: ['On 2026-08-10, Anthropic Claude provenance documentation covers supported products only.'],
+    title: 'Official help', excerpt: fixtureFact,
+    claims_supported: [fixtureFact],
     reliable: true, fetch_audit: null,
   }];
   return {
@@ -245,8 +244,8 @@ function fixtureEvidence(): ManualNewsEvidence[] {
   return [{
     id: 'ev-official', url: 'https://support.claude.com/example', source_type: 'official_help',
     publisher: 'claude.com', published_at: '2026-08-10T13:30:00.000Z', retrieved_at: 2,
-    title: 'Official help', excerpt: 'On 2026-08-10, Anthropic Claude provenance documentation covers supported products only.',
-    claims_supported: ['On 2026-08-10, Anthropic Claude provenance documentation covers supported products only.'],
+    title: 'Official help', excerpt: fixtureFact,
+    claims_supported: [fixtureFact],
     reliable: true, fetch_audit: null,
   }];
 }
