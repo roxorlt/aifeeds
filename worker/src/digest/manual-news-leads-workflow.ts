@@ -11,7 +11,9 @@ export interface ManualNewsLeadWorkflowParams {
 
 const PROCESS_RETRY = {
   retries: { limit: 2, delay: '20 seconds', backoff: 'exponential' as const },
-  timeout: '5 minutes',
+  // Worst case is assessment + one schema-guided regeneration + independent
+  // verification: 3 * 240s provider budgets, plus 180s for research and D1 CAS/audit persistence.
+  timeout: '15 minutes',
 } as const;
 
 export async function runManualNewsLeadWorkflow(

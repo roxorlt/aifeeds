@@ -14,6 +14,15 @@ import {
   type ManualSearchResult,
 } from './manual-news-leads-pipeline';
 import { D1ManualLeadProcessingStore } from './manual-news-leads-store';
+import {
+  ManualNewsProviderError,
+  stableManualNewsProviderErrorCode,
+  type ManualNewsProviderCallContext,
+  type ManualNewsProviderCallMetrics,
+  type ManualNewsProviderStage,
+} from './manual-news-provider';
+
+export const MANUAL_NEWS_PROVIDER_TIMEOUT_MS = 240_000;
 
 interface SearchRow {
   title: string | null;
@@ -242,10 +251,29 @@ async function searchAllNews(
 
 export function createManualNewsLeadRuntimeAdapters(
   env: Env,
-  deps: { researchFetcher?: TrustedGatewayFetcher } = {},
+  deps: {
+    researchFetcher?: TrustedGatewayFetcher;
+    modelContext?: { leadId: string; processingAttempt: number };
+  } = {},
 ): ManualLeadProcessingAdapters {
-  const callProJson = async (prompt: { system: string; user: string }): Promise<unknown> => {
+  let fallbackCallSequence = 0;
+  const callProJson = (stage: ManualNewsProviderStage) => async (
+    prompt: { system: string; user: string },
+    context?: ManualNewsProviderCallContext,
+  ): Promise<unknown> => {
     if (!env.DEEPSEEK_API_KEY) throw new Error('no_deepseek_key');
+    fallbackCallSequence += 1;
+    const fallbackAttempt = deps.modelContext?.processingAttempt || 0;
+    const metrics: ManualNewsProviderCallMetrics = {
+      stage,
+      request_id: context?.request_id
+        || `${deps.modelContext?.leadId || 'manual-news-unscoped'}:p${fallbackAttempt}:${stage}:${fallbackCallSequence}`,
+      system_chars: Array.from(prompt.system).length,
+      user_chars: Array.from(prompt.user).length,
+      evidence_count: context?.evidence_count || 0,
+      attempt: context?.attempt ?? fallbackAttempt,
+    };
+    console.info('[manual-news-provider-call]', JSON.stringify(metrics));
     const result = await callDeepSeekJson<unknown>(
       env.DEEPSEEK_API_KEY,
       DEEPSEEK_PRO,
@@ -253,19 +281,26 @@ export function createManualNewsLeadRuntimeAdapters(
       {
         systemPrompt: prompt.system,
         maxTokens: 3_500,
-        timeoutMs: 120_000,
-        retries: 1,
+        timeoutMs: MANUAL_NEWS_PROVIDER_TIMEOUT_MS,
+        retries: 0,
+        requestId: metrics.request_id,
       },
     );
-    if (!result.data) throw new Error(result.error || 'empty_model_assessment');
+    if (!result.data) {
+      throw new ManualNewsProviderError({
+        stage,
+        provider_error_code: stableManualNewsProviderErrorCode(result.error || 'no_text'),
+        metrics,
+      });
+    }
     return result.data;
   };
   return {
     search: (input) => searchAllNews(env, input, deps.researchFetcher),
     fetch: (url) => fetchPublicDocument(url, { service: researchService(env, deps.researchFetcher) }),
     extract: (document, hint) => extractManualNewsEvidence(document, hint),
-    assess: callProJson,
-    verify: callProJson,
+    assess: callProJson('assessment'),
+    verify: callProJson('verification'),
   };
 }
 
@@ -276,5 +311,7 @@ export async function processManualNewsLeadWithEnv(
   processingAttempt?: number,
 ): Promise<void> {
   const store = new D1ManualLeadProcessingStore(env, processingOwner, processingAttempt);
-  await processManualNewsLead(leadId, store, createManualNewsLeadRuntimeAdapters(env));
+  await processManualNewsLead(leadId, store, createManualNewsLeadRuntimeAdapters(env, {
+    modelContext: { leadId, processingAttempt: processingAttempt || 0 },
+  }));
 }

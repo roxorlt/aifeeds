@@ -1598,8 +1598,52 @@ interface ManualLeadAssessmentPromptInput {
   prior_events: readonly unknown[];
 }
 
+export const MANUAL_NEWS_PROMPT_EVIDENCE_MAX_CHARS = 32_000;
+
+function normalizedPromptEvidenceText(value: string): string {
+  return String(value || '').normalize('NFKC').replace(/\s+/gu, ' ').trim();
+}
+
+function promptEvidenceContainmentKey(value: string): string {
+  return normalizedPromptEvidenceText(value).replace(/[\s,.;:!?，。；：！？]+$/gu, '');
+}
+
+function promptEvidenceDocument(item: ManualNewsEvidence) {
+  let excerpt = normalizedPromptEvidenceText(item.excerpt);
+  const uniqueClaims = item.claims_supported
+    .map(normalizedPromptEvidenceText)
+    .filter((claim, index, all) => !!claim && all.indexOf(claim) === index);
+  if (excerpt && uniqueClaims.some((claim) =>
+    promptEvidenceContainmentKey(claim).length > promptEvidenceContainmentKey(excerpt).length
+    && promptEvidenceContainmentKey(claim).includes(promptEvidenceContainmentKey(excerpt)))) excerpt = '';
+  const claims = uniqueClaims.filter((claim) => !excerpt
+    || !promptEvidenceContainmentKey(excerpt).includes(promptEvidenceContainmentKey(claim)));
+  return {
+    id: item.id,
+    source_type: item.source_type,
+    publisher: normalizedPromptEvidenceText(item.publisher),
+    published_at: item.published_at,
+    title: normalizedPromptEvidenceText(item.title),
+    excerpt,
+    claims_supported: claims,
+    reliable: item.reliable,
+  };
+}
+
+function promptEvidenceDocuments(evidence: readonly ManualNewsEvidence[]) {
+  const documents = evidence.map(promptEvidenceDocument);
+  const textCharacters = documents.reduce((total, item) => total + [
+    item.publisher, item.title, item.excerpt, ...item.claims_supported,
+  ].reduce((subtotal, value) => subtotal + Array.from(value).length, 0), 0);
+  if (textCharacters > MANUAL_NEWS_PROMPT_EVIDENCE_MAX_CHARS) {
+    throw new Error('prompt_evidence_too_large');
+  }
+  return documents;
+}
+
 export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromptInput): { system: string; user: string } {
   const allowedEvidenceIds = input.evidence.map((item) => item.id);
+  const promptInput = { ...input, evidence: promptEvidenceDocuments(input.evidence) };
   return {
     system: [
       '你是 AI Feeds 行业新闻事实核验、事件聚类与编辑评分器，只返回符合给定 schema 的 JSON，不要 Markdown、解释或额外字段。',
@@ -1712,7 +1756,7 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
         }],
         note: '<EXACT_ALLOWED_EVIDENCE_ID> 只是结构占位符；真实输出必须逐字复制 allowed ID。程序只连接已严格验证的四个槽位并生成稳定 fact id，不会从复合 prose 中猜测事实；示例不得在 evidence 未支持时复制。',
       },
-      untrusted_data: input,
+      untrusted_data: promptInput,
     }),
   };
 }
@@ -2001,19 +2045,6 @@ function manualLeadProjectionDefinitions(assessment: ManualNewsLeadAssessment) {
   }));
 }
 
-function verificationEvidenceDocument(item: ManualNewsEvidence) {
-  return {
-    id: item.id,
-    source_type: item.source_type,
-    publisher: item.publisher,
-    published_at: item.published_at,
-    title: item.title,
-    excerpt: item.excerpt,
-    claims_supported: item.claims_supported,
-    reliable: item.reliable,
-  };
-}
-
 function verifiedPriorContexts(
   priorEvents: readonly ManualLeadPriorEvent[],
 ): ManualLeadVerifiedPriorContext[] {
@@ -2044,7 +2075,7 @@ export function buildManualLeadFactVerificationPrompt(input: {
   evidence: readonly ManualNewsEvidence[];
   prior_events?: readonly ManualLeadPriorEvent[];
 }): { system: string; user: string } {
-  const byId = new Map(input.evidence.map((item) => [item.id, item]));
+  const byId = new Map(promptEvidenceDocuments(input.evidence).map((item) => [item.id, item]));
   const priorEvents = verifiedPriorContexts(input.prior_events || []);
   const factDefinitions = manualLeadVerificationFacts(input.assessment);
   const projectionDefinitions = manualLeadProjectionDefinitions(input.assessment);
@@ -2062,8 +2093,7 @@ export function buildManualLeadFactVerificationPrompt(input: {
       : {}),
     allowed_evidence: fact.allowed_evidence_ids
       .map((id) => byId.get(id))
-      .filter((item): item is ManualNewsEvidence => !!item)
-      .map(verificationEvidenceDocument),
+      .filter((item): item is ReturnType<typeof promptEvidenceDocument> => !!item),
     ...(fact.field === 'material_update'
       ? { untrusted_prior_events: priorEvents }
       : {}),

@@ -4,6 +4,7 @@ import { applyManualLeadEvidencePolicy, validateManualLeadAssessment } from './m
 import { createManualNewsLeadRuntimeAdapters, extractManualNewsEvidence } from './manual-news-leads-runtime';
 import type { PublicDocument } from '../security/safe-url-fetch';
 import { callDeepSeekJson, DEEPSEEK_PRO } from '../hf-paper/llm';
+import { ManualNewsProviderError } from './manual-news-provider';
 
 vi.mock('../hf-paper/llm', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../hf-paper/llm')>();
@@ -54,19 +55,83 @@ function documentFixture(
 }
 
 describe('manual lead evidence extraction', () => {
-  test('runs the independent claim verifier through DeepSeek Pro JSON mode', async () => {
+  test('uses one 240-second provider call per assessment or verification invocation and records only safe metrics', async () => {
     const mockedCall = vi.mocked(callDeepSeekJson);
-    mockedCall.mockResolvedValueOnce({ data: { overall_verdict: 'supported', claim_results: [] } });
+    mockedCall
+      .mockResolvedValueOnce({ data: { event_key: 'safe-result' } })
+      .mockResolvedValueOnce({ data: { overall_verdict: 'supported', claim_results: [] } });
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
     const adapters = createManualNewsLeadRuntimeAdapters({
       DB: {} as never,
       DEEPSEEK_API_KEY: 'test-key',
-    } as never);
+    } as never, { modelContext: { leadId: 'ml-safe-request', processingAttempt: 6 } });
 
-    await expect(adapters.verify({ system: 'independent verifier', user: '{"claims":[]}' }))
+    await expect(adapters.assess(
+      { system: 'assessment secret body', user: '{"evidence":"https://private.example/path"}' },
+      { request_id: 'ml-safe-request:p6:assessment:1', evidence_count: 1, attempt: 6 },
+    )).resolves.toEqual({ event_key: 'safe-result' });
+    await expect(adapters.verify(
+      { system: 'independent verifier', user: '{"claims":[]}' },
+      { request_id: 'ml-safe-request:p6:verification:2', evidence_count: 1, attempt: 6 },
+    ))
       .resolves.toEqual({ overall_verdict: 'supported', claim_results: [] });
-    expect(mockedCall).toHaveBeenCalledWith(
+    expect(mockedCall).toHaveBeenNthCalledWith(
+      1,
+      'test-key', DEEPSEEK_PRO, '{"evidence":"https://private.example/path"}',
+      expect.objectContaining({
+        systemPrompt: 'assessment secret body', retries: 0, timeoutMs: 240_000,
+        requestId: 'ml-safe-request:p6:assessment:1',
+      }),
+    );
+    expect(mockedCall).toHaveBeenNthCalledWith(
+      2,
       'test-key', DEEPSEEK_PRO, '{"claims":[]}',
-      expect.objectContaining({ systemPrompt: 'independent verifier', retries: 1 }),
+      expect.objectContaining({
+        systemPrompt: 'independent verifier', retries: 0, timeoutMs: 240_000,
+        requestId: 'ml-safe-request:p6:verification:2',
+      }),
+    );
+    expect(mockedCall).toHaveBeenCalledTimes(2);
+    const logs = info.mock.calls.map((call) => call.join(' ')).join('\n');
+    expect(logs).toContain('"stage":"assessment"');
+    expect(logs).toContain('"stage":"verification"');
+    expect(logs).toContain('"evidence_count":1');
+    expect(logs).toContain('"attempt":6');
+    expect(logs).toContain('"system_chars":22');
+    expect(logs).not.toContain('assessment secret body');
+    expect(logs).not.toContain('private.example');
+    expect(logs).not.toContain('test-key');
+    mockedCall.mockReset();
+  });
+
+  test.each([
+    ['assessment', 'AbortError', 'provider_timeout'],
+    ['assessment', 'TimeoutError', 'provider_timeout'],
+    ['assessment', 'TypeError', 'provider_transport_error'],
+    ['assessment', 'HTTP 408', 'provider_http_408'],
+    ['assessment', 'HTTP 429', 'provider_http_429'],
+    ['assessment', 'HTTP 503', 'provider_http_503'],
+    ['assessment', 'no_text', 'provider_no_text'],
+    ['assessment', 'json_parse_fail', 'provider_json_parse_fail'],
+    ['verification', 'HTTP 502', 'provider_http_502'],
+  ] as const)('maps safe %s provider failures: %s', async (stage, rawCode, stableCode) => {
+    const mockedCall = vi.mocked(callDeepSeekJson);
+    mockedCall.mockResolvedValueOnce({ data: null, error: rawCode });
+    vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const adapters = createManualNewsLeadRuntimeAdapters({
+      DB: {} as never, DEEPSEEK_API_KEY: 'test-key',
+    } as never, { modelContext: { leadId: 'ml-safe-request', processingAttempt: 2 } });
+    const invoke = stage === 'assessment' ? adapters.assess : adapters.verify;
+
+    const failure = await invoke(
+      { system: 'rules', user: '{"evidence":[]}' },
+      { request_id: `ml-safe-request:p2:${stage}:1`, evidence_count: 1, attempt: 2 },
+    ).catch((error) => error);
+
+    expect(failure).toBeInstanceOf(ManualNewsProviderError);
+    expect(failure).toMatchObject({ stage, provider_error_code: stableCode });
+    expect(String((failure as Error).message)).toMatch(
+      new RegExp(`^manual_news_provider_error:${stage}:${stableCode}:`),
     );
     mockedCall.mockReset();
   });

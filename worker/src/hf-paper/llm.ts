@@ -91,8 +91,8 @@ export async function callDeepSeek(
     clearTimeout(timeoutId);
 
     if (!resp.ok) {
-      const errText = await resp.text();
-      console.error(`[hf-paper-llm] DeepSeek HTTP ${resp.status}: ${errText.slice(0, 300)}`);
+      await resp.text();
+      console.error(`[hf-paper-llm] DeepSeek HTTP ${resp.status}`);
       return { text: null, error: `HTTP ${resp.status}` };
     }
     const data = (await resp.json()) as DeepSeekResponse;

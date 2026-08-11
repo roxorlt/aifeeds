@@ -24,6 +24,7 @@ function requestBody(fetchMock: ReturnType<typeof vi.fn>) {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -84,5 +85,34 @@ describe("DeepSeek message roles", () => {
     expect(logged).toContain("request=request-123");
     expect(logged).toMatch(/length=\d+/);
     expect(logged).toMatch(/sha256=[a-f0-9]{64}/);
+  });
+
+  it("does not log an HTTP provider response body", async () => {
+    const sentinel = "PROVIDER-RESPONSE-DO-NOT-LOG";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(sentinel, { status: 503 })));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const result = await callDeepSeekJson("test-key", "test-model", "prompt", {
+      retries: 0, timeoutMs: 1_000,
+    });
+
+    expect(result).toMatchObject({ data: null, error: "HTTP 503" });
+    expect(errorSpy.mock.calls.flat().join(" ")).not.toContain(sentinel);
+  });
+
+  it("allows one provider response after 120 seconds when the caller grants a 240-second budget", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => {
+      setTimeout(() => resolve(okResponse()), 130_000);
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = callDeepSeekJson<{ ok: boolean }>("test-key", "test-model", "prompt", {
+      retries: 0, timeoutMs: 240_000,
+    });
+    await vi.advanceTimersByTimeAsync(130_000);
+
+    await expect(pending).resolves.toMatchObject({ data: { ok: true } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

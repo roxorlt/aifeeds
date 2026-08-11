@@ -56,7 +56,10 @@ describe('manual news lead workflow', () => {
 
     expect(step.do).toHaveBeenCalledWith(
       'research-verify-score-lead',
-      expect.objectContaining({ timeout: '5 minutes', retries: expect.objectContaining({ limit: 2 }) }),
+      expect.objectContaining({
+        timeout: '15 minutes',
+        retries: { limit: 2, delay: '20 seconds', backoff: 'exponential' },
+      }),
       expect.any(Function),
     );
     expect(processManualNewsLeadWithEnv).toHaveBeenCalledTimes(3);

@@ -423,6 +423,103 @@ describe('manual news lead domain', () => {
     expect(prompt.user).toContain('evidence_ids');
   });
 
+  test('deduplicates prompt-only evidence without changing persisted evidence or dropping distinct claim anchors', () => {
+    const repeatedEvidence: ManualNewsEvidence = {
+      ...officialAnthropic,
+      excerpt: ' Alibaba reportedly bans employees from using Claude Code.   Additional context. ',
+      claims_supported: [
+        'Alibaba reportedly bans employees from using Claude Code.',
+        'Qwen3 remains available to affected employees.',
+        'Qwen3 remains available to affected employees.',
+        'GPT 56 remains a different literal anchor from GPT-5.6.',
+      ],
+    };
+    const assessmentPrompt = buildManualLeadAssessmentPrompt({
+      date: '2026-08-11', text: 'Alibaba Claude Code', note: '',
+      evidence: [repeatedEvidence], prior_events: [],
+    });
+    const assessmentBody = JSON.parse(assessmentPrompt.user) as {
+      untrusted_data: { evidence: Array<Record<string, unknown>> };
+    };
+    expect(assessmentBody.untrusted_data.evidence).toEqual([expect.objectContaining({
+      id: repeatedEvidence.id,
+      excerpt: 'Alibaba reportedly bans employees from using Claude Code. Additional context.',
+      claims_supported: [
+        'Qwen3 remains available to affected employees.',
+        'GPT 56 remains a different literal anchor from GPT-5.6.',
+      ],
+    })]);
+    expect(assessmentBody.untrusted_data.evidence[0]).not.toHaveProperty('url');
+    expect(assessmentBody.untrusted_data.evidence[0]).not.toHaveProperty('fetch_audit');
+
+    const candidate = validateManualLeadAssessment(assessment({
+      title: 'Anthropic披露Claude水印来源信息',
+      summary: 'Anthropic披露Claude水印来源信息。',
+      claims: [{
+        text: 'Anthropic documented Claude watermark provenance on 2026-08-10.',
+        evidence_ids: [repeatedEvidence.id],
+      }],
+    }), [repeatedEvidence]);
+    const verificationBody = JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: candidate, evidence: [repeatedEvidence],
+    }).user) as {
+      facts: Array<{ allowed_evidence: Array<Record<string, unknown>> }>;
+    };
+    for (const fact of verificationBody.facts) {
+      expect(fact.allowed_evidence[0]).toEqual(expect.objectContaining({
+        excerpt: 'Alibaba reportedly bans employees from using Claude Code. Additional context.',
+        claims_supported: [
+          'Qwen3 remains available to affected employees.',
+          'GPT 56 remains a different literal anchor from GPT-5.6.',
+        ],
+      }));
+    }
+    expect(repeatedEvidence.claims_supported).toHaveLength(4);
+    expect(repeatedEvidence.excerpt).toContain('  Additional');
+
+    const punctuationSensitiveBody = JSON.parse(buildManualLeadAssessmentPrompt({
+      date: '2026-08-11', text: 'GPT versions', note: '', prior_events: [],
+      evidence: [{
+        ...officialAnthropic,
+        excerpt: 'GPT-5.6 is available.',
+        claims_supported: ['GPT 56 is available.'],
+      }],
+    }).user) as { untrusted_data: { evidence: ManualNewsEvidence[] } };
+    expect(punctuationSensitiveBody.untrusted_data.evidence[0]).toMatchObject({
+      excerpt: 'GPT-5.6 is available.',
+      claims_supported: ['GPT 56 is available.'],
+    });
+  });
+
+  test('keeps the containing claim once and fails closed above the prompt evidence text boundary', () => {
+    const containingClaim = {
+      ...officialAnthropic,
+      excerpt: 'Alibaba reportedly bans employees from using Claude Code.',
+      claims_supported: [
+        'Alibaba reportedly bans employees from using Claude Code because of security concerns.',
+      ],
+    };
+    const body = JSON.parse(buildManualLeadAssessmentPrompt({
+      date: '2026-08-11', text: 'Alibaba Claude Code', note: '',
+      evidence: [containingClaim], prior_events: [],
+    }).user) as { untrusted_data: { evidence: ManualNewsEvidence[] } };
+    expect(body.untrusted_data.evidence[0]).toMatchObject({
+      excerpt: '',
+      claims_supported: [
+        'Alibaba reportedly bans employees from using Claude Code because of security concerns.',
+      ],
+    });
+
+    expect(() => buildManualLeadAssessmentPrompt({
+      date: '2026-08-11', text: 'oversized', note: '', prior_events: [],
+      evidence: [{
+        ...officialAnthropic,
+        excerpt: 'A'.repeat(16_100),
+        claims_supported: ['B'.repeat(16_100)],
+      }],
+    })).toThrow(/prompt_evidence_too_large/);
+  });
+
   test('spells out the exact event identity and fail-closed relevance contract for the model', () => {
     const prompt = buildManualLeadAssessmentPrompt({
       date: '2026-08-11',
@@ -1266,7 +1363,14 @@ describe('manual news lead domain', () => {
     };
 
     expect(body.allowed_evidence_ids).toEqual(['ev-official']);
-    expect(body.untrusted_data.evidence).toEqual([officialAnthropic]);
+    expect(body.untrusted_data.evidence).toEqual([expect.objectContaining({
+      id: officialAnthropic.id,
+      title: officialAnthropic.title,
+      excerpt: officialAnthropic.excerpt,
+      claims_supported: officialAnthropic.claims_supported,
+    })]);
+    expect(body.untrusted_data.evidence[0]).not.toHaveProperty('url');
+    expect(body.untrusted_data.evidence[0]).not.toHaveProperty('fetch_audit');
     expect(body.regeneration).toEqual(expect.objectContaining({
       mode: 'validation_guided_regeneration', failure_code: 'unknown_evidence_id',
     }));

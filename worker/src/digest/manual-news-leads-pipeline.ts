@@ -24,6 +24,15 @@ import {
   type ManualNewsProcessedAssessment,
 } from './manual-news-leads';
 import type { PublicDocument } from '../security/safe-url-fetch';
+import {
+  isManualNewsProviderJsonParseFailure,
+  isTransientManualNewsProviderFailure,
+  manualNewsProviderFailureAudit,
+  withManualNewsAssessmentFailureContext,
+  type ManualNewsProviderCallContext,
+  type ManualNewsProviderFailureAudit,
+  type ManualNewsProviderStage,
+} from './manual-news-provider';
 
 export type ProcessedManualLeadAssessment = ManualNewsProcessedAssessment;
 
@@ -91,6 +100,7 @@ export interface ManualLeadTransitionPatch
     assessment_editorial_projection_contract: typeof MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT;
     assessment_verification_policy: typeof MANUAL_LEAD_VERIFICATION_POLICY_VERSION;
     assessment_recovery?: 'persisted_verified';
+    provider_failure?: ManualNewsProviderFailureAudit;
   };
 }
 
@@ -107,8 +117,8 @@ export interface ManualLeadProcessingAdapters {
   search(input: { date: string; text: string; note: string }): Promise<ManualSearchResult[]>;
   fetch(url: string): Promise<PublicDocument>;
   extract(document: PublicDocument, hint?: ManualSearchResult): Promise<ManualNewsEvidence | null>;
-  assess(prompt: { system: string; user: string }): Promise<unknown>;
-  verify(prompt: { system: string; user: string }): Promise<unknown>;
+  assess(prompt: { system: string; user: string }, context?: ManualNewsProviderCallContext): Promise<unknown>;
+  verify(prompt: { system: string; user: string }, context?: ManualNewsProviderCallContext): Promise<unknown>;
 }
 
 function conciseError(error: unknown): string {
@@ -117,6 +127,8 @@ function conciseError(error: unknown): string {
 }
 
 export function isTransientManualLeadError(error: unknown): boolean {
+  const providerTransient = isTransientManualNewsProviderFailure(error);
+  if (providerTransient !== null) return providerTransient;
   const message = conciseError(error).trim();
   const stableCode = message.split(':', 1)[0].toLowerCase();
   if (isRegeneratableManualLeadAssessmentValidationCode(stableCode)
@@ -143,7 +155,16 @@ export function isTransientManualLeadError(error: unknown): boolean {
 }
 
 function isDeterministicModelJsonError(error: unknown): boolean {
-  return /(?:^|_)json_parse_fail(?:$|_)/i.test(conciseError(error));
+  return isManualNewsProviderJsonParseFailure(error)
+    || /(?:^|_)json_parse_fail(?:$|_)/i.test(conciseError(error));
+}
+
+function auditMetadataWithProviderFailure(
+  metadata: ManualLeadTransitionPatch['audit_metadata'],
+  error: unknown,
+): ManualLeadTransitionPatch['audit_metadata'] {
+  const providerFailure = manualNewsProviderFailureAudit(error);
+  return providerFailure && metadata ? { ...metadata, provider_failure: providerFailure } : metadata;
 }
 
 async function finalizeManualLeadAssessment(
@@ -188,6 +209,18 @@ export async function processManualNewsLead(
   if (!lead) throw new Error('manual_news_lead_not_found');
   let status = lead.status;
   let assessmentGenerationAudit: ManualLeadTransitionPatch['audit_metadata'];
+  let providerCallSequence = 0;
+  const providerCallContext = (
+    stage: ManualNewsProviderStage,
+    evidenceCount: number,
+  ): ManualNewsProviderCallContext => {
+    providerCallSequence += 1;
+    return {
+      request_id: `${leadId}:p${lead!.processing_attempt}:${stage}:${providerCallSequence}`,
+      evidence_count: evidenceCount,
+      attempt: lead!.processing_attempt,
+    };
+  };
   if (!PROCESSABLE_STATUSES.has(status)) throw new Error(`lead_not_processable:${status}`);
   const transition = async (
     to: ManualNewsLeadStatus,
@@ -295,11 +328,14 @@ export async function processManualNewsLead(
           generationAttempts = attempt as 1 | 2;
           let raw: unknown;
           try {
-            raw = await adapters.assess(prompt);
+            raw = await adapters.assess(prompt, providerCallContext('assessment', evidence.length));
           } catch (error) {
             const lastValidationCode = isDeterministicModelJsonError(error)
               ? 'invalid_assessment'
               : (regenerationTriggerCode || 'not_validated');
+            const contextualError = withManualNewsAssessmentFailureContext(
+              error, generationAttempts, lastValidationCode,
+            );
             assessmentGenerationAudit = {
               assessment_generation_attempts: generationAttempts,
               assessment_last_validation_code: lastValidationCode,
@@ -309,6 +345,9 @@ export async function processManualNewsLead(
                 : {}),
             };
             if (isDeterministicModelJsonError(error)) {
+              assessmentGenerationAudit = auditMetadataWithProviderFailure(
+                assessmentGenerationAudit, contextualError,
+              );
               await store.invalidateAssessment(leadId, lead.version, 'assessment_schema_invalid');
               await transition('needs_review', {
                 error_code: 'assessment_validation_failed',
@@ -317,14 +356,15 @@ export async function processManualNewsLead(
               });
               return (await store.getLead(leadId))!;
             }
-            if (isTransientManualLeadError(error)) {
-              throw new Error(
-                `assessment_model_retryable_attempt_${generationAttempts}_after_${lastValidationCode}`,
-              );
+            if (isTransientManualLeadError(contextualError)) {
+              throw contextualError;
             }
+            assessmentGenerationAudit = auditMetadataWithProviderFailure(
+              assessmentGenerationAudit, contextualError,
+            );
             await transition('failed', {
               error_code: 'assessment_failed',
-              error_message: conciseError(error),
+              error_message: conciseError(contextualError),
               audit_metadata: assessmentGenerationAudit,
             });
             return (await store.getLead(leadId))!;
@@ -377,18 +417,23 @@ export async function processManualNewsLead(
         );
         let verificationRaw: unknown;
         try {
-          verificationRaw = await adapters.verify(buildManualLeadFactVerificationPrompt({
-            assessment: finalizedAssessment,
-            evidence,
-            prior_events: priorEvents,
-          }));
+          verificationRaw = await adapters.verify(
+            buildManualLeadFactVerificationPrompt({
+              assessment: finalizedAssessment,
+              evidence,
+              prior_events: priorEvents,
+            }),
+            providerCallContext('verification', evidence.length),
+          );
         } catch (error) {
           if (isDeterministicModelJsonError(error)) {
             await store.invalidateAssessment(leadId, lead.version, 'fact_verification_schema_invalid');
             await transition('needs_review', {
               error_code: 'fact_verification_failed',
               error_message: 'invalid_fact_verification',
-              ...(assessmentGenerationAudit ? { audit_metadata: assessmentGenerationAudit } : {}),
+              ...(assessmentGenerationAudit ? {
+                audit_metadata: auditMetadataWithProviderFailure(assessmentGenerationAudit, error),
+              } : {}),
             });
             return (await store.getLead(leadId))!;
           }
@@ -396,8 +441,10 @@ export async function processManualNewsLead(
           await store.invalidateAssessment(leadId, lead.version, 'fact_verification_model_failed');
           await transition('failed', {
             error_code: 'fact_verification_failed',
-            error_message: 'fact_verification_model_failed',
-            ...(assessmentGenerationAudit ? { audit_metadata: assessmentGenerationAudit } : {}),
+            error_message: conciseError(error),
+            ...(assessmentGenerationAudit ? {
+              audit_metadata: auditMetadataWithProviderFailure(assessmentGenerationAudit, error),
+            } : {}),
           });
           return (await store.getLead(leadId))!;
         }
