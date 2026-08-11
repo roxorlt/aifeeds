@@ -13,7 +13,9 @@ import {
   MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
   MANUAL_LEAD_SOURCE_FACT_CONTRACT,
   MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+  manualLeadAssessmentValidationFailure,
   manualLeadAssessmentValidationErrorCode,
+  manualNewsAssessmentGenerationAudit,
   mergeManualLeadCandidate,
   missingManualLeadEvidenceAnchors,
   validateManualLeadAssessment,
@@ -336,6 +338,83 @@ async function createMaliciouslySupportedGeneratedProjectionProof(
 }
 
 describe('manual news lead domain', () => {
+  test.each([
+    ['source subject', 'source_facts[0].atomic_fact.subject', 'Alibaba, Anthropic', 'non_atomic_source_subject'],
+    ['source predicate', 'source_facts[0].atomic_fact.predicate', 'reportedly bans, requires', 'non_atomic_source_predicate'],
+    ['source object', 'source_facts[0].atomic_fact.object', 'employees from using Claude Code, because of security concerns', 'non_atomic_source_object'],
+    ['editorial subject', 'editorial_projection.title.atomic_fact.subject', '阿里巴巴、Anthropic', 'non_atomic_editorial_subject'],
+    ['editorial predicate', 'editorial_projection.title.atomic_fact.predicate', '据称禁止并要求', 'non_atomic_editorial_predicate'],
+    ['editorial object', 'editorial_projection.title.atomic_fact.object', '员工使用Claude Code，因为安全原因', 'non_atomic_editorial_object'],
+    ['editorial summary object', 'editorial_projection.summary[0].atomic_fact.object', '员工使用Claude Code，并改用其他产品', 'non_atomic_editorial_object'],
+  ])('reports a bounded generated-output path for %s atomicity failures', (
+    _label,
+    path,
+    invalidValue,
+    expectedCode,
+  ) => {
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    const segments = path.replace(/\[(\d+)\]/gu, '.$1').split('.');
+    let target: Record<string, any> = raw;
+    for (const segment of segments.slice(0, -1)) target = target[segment];
+    target[segments.at(-1)!] = invalidValue;
+
+    let failure: unknown;
+    try {
+      validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan]);
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(manualLeadAssessmentValidationFailure(failure)).toEqual({
+      code: expectedCode,
+      path,
+    });
+  });
+
+  test('attributes multiple hidden object actions to the object slot rather than the predicate', () => {
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.source_facts[0].atomic_fact.object = 'employees launch Claude Code train GPT 5';
+    let failure: unknown;
+    try {
+      validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan]);
+    } catch (error) {
+      failure = error;
+    }
+    expect(manualLeadAssessmentValidationFailure(failure)).toEqual({
+      code: 'non_atomic_source_object',
+      path: 'source_facts[0].atomic_fact.object',
+    });
+  });
+
+  test.each([
+    ['source', 'source_facts[0].atomic_fact.assembled'],
+    ['editorial', 'editorial_projection.title.atomic_fact.assembled'],
+  ])('reports assembled split failures separately for %s output', (scope, path) => {
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    if (scope === 'source') {
+      raw.source_facts[0].atomic_fact = {
+        subject: 'Alibaba', subject_role: 'organization', predicate: 'releases',
+        object: 'Claude Code Acme transforms workflows',
+      };
+    } else {
+      raw.editorial_projection.title.atomic_fact = {
+        subject: '阿里巴巴', subject_role: 'organization', predicate: '发布',
+        object: 'Claude Code Acme transforms workflows',
+      };
+    }
+
+    let failure: unknown;
+    try {
+      validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan]);
+    } catch (error) {
+      failure = error;
+    }
+    expect(manualLeadAssessmentValidationFailure(failure)).toEqual({
+      code: scope === 'source' ? 'non_atomic_source_assembled' : 'non_atomic_editorial_assembled',
+      path,
+    });
+  });
+
   test('accepts text-only and URL-only leads, but rejects empty or ambiguous inputs', () => {
     expect(validateManualNewsLeadInput({ date: '2026-08-11', text: 'Anthropic 输出水印', note: '' }))
       .toMatchObject({ input_type: 'text', text: 'Anthropic 输出水印' });
@@ -582,7 +661,9 @@ describe('manual news lead domain', () => {
           predicate: '将禁止并要求改用',
         }),
       }),
-      failure_codes: expect.arrayContaining(['non_atomic_claim', 'unknown_evidence_id']),
+      failure_codes: expect.arrayContaining([
+        'non_atomic_source_predicate', 'non_atomic_source_object', 'unknown_evidence_id',
+      ]),
     }));
     expect(body.output_schema.source_facts[0]).toEqual(expect.objectContaining({
       atomic_fact: {
@@ -937,7 +1018,7 @@ describe('manual news lead domain', () => {
         source: { object: sourceObject },
         projection: { object: '员工使用' },
         quote: `Alibaba reportedly bans ${sourceObject}.`,
-      })).rejects.toThrow(/(?:non_atomic_claim|invalid_claim_object|invalid_editorial_projection_object)/);
+      })).rejects.toThrow(/(?:non_atomic_(?:claim|source_object)|invalid_claim_object|invalid_editorial_projection_object)/);
     },
   );
 
@@ -1199,7 +1280,7 @@ describe('manual news lead domain', () => {
           fact_ref: 'fact-01', source_language: 'en', atomic_fact,
           evidence_ids: [techCrunchAlibabaBan.id],
         }],
-      }, [techCrunchAlibabaBan])).toThrow(/(?:non_atomic_claim|invalid_claim_(?:subject|predicate|object|fact))/);
+      }, [techCrunchAlibabaBan])).toThrow(/(?:non_atomic_(?:claim|source_(?:subject|predicate|object|assembled))|invalid_claim_(?:subject|predicate|object|fact))/);
     }
   });
 
@@ -1340,7 +1421,7 @@ describe('manual news lead domain', () => {
           atomic_fact: { subject_role: 'organization', ...atomic_fact },
           evidence_ids: ['ev-techcrunch-alibaba-ban'],
         }],
-      }, [techCrunchAlibabaBan])).toThrow(/(?:non_atomic_claim|invalid_claim_(?:subject|predicate|object|fact))/);
+      }, [techCrunchAlibabaBan])).toThrow(/(?:non_atomic_(?:claim|source_(?:subject|predicate|object|assembled))|invalid_claim_(?:subject|predicate|object|fact))/);
     }
     expect(() => validateManualLeadGeneratedAssessment({
       ...base,
@@ -1356,10 +1437,13 @@ describe('manual news lead domain', () => {
     const prompt = buildManualLeadAssessmentRegenerationPrompt({
       date: '2026-08-11', text: 'TechCrunch称阿里巴巴将禁止员工使用Claude Code', note: '',
       evidence: [officialAnthropic], prior_events: [],
-    }, 'unknown_evidence_id');
+    }, 'non_atomic_source_object', 'source_facts[0].atomic_fact.object');
     const body = JSON.parse(prompt.user) as {
       allowed_evidence_ids: string[];
-      regeneration: { mode: string; failure_code: string; instruction: string };
+      regeneration: {
+        mode: string; failure_code: string; failure_path: string;
+        instruction: string; mechanical_instruction: string;
+      };
       untrusted_data: { evidence: ManualNewsEvidence[] };
     };
 
@@ -1373,11 +1457,92 @@ describe('manual news lead domain', () => {
     expect(body.untrusted_data.evidence[0]).not.toHaveProperty('url');
     expect(body.untrusted_data.evidence[0]).not.toHaveProperty('fetch_audit');
     expect(body.regeneration).toEqual(expect.objectContaining({
-      mode: 'validation_guided_regeneration', failure_code: 'unknown_evidence_id',
+      mode: 'validation_guided_regeneration',
+      failure_code: 'non_atomic_source_object',
+      failure_path: 'source_facts[0].atomic_fact.object',
     }));
     expect(body.regeneration.instruction).toContain('从头生成完整 schema');
+    expect(body.regeneration.mechanical_instruction).toContain('逗号');
+    expect(body.regeneration.mechanical_instruction).toContain('第二动作');
+    expect(body.regeneration.mechanical_instruction).toContain('删除非核心背景');
     expect(prompt.user).not.toContain('ev-private-output');
     expect(prompt.system).toContain('不得回忆、修补或复用上一次原始输出');
+  });
+
+  test('rejects an unsafe regeneration path instead of echoing it', () => {
+    expect(() => buildManualLeadAssessmentRegenerationPrompt({
+      date: '2026-08-11', text: '线索', note: '', evidence: [officialAnthropic], prior_events: [],
+    }, 'non_atomic_source_object', 'source_facts[99].atomic_fact.object;MODEL_RAW'))
+      .toThrow(/assessment_regeneration_path_invalid/);
+  });
+
+  test('asks for one core fact by default and never fills summaries with background facts', () => {
+    const prompt = buildManualLeadAssessmentPrompt({
+      date: '2026-08-11', text: 'TechCrunch称阿里巴巴限制员工使用Claude Code', note: '',
+      evidence: [techCrunchAlibabaBan], prior_events: [],
+    });
+    const body = JSON.parse(prompt.user) as {
+      output_schema: { source_facts: Array<Record<string, unknown>> };
+      claim_contract_examples: { good: unknown[] };
+    };
+
+    expect(prompt.system).toContain('默认只输出 1 条 core source_fact');
+    expect(prompt.system).toContain('最多 3 条 source_facts');
+    expect(prompt.system).toContain('禁止为了填充摘要加入原因、替代产品或背景信息');
+    expect(body.output_schema.source_facts).toHaveLength(1);
+    expect(body.claim_contract_examples.good).toHaveLength(1);
+  });
+
+  test.each([
+    ['non_atomic_source_subject', 'source_facts[0].atomic_fact.subject', '一个完整主体'],
+    ['non_atomic_source_predicate', 'source_facts[0].atomic_fact.predicate', '一个动作'],
+    ['non_atomic_source_object', 'source_facts[0].atomic_fact.object', '第二动作'],
+    ['non_atomic_source_assembled', 'source_facts[0].atomic_fact.assembled', '连接后的完整句'],
+    ['non_atomic_editorial_object', 'editorial_projection.summary[0].atomic_fact.object', '第二动作'],
+  ])('gives %s a path-specific mechanical regeneration instruction', (code, path, marker) => {
+    const prompt = buildManualLeadAssessmentRegenerationPrompt({
+      date: '2026-08-11', text: '线索', note: '', evidence: [officialAnthropic], prior_events: [],
+    }, code, path);
+    const body = JSON.parse(prompt.user) as {
+      regeneration: { failure_code: string; failure_path: string; mechanical_instruction: string };
+    };
+    expect(body.regeneration).toMatchObject({ failure_code: code, failure_path: path });
+    expect(body.regeneration.mechanical_instruction).toContain(marker);
+  });
+
+  test('rejects unsafe or unbounded assessment-generation audit diagnostics', () => {
+    const base = {
+      assessment_generation_attempts: 2,
+      assessment_first_validation_code: 'non_atomic_source_object',
+      assessment_first_validation_path: 'source_facts[0].atomic_fact.object',
+      assessment_last_validation_code: 'valid',
+      assessment_regeneration_trigger_code: 'non_atomic_source_object',
+      assessment_regeneration_trigger_path: 'source_facts[0].atomic_fact.object',
+    };
+    expect(manualNewsAssessmentGenerationAudit(base)).toEqual(base);
+    expect(manualNewsAssessmentGenerationAudit({
+      ...base, assessment_first_validation_path: 'source_facts[99].atomic_fact.object;MODEL_RAW',
+    })).toBeNull();
+    expect(manualNewsAssessmentGenerationAudit({
+      ...base, assessment_last_validation_code: 'x'.repeat(81),
+    })).toBeNull();
+    expect(manualNewsAssessmentGenerationAudit({
+      ...base, assessment_first_validation_path: 'editorial_projection.title.atomic_fact.object',
+    })).toBeNull();
+    expect(manualNewsAssessmentGenerationAudit({
+      ...base, assessment_regeneration_trigger_code: 'non_atomic_source_predicate',
+      assessment_regeneration_trigger_path: 'source_facts[0].atomic_fact.predicate',
+    })).toBeNull();
+  });
+
+  test('rejects more than three generated source facts without accepting partial output', () => {
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.source_facts = Array.from({ length: 4 }, (_value, index) => ({
+      ...structuredClone(raw.source_facts[0]),
+      fact_ref: `fact-${String(index + 1).padStart(2, '0')}`,
+    }));
+    expect(() => validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan]))
+      .toThrow(/invalid_claims/);
   });
 
   test('assessment and verifier prompts require atomic final facts without similarity fallback', () => {

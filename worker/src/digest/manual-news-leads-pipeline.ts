@@ -5,7 +5,7 @@ import {
   buildManualLeadAssessmentRegenerationPrompt,
   buildManualLeadFactVerificationPrompt,
   classifyManualLeadDuplicate,
-  manualLeadAssessmentValidationErrorCode,
+  manualLeadAssessmentValidationFailure,
   manualLeadFactVerificationErrorCode,
   missingManualLeadEvidenceAnchors,
   isRegeneratableManualLeadAssessmentValidationCode,
@@ -22,6 +22,7 @@ import {
   type ManualNewsLeadStatus,
   type ManualLeadPriorEvent,
   type ManualNewsProcessedAssessment,
+  type ManualNewsAssessmentGenerationAudit,
 } from './manual-news-leads';
 import type { PublicDocument } from '../security/safe-url-fetch';
 import {
@@ -48,6 +49,7 @@ export interface ManualNewsLeadRecord {
   version: number;
   error_code: string | null;
   error_message: string | null;
+  assessment_generation?: ManualNewsAssessmentGenerationAudit;
   provider_failure?: ManualNewsProviderFailureAudit;
   processing_owner: string | null;
   processing_attempt: number;
@@ -95,8 +97,12 @@ export interface ManualLeadTransitionPatch
   extends Partial<Pick<ManualNewsLeadRecord, 'error_code' | 'error_message'>> {
   audit_metadata?: {
     assessment_generation_attempts?: 1 | 2;
+    assessment_first_validation_code?: string;
+    assessment_first_validation_path?: string;
     assessment_last_validation_code?: string;
+    assessment_last_validation_path?: string;
     assessment_regeneration_trigger_code?: string;
+    assessment_regeneration_trigger_path?: string;
     assessment_claim_contract: typeof MANUAL_LEAD_GENERATED_CLAIM_CONTRACT;
     assessment_source_fact_contract: typeof MANUAL_LEAD_SOURCE_FACT_CONTRACT;
     assessment_editorial_projection_contract: typeof MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT;
@@ -113,6 +119,28 @@ function manualLeadContractAuditMetadata() {
     assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
     assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
   } as const;
+}
+
+function assessmentGenerationAuditMetadata(input: {
+  attempts: 1 | 2;
+  first: { code: string; path?: string };
+  last: { code: string; path?: string };
+  trigger?: { code: string; path?: string };
+}): NonNullable<ManualLeadTransitionPatch['audit_metadata']> {
+  return {
+    assessment_generation_attempts: input.attempts,
+    assessment_first_validation_code: input.first.code,
+    ...(input.first.path ? { assessment_first_validation_path: input.first.path } : {}),
+    assessment_last_validation_code: input.last.code,
+    ...(input.last.path ? { assessment_last_validation_path: input.last.path } : {}),
+    ...(input.trigger ? {
+      assessment_regeneration_trigger_code: input.trigger.code,
+      ...(input.trigger.path
+        ? { assessment_regeneration_trigger_path: input.trigger.path }
+        : {}),
+    } : {}),
+    ...manualLeadContractAuditMetadata(),
+  };
 }
 
 export interface ManualLeadProcessingAdapters {
@@ -337,27 +365,27 @@ export async function processManualNewsLead(
         let prompt = buildManualLeadAssessmentPrompt(promptInput);
         let validatedCore: ManualNewsLeadAssessment | null = null;
         let generationAttempts: 1 | 2 = 1;
-        let regenerationTriggerCode: string | undefined;
+        let firstValidationFailure: { code: string; path?: string } | undefined;
+        let regenerationTrigger: { code: string; path?: string } | undefined;
         for (let attempt = 1; attempt <= 2; attempt += 1) {
           generationAttempts = attempt as 1 | 2;
           let raw: unknown;
           try {
             raw = await adapters.assess(prompt, providerCallContext('assessment', evidence.length));
           } catch (error) {
-            const lastValidationCode = isDeterministicModelJsonError(error)
-              ? 'invalid_assessment'
-              : (regenerationTriggerCode || 'not_validated');
+            const lastValidationFailure = isDeterministicModelJsonError(error)
+              ? { code: 'invalid_assessment' }
+              : (regenerationTrigger || { code: 'not_validated' });
+            firstValidationFailure ||= lastValidationFailure;
             const contextualError = withManualNewsAssessmentFailureContext(
-              error, generationAttempts, lastValidationCode,
+              error, generationAttempts, lastValidationFailure.code,
             );
-            assessmentGenerationAudit = {
-              assessment_generation_attempts: generationAttempts,
-              assessment_last_validation_code: lastValidationCode,
-              ...manualLeadContractAuditMetadata(),
-              ...(regenerationTriggerCode
-                ? { assessment_regeneration_trigger_code: regenerationTriggerCode }
-                : {}),
-            };
+            assessmentGenerationAudit = assessmentGenerationAuditMetadata({
+              attempts: generationAttempts,
+              first: firstValidationFailure,
+              last: lastValidationFailure,
+              trigger: regenerationTrigger,
+            });
             if (isDeterministicModelJsonError(error)) {
               assessmentGenerationAudit = auditMetadataWithProviderFailure(
                 assessmentGenerationAudit, contextualError,
@@ -387,38 +415,40 @@ export async function processManualNewsLead(
             validatedCore = validateManualLeadGeneratedAssessment(
               raw, evidence, priorEvents.map((event) => event.event_key),
             );
-            assessmentGenerationAudit = {
-              assessment_generation_attempts: generationAttempts,
-              assessment_last_validation_code: 'valid',
-              ...manualLeadContractAuditMetadata(),
-              ...(regenerationTriggerCode
-                ? { assessment_regeneration_trigger_code: regenerationTriggerCode }
-                : {}),
-            };
+            const valid = { code: 'valid' };
+            firstValidationFailure ||= valid;
+            assessmentGenerationAudit = assessmentGenerationAuditMetadata({
+              attempts: generationAttempts,
+              first: firstValidationFailure,
+              last: valid,
+              trigger: regenerationTrigger,
+            });
             break;
           } catch (error) {
             // Strict assessment validation is local and deterministic. Classify
             // its stable code directly: model-generated field values (including
             // evidence IDs) must never make this look like a transient provider
             // failure merely because they contain words such as "model" or "d1".
-            const validationCode = manualLeadAssessmentValidationErrorCode(error);
-            assessmentGenerationAudit = {
-              assessment_generation_attempts: generationAttempts,
-              assessment_last_validation_code: validationCode,
-              ...manualLeadContractAuditMetadata(),
-              ...(regenerationTriggerCode
-                ? { assessment_regeneration_trigger_code: regenerationTriggerCode }
-                : {}),
-            };
-            if (attempt === 1 && isRegeneratableManualLeadAssessmentValidationCode(validationCode)) {
-              regenerationTriggerCode = validationCode;
-              prompt = buildManualLeadAssessmentRegenerationPrompt(promptInput, validationCode);
+            const validationFailure = manualLeadAssessmentValidationFailure(error);
+            firstValidationFailure ||= validationFailure;
+            assessmentGenerationAudit = assessmentGenerationAuditMetadata({
+              attempts: generationAttempts,
+              first: firstValidationFailure,
+              last: validationFailure,
+              trigger: regenerationTrigger,
+            });
+            if (attempt === 1
+              && isRegeneratableManualLeadAssessmentValidationCode(validationFailure.code)) {
+              regenerationTrigger = validationFailure;
+              prompt = buildManualLeadAssessmentRegenerationPrompt(
+                promptInput, validationFailure.code, validationFailure.path,
+              );
               continue;
             }
             await store.invalidateAssessment(leadId, lead.version, 'assessment_schema_invalid');
             await transition('needs_review', {
               error_code: 'assessment_validation_failed',
-              error_message: validationCode,
+              error_message: validationFailure.code,
               audit_metadata: assessmentGenerationAudit,
             });
             return (await store.getLead(leadId))!;

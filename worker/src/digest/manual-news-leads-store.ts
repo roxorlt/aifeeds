@@ -7,6 +7,7 @@ import {
   MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
   MANUAL_LEAD_SOURCE_FACT_CONTRACT,
   MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+  manualNewsAssessmentGenerationAudit,
   mergeManualLeadCandidate,
   validateManualLeadFactVerification,
   validateManualNewsProcessedAssessment,
@@ -15,6 +16,7 @@ import {
   type ManualLeadPriorEvent,
   type ManualNewsLeadStatus,
   type ManualNewsProcessedAssessment,
+  type ManualNewsAssessmentGenerationAudit,
 } from './manual-news-leads';
 import {
   loadManualNewsEvidence,
@@ -89,8 +91,12 @@ function validatedTransitionAuditMetadata(
   if (!metadata) return {};
   const allowed = new Set([
     'assessment_generation_attempts',
+    'assessment_first_validation_code',
+    'assessment_first_validation_path',
     'assessment_last_validation_code',
+    'assessment_last_validation_path',
     'assessment_regeneration_trigger_code',
+    'assessment_regeneration_trigger_path',
     'assessment_claim_contract',
     'assessment_source_fact_contract',
     'assessment_editorial_projection_contract',
@@ -98,23 +104,29 @@ function validatedTransitionAuditMetadata(
     'assessment_recovery',
     'provider_failure',
   ]);
-  const generation = metadata.assessment_generation_attempts === 1
-    || metadata.assessment_generation_attempts === 2;
+  const generationAudit = manualNewsAssessmentGenerationAudit(metadata);
+  const generation = metadata.assessment_generation_attempts !== undefined;
   const recovery = metadata.assessment_recovery === 'persisted_verified';
+  const generationFields = [
+    'assessment_generation_attempts',
+    'assessment_first_validation_code',
+    'assessment_first_validation_path',
+    'assessment_last_validation_code',
+    'assessment_last_validation_path',
+    'assessment_regeneration_trigger_code',
+    'assessment_regeneration_trigger_path',
+  ] as const;
   if (Object.keys(metadata).some((key) => !allowed.has(key))
     || generation === recovery
-    || (generation && !/^[a-z0-9_]{1,80}$/.test(metadata.assessment_last_validation_code || ''))
-    || (recovery && (metadata.assessment_generation_attempts !== undefined
-      || metadata.assessment_last_validation_code !== undefined
-      || metadata.assessment_regeneration_trigger_code !== undefined))
+    || (generation && !generationAudit)
+    || (recovery && generationFields.some((field) => metadata[field] !== undefined))
     || metadata.assessment_claim_contract !== MANUAL_LEAD_GENERATED_CLAIM_CONTRACT
     || metadata.assessment_source_fact_contract !== MANUAL_LEAD_SOURCE_FACT_CONTRACT
     || metadata.assessment_editorial_projection_contract !== MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT
     || metadata.assessment_verification_policy !== MANUAL_LEAD_VERIFICATION_POLICY_VERSION
     || (metadata.provider_failure !== undefined
       && !isValidManualNewsProviderFailureAudit(metadata.provider_failure))
-    || (metadata.assessment_regeneration_trigger_code !== undefined
-      && !/^[a-z0-9_]{1,80}$/.test(metadata.assessment_regeneration_trigger_code))) {
+    ) {
     throw new Error('invalid_transition_audit_metadata');
   }
   return { ...metadata };
@@ -200,12 +212,33 @@ async function loadCurrentProviderFailure(
   return null;
 }
 
+async function loadLatestAssessmentGenerationAudit(
+  env: Env,
+  leadId: string,
+): Promise<ManualNewsAssessmentGenerationAudit | null> {
+  const rows = await env.DB.prepare(
+    `/* manual_audit:latest_assessment_generation */ SELECT metadata_json
+     FROM manual_news_lead_audit WHERE lead_id = ?
+     ORDER BY id DESC LIMIT 20`,
+  ).bind(leadId).all<{ metadata_json: string }>();
+  for (const row of rows.results || []) {
+    try {
+      const audit = manualNewsAssessmentGenerationAudit(JSON.parse(row.metadata_json));
+      if (audit) return audit;
+    } catch {
+      // Malformed or legacy metadata is never exposed as trusted diagnostics.
+    }
+  }
+  return null;
+}
+
 async function leadFromRow(env: Env, row: ManualLeadRow): Promise<ManualNewsLeadRecord> {
-  const [evidence, providerFailure] = await Promise.all([
+  const [evidence, providerFailure, assessmentGeneration] = await Promise.all([
     loadManualNewsEvidence(env, row.id),
     String(row.error_message || '').startsWith('manual_news_provider_error:')
       ? loadCurrentProviderFailure(env, row.id, Number(row.version))
       : Promise.resolve(null),
+    loadLatestAssessmentGenerationAudit(env, row.id),
   ]);
   const verified = await loadVerifiedManualAssessment(env, row.id, evidence);
   return {
@@ -219,6 +252,7 @@ async function leadFromRow(env: Env, row: ManualLeadRow): Promise<ManualNewsLead
     version: Number(row.version),
     error_code: row.error_code,
     error_message: row.error_message,
+    ...(assessmentGeneration ? { assessment_generation: assessmentGeneration } : {}),
     ...(providerFailure ? { provider_failure: providerFailure } : {}),
     processing_owner: row.processing_owner || null,
     processing_attempt: Number(row.processing_attempt || 0),

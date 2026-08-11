@@ -199,6 +199,44 @@ function assessed(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function alibabaCoreAssessment(overrides: Record<string, unknown> = {}) {
+  return {
+    event_key: 'alibaba-claude-code-employee-ban-2026-08-11',
+    event_type: 'industry_event',
+    material_update: false,
+    score: 88,
+    recommendation: 'needs_review',
+    occurred_at: null,
+    uncertainties: [],
+    source_facts: [{
+      fact_ref: 'fact-01', source_language: 'en',
+      atomic_fact: {
+        subject: 'Alibaba', subject_role: 'organization',
+        predicate: 'reportedly bans', object: 'employees from using Claude Code',
+      },
+      evidence_ids: [techCrunchAlibabaEvidence.id],
+    }],
+    editorial_projection: {
+      title: {
+        projection_ref: 'title-01', source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: '阿里巴巴', subject_role: 'organization',
+          predicate: '据称禁止', object: '员工使用Claude Code',
+        },
+      },
+      summary: [{
+        projection_ref: 'summary-01', source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: '阿里巴巴', subject_role: 'organization',
+          predicate: '据称禁止', object: '员工使用Claude Code',
+        },
+      }],
+    },
+    matched_event_key: null,
+    ...overrides,
+  };
+}
+
 function verifiedPriorEvent(): ManualLeadPriorEvent {
   return {
     event_key: 'anthropic-output-provenance-2026-08',
@@ -631,9 +669,138 @@ describe('manual lead processing pipeline', () => {
     expect(memory.transitionPatches).toContainEqual(expect.objectContaining({
       audit_metadata: expect.objectContaining({
         assessment_generation_attempts: 2,
-        assessment_regeneration_trigger_code: 'non_atomic_claim',
+        assessment_regeneration_trigger_code: 'non_atomic_source_object',
       }),
     }));
+  });
+
+  test('regenerates the failing source object slot once and audits first/last safe validation paths', async () => {
+    const memory = memoryStore();
+    const prompts: Array<{ system: string; user: string }> = [];
+    let assessCalls = 0;
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(techCrunchAlibabaEvidence.url, 'doc'),
+      extract: async () => techCrunchAlibabaEvidence,
+      assess: async (prompt) => {
+        prompts.push(prompt);
+        assessCalls += 1;
+        return assessCalls === 1
+          ? alibabaCoreAssessment({
+            source_facts: [{
+              fact_ref: 'fact-01', source_language: 'en',
+              atomic_fact: {
+                subject: 'Alibaba', subject_role: 'organization', predicate: 'reportedly bans',
+                object: 'employees from using Claude Code, because of security concerns',
+              },
+              evidence_ids: [techCrunchAlibabaEvidence.id],
+            }],
+          })
+          : alibabaCoreAssessment();
+      },
+      verify: async (prompt) => verifiedFromPrompt(prompt),
+    });
+
+    expect(assessCalls).toBe(2);
+    const regeneration = JSON.parse(prompts[1].user) as {
+      regeneration: { failure_code: string; failure_path: string; mechanical_instruction: string };
+    };
+    expect(regeneration.regeneration).toMatchObject({
+      failure_code: 'non_atomic_source_object',
+      failure_path: 'source_facts[0].atomic_fact.object',
+    });
+    expect(regeneration.regeneration.mechanical_instruction).toContain('删除非核心背景');
+    expect(prompts[1].user).not.toContain('because of security concerns');
+    expect(memory.transitionPatches).toContainEqual(expect.objectContaining({
+      audit_metadata: expect.objectContaining({
+        assessment_generation_attempts: 2,
+        assessment_first_validation_code: 'non_atomic_source_object',
+        assessment_first_validation_path: 'source_facts[0].atomic_fact.object',
+        assessment_last_validation_code: 'valid',
+        assessment_regeneration_trigger_code: 'non_atomic_source_object',
+        assessment_regeneration_trigger_path: 'source_facts[0].atomic_fact.object',
+      }),
+    }));
+  });
+
+  test('keeps both safe paths when the sole regeneration fails in a different generated slot', async () => {
+    const memory = memoryStore();
+    let assessCalls = 0;
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(techCrunchAlibabaEvidence.url, 'doc'),
+      extract: async () => techCrunchAlibabaEvidence,
+      assess: async () => {
+        assessCalls += 1;
+        if (assessCalls === 1) return alibabaCoreAssessment({
+          source_facts: [{
+            fact_ref: 'fact-01', source_language: 'en',
+            atomic_fact: {
+              subject: 'Alibaba', subject_role: 'organization', predicate: 'reportedly bans',
+              object: 'employees from using Claude Code, because of security concerns',
+            }, evidence_ids: [techCrunchAlibabaEvidence.id],
+          }],
+        });
+        return alibabaCoreAssessment({
+          editorial_projection: {
+            title: {
+              projection_ref: 'title-01', source_fact_refs: ['fact-01'],
+              atomic_fact: {
+                subject: '阿里巴巴', subject_role: 'organization',
+                predicate: '据称禁止并要求', object: '员工使用Claude Code',
+              },
+            },
+            summary: [{
+              projection_ref: 'summary-01', source_fact_refs: ['fact-01'],
+              atomic_fact: {
+                subject: '阿里巴巴', subject_role: 'organization',
+                predicate: '据称禁止', object: '员工使用Claude Code',
+              },
+            }],
+          },
+        });
+      },
+      verify: async () => { throw new Error('unexpected_verify'); },
+    });
+
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review', assessment: null,
+      error_code: 'assessment_validation_failed',
+      error_message: 'non_atomic_editorial_predicate',
+    });
+    expect(memory.transitionPatches.at(-1)).toMatchObject({
+      audit_metadata: expect.objectContaining({
+        assessment_generation_attempts: 2,
+        assessment_first_validation_code: 'non_atomic_source_object',
+        assessment_first_validation_path: 'source_facts[0].atomic_fact.object',
+        assessment_last_validation_code: 'non_atomic_editorial_predicate',
+        assessment_last_validation_path: 'editorial_projection.title.atomic_fact.predicate',
+        assessment_regeneration_trigger_code: 'non_atomic_source_object',
+        assessment_regeneration_trigger_path: 'source_facts[0].atomic_fact.object',
+      }),
+    });
+  });
+
+  test('accepts the URL-only Alibaba lead as one minimal core source fact without regeneration', async () => {
+    const memory = memoryStore(lead({
+      input_type: 'url', input_url: techCrunchAlibabaEvidence.url, input_text: '',
+    }));
+    let assessCalls = 0;
+    let verifyCalls = 0;
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(techCrunchAlibabaEvidence.url, 'doc'),
+      extract: async () => techCrunchAlibabaEvidence,
+      assess: async () => { assessCalls += 1; return alibabaCoreAssessment(); },
+      verify: async (prompt) => { verifyCalls += 1; return verifiedFromPrompt(prompt); },
+    });
+
+    expect(assessCalls).toBe(1);
+    expect(verifyCalls).toBe(1);
+    expect(memory.current().assessment).toMatchObject({
+      title: '阿里巴巴据称禁止员工使用Claude Code。',
+      source_facts: [expect.objectContaining({
+        atomic_fact: expect.objectContaining({ object: 'employees from using Claude Code' }),
+      })],
+      editorial_projection: { summary: [expect.any(Object)] },
+    });
   });
 
   test('stops after two invalid assessment generations without verification or HMAC persistence', async () => {
@@ -668,12 +835,12 @@ describe('manual lead processing pipeline', () => {
     expect(memory.saveCalls()).toBe(0);
     expect(memory.current()).toMatchObject({
       status: 'needs_review', assessment: null,
-      error_code: 'assessment_validation_failed', error_message: 'non_atomic_claim',
+      error_code: 'assessment_validation_failed', error_message: 'non_atomic_source_object',
     });
     expect(memory.transitionPatches.at(-1)).toMatchObject({
       audit_metadata: {
         assessment_generation_attempts: 2,
-        assessment_last_validation_code: 'non_atomic_claim',
+        assessment_last_validation_code: 'non_atomic_source_object',
         assessment_regeneration_trigger_code: 'unknown_evidence_id',
         assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
       },

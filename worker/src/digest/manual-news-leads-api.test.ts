@@ -235,6 +235,34 @@ describe('manual daily news leads API', () => {
     expect(JSON.stringify(payload)).not.toContain('PRIVATE');
   });
 
+  test('returns only bounded assessment validation codes and schema paths on authorized GETs', async () => {
+    const failed = {
+      ...record,
+      status: 'needs_review',
+      error_code: 'assessment_validation_failed',
+      error_message: 'non_atomic_editorial_predicate',
+      assessment_generation: {
+        assessment_generation_attempts: 2,
+        assessment_first_validation_code: 'non_atomic_source_object',
+        assessment_first_validation_path: 'source_facts[0].atomic_fact.object',
+        assessment_last_validation_code: 'non_atomic_editorial_predicate',
+        assessment_last_validation_path: 'editorial_projection.title.atomic_fact.predicate',
+        assessment_regeneration_trigger_code: 'non_atomic_source_object',
+        assessment_regeneration_trigger_path: 'source_facts[0].atomic_fact.object',
+      },
+    };
+    vi.mocked(getManualNewsLead).mockResolvedValueOnce(failed as never);
+
+    const result = await handleManualNewsLeadsApi(
+      request(`/api/digest/daily-news-leads/${record.id}`), env(), { waitUntil() {} } as never,
+    );
+    const payload = await result.json<Record<string, unknown>>();
+
+    expect(payload).toMatchObject({ lead: { assessment_generation: failed.assessment_generation } });
+    expect(JSON.stringify(payload)).not.toContain('because of security concerns');
+    expect(JSON.stringify(payload)).not.toContain('MODEL_RAW');
+  });
+
   test('fails closed when the durable workflow binding is unavailable', async () => {
     const unavailableEnv = env({ MANUAL_NEWS_LEAD_WORKFLOW: undefined });
     const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {

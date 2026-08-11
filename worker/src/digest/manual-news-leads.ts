@@ -382,41 +382,72 @@ export function validateManualLeadAssessment(
   };
 }
 
-function generatedFactSlot(value: unknown, field: 'subject' | 'predicate' | 'object'): string {
-  if (typeof value !== 'string') throw new Error('invalid_claim_fact');
+type GeneratedFactScope = 'source' | 'editorial';
+
+interface GeneratedFactValidationContext {
+  scope: GeneratedFactScope;
+  base_path: string;
+}
+
+function generatedFactValidationError(
+  code: string,
+  context: GeneratedFactValidationContext | undefined,
+  field: 'subject' | 'subject_role' | 'predicate' | 'object' | 'assembled',
+): Error {
+  return new Error(context ? `${code}:${context.base_path}.${field}` : code);
+}
+
+function generatedFactSlot(
+  value: unknown,
+  field: 'subject' | 'predicate' | 'object',
+  context?: GeneratedFactValidationContext,
+): string {
+  if (typeof value !== 'string') {
+    throw generatedFactValidationError('invalid_claim_fact', context, field);
+  }
   const limit = field === 'subject' ? 120 : field === 'predicate' ? 100 : 300;
   const normalized = value.normalize('NFKC').replace(/\s+/gu, ' ').trim();
-  if (!normalized || Array.from(normalized).length > limit) throw new Error('invalid_claim_fact');
+  if (!normalized || Array.from(normalized).length > limit) {
+    throw generatedFactValidationError('invalid_claim_fact', context, field);
+  }
   const boundary = new RegExp(
     `(?:${ATOMIC_HARD_PUNCTUATION_SOURCE}|[，,、]|${ATOMIC_COORDINATION_SOURCE})`,
     'iu',
   );
-  if (boundary.test(normalized)) throw new Error('non_atomic_claim');
+  if (boundary.test(normalized)) {
+    throw generatedFactValidationError(
+      context ? `non_atomic_${context.scope}_${field}` : 'non_atomic_claim', context, field,
+    );
+  }
   if (field !== 'object'
     && /(?:因为|由于|所以|因此|从而|以便|尽管|虽然|如果|除非)|\b(?:because|therefore|so\s+that|in\s+order\s+to|although|unless|if)\b/iu.test(normalized)) {
-    throw new Error('non_atomic_claim');
+    throw generatedFactValidationError(
+      context ? `non_atomic_${context.scope}_${field}` : 'non_atomic_claim', context, field,
+    );
   }
   if (field === 'subject'
     && /(?:[&＋+]|\b(?:with|together\s+with|along\s+with)\b)/iu.test(normalized)) {
-    throw new Error('invalid_claim_subject');
+    throw generatedFactValidationError('invalid_claim_subject', context, field);
   }
   if (field === 'predicate'
     && /(?:由于|因为|出于|源于)|\b(?:due\s+to|because\s+of|over\s+.+\s+concerns?)\b/iu.test(normalized)) {
-    throw new Error('invalid_claim_predicate');
+    throw generatedFactValidationError('invalid_claim_predicate', context, field);
   }
   if (field === 'object') {
     if (isTemporalOnlyFactObject(normalized)) {
-      throw new Error('invalid_claim_object');
+      throw generatedFactValidationError('invalid_claim_object', context, field);
     }
     const reason = canonicalFactReason(normalized);
     if (reason.present && (!reason.canonical || !reason.residual)) {
-      throw new Error('invalid_claim_object');
+      throw generatedFactValidationError('invalid_claim_object', context, field);
     }
     const substantive = reason.residual
       .replace(/\b(?:yesterday|today|tomorrow|reportedly|allegedly|officially|possibly|maybe)\b/giu, '')
       .replace(/(?:昨天|今天|明天|据称|正式|可能|已经|已)/gu, '')
       .replace(/[\p{P}\p{S}\s\d]/gu, '');
-    if (Array.from(substantive).length < 2) throw new Error('invalid_claim_object');
+    if (Array.from(substantive).length < 2) {
+      throw generatedFactValidationError('invalid_claim_object', context, field);
+    }
   }
   return normalized;
 }
@@ -465,17 +496,28 @@ function generatedObjectActionOccurrences(object: string): FactActionOccurrence[
   });
 }
 
-function generatedAtomicFact(value: unknown): ManualAtomicFactSlots {
-  if (!isPlainObject(value)) throw new Error('invalid_claim_fact');
+function generatedAtomicFact(
+  value: unknown,
+  context?: GeneratedFactValidationContext,
+): ManualAtomicFactSlots {
+  if (!isPlainObject(value)) {
+    throw generatedFactValidationError('invalid_claim_fact', context, 'assembled');
+  }
   try {
     strictKeys(value, ['subject', 'subject_role', 'predicate', 'object']);
   } catch {
-    throw new Error('invalid_claim_fact');
+    throw generatedFactValidationError('invalid_claim_fact', context, 'assembled');
   }
-  const subject = generatedFactSlot(value.subject, 'subject');
-  const predicate = generatedFactSlot(value.predicate, 'predicate');
-  const object = generatedFactSlot(value.object, 'object');
-  const subjectRole = generatedSubjectRole(value.subject_role, subject);
+  const subject = generatedFactSlot(value.subject, 'subject', context);
+  const predicate = generatedFactSlot(value.predicate, 'predicate', context);
+  const object = generatedFactSlot(value.object, 'object', context);
+  let subjectRole: ManualFactSubjectRole;
+  try {
+    subjectRole = generatedSubjectRole(value.subject_role, subject);
+  } catch (error) {
+    const code = error instanceof Error ? error.message.split(':', 1)[0] : 'invalid_claim_subject_role';
+    throw generatedFactValidationError(code, context, 'subject_role');
+  }
   const predicateActions = factActionOccurrences(predicate);
   const objectActions = generatedObjectActionOccurrences(object);
   const controlled = predicateActions.length === 1 && objectActions.length === 1
@@ -483,10 +525,19 @@ function generatedAtomicFact(value: unknown): ManualAtomicFactSlots {
     && atomicActionChainReliable(joinGeneratedFactSlots(subject, predicate, object))
     && !unknownCompoundShape(joinGeneratedFactSlots(subject, predicate, object));
   if ((predicateActions.length !== 1 || objectActions.length > 0) && !controlled) {
-    throw new Error('invalid_claim_predicate');
+    if (objectActions.length > 0) {
+      const code = context ? `non_atomic_${context.scope}_object` : 'invalid_claim_predicate';
+      throw generatedFactValidationError(code, context, 'object');
+    }
+    const code = predicateActions.length > 1 && context
+      ? `non_atomic_${context.scope}_predicate`
+      : 'invalid_claim_predicate';
+    throw generatedFactValidationError(code, context, 'predicate');
   }
   if (factActionOccurrences(subject).length) {
-    throw new Error('invalid_claim_object');
+    throw generatedFactValidationError(
+      context ? `non_atomic_${context.scope}_subject` : 'invalid_claim_object', context, 'subject',
+    );
   }
   return { subject, subject_role: subjectRole, predicate, object };
 }
@@ -1452,6 +1503,7 @@ function validatedProjectionSentence(
   raw: unknown,
   expectedRef: string,
   sourceByRef: ReadonlyMap<string, ManualSourceAtomicFact>,
+  basePath: string,
 ): ManualEditorialProjectionSentence {
   if (!isPlainObject(raw)) throw new Error('invalid_editorial_projection');
   try {
@@ -1467,9 +1519,23 @@ function validatedProjectionSentence(
   }
   const source = sourceByRef.get(raw.source_fact_refs[0]);
   if (!source) throw new Error('invalid_editorial_projection_mapping');
-  const atomicFact = generatedAtomicFact(raw.atomic_fact);
+  const context: GeneratedFactValidationContext = { scope: 'editorial', base_path: `${basePath}.atomic_fact` };
+  const atomicFact = generatedAtomicFact(raw.atomic_fact, context);
   const textZh = joinGeneratedFactSlots(atomicFact.subject, atomicFact.predicate, atomicFact.object)
     .replace(/\.$/u, '。');
+  // The source-language splitter is intentionally conservative for Chinese
+  // control constructions. Run it for editorial output only when the object
+  // itself has an unresolved predicate shape that can become a second clause
+  // after slot assembly; ordinary translated control objects remain governed
+  // by the stricter bilingual slot comparison below.
+  const unresolvedSecondaryEnglishClause = /(?:^|\s)(?:[A-Z][A-Za-z0-9._+-]*(?:\s+[A-Z][A-Za-z0-9._+-]*){0,3})\s+[a-z][a-z-]*(?:s|ed|ing)\b/u
+    .test(atomicFact.object);
+  if (unresolvedSecondaryEnglishClause) {
+    const assembled = splitAtomicFactClauses(textZh);
+    if (!assembled.reliable || assembled.clauses.length !== 1) {
+      throw generatedFactValidationError('non_atomic_editorial_assembled', context, 'assembled');
+    }
+  }
   const languageError = projectionLanguageError(atomicFact);
   if ((textZh.match(/\p{Script=Han}/gu) || []).length < 4 || languageError) {
     throw new Error(languageError || 'invalid_editorial_projection_language');
@@ -1495,7 +1561,8 @@ export function validateManualLeadGeneratedAssessment(
   evidence: readonly ManualNewsEvidence[],
   priorEventKeys?: readonly string[],
 ): ManualNewsLeadAssessment {
-  if (!isPlainObject(raw) || !Array.isArray(raw.source_facts) || !raw.source_facts.length) {
+  if (!isPlainObject(raw) || !Array.isArray(raw.source_facts)
+    || !raw.source_facts.length || raw.source_facts.length > 3) {
     throw new Error('invalid_claims');
   }
   const evidenceById = new Map(evidence.map((item) => [item.id, item]));
@@ -1512,17 +1579,24 @@ export function validateManualLeadGeneratedAssessment(
     if (!['zh', 'en', 'other'].includes(String(claim.source_language))) {
       throw new Error('invalid_claim_source_language');
     }
-    const atomicFact = generatedAtomicFact(claim.atomic_fact);
+    const context: GeneratedFactValidationContext = {
+      scope: 'source', base_path: `source_facts[${index}].atomic_fact`,
+    };
+    const atomicFact = generatedAtomicFact(claim.atomic_fact, context);
     if (!Array.isArray(claim.evidence_ids)
       || !claim.evidence_ids.length
       || claim.evidence_ids.some((id) => typeof id !== 'string' || !id)) {
       throw new Error('invalid_claim');
     }
-    const unknown = claim.evidence_ids.find((id) => !evidenceById.has(id));
-    if (unknown) throw new Error(`unknown_evidence_id:${unknown}`);
+    const unknownIndex = claim.evidence_ids.findIndex((id) => !evidenceById.has(id));
+    if (unknownIndex >= 0) {
+      throw new Error(`unknown_evidence_id:source_facts[${index}].evidence_ids[${unknownIndex}]`);
+    }
     const text = joinGeneratedFactSlots(atomicFact.subject, atomicFact.predicate, atomicFact.object);
     const atomic = splitAtomicFactClauses(text);
-    if (!atomic.reliable || atomic.clauses.length !== 1) throw new Error('non_atomic_claim');
+    if (!atomic.reliable || atomic.clauses.length !== 1) {
+      throw generatedFactValidationError('non_atomic_source_assembled', context, 'assembled');
+    }
     if (claim.source_language === 'en' && /\p{Script=Han}/u.test(text)) {
       throw new Error('invalid_claim_source_language');
     }
@@ -1557,13 +1631,18 @@ export function validateManualLeadGeneratedAssessment(
     throw new Error('invalid_editorial_projection');
   }
   const titleProjection = validatedProjectionSentence(
-    raw.editorial_projection.title, 'title-01', sourceByRef,
+    raw.editorial_projection.title, 'title-01', sourceByRef, 'editorial_projection.title',
   );
   if (titleProjection.source_fact_ids[0] !== sourceFacts[0].fact_id) {
     throw new Error('invalid_editorial_projection_mapping');
   }
   const summaryProjection = raw.editorial_projection.summary.map((item, index) =>
-    validatedProjectionSentence(item, `summary-${String(index + 1).padStart(2, '0')}`, sourceByRef));
+    validatedProjectionSentence(
+      item,
+      `summary-${String(index + 1).padStart(2, '0')}`,
+      sourceByRef,
+      `editorial_projection.summary[${index}]`,
+    ));
   if (summaryProjection.length !== sourceFacts.length
     || summaryProjection.some((projection, index) =>
       projection.source_fact_ids[0] !== sourceFacts[index].fact_id)) {
@@ -1651,6 +1730,7 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
       '只使用 evidence 中明确出现的事实；每条 claim 必须引用实际支持它的 evidence_ids，不能用常识、线索原话或搜索摘要补齐。',
       'evidence_ids 中的每个字符串只能逐字复制 allowed_evidence_ids 中的完整 ID；allowed_evidence_ids 位于 user 顶层，禁止改写、截断、拼接、猜测或新造 ID。',
       'source_facts 不接受自由文本 text。每条 source fact 必须机械地填写 atomic_fact 的主体角色、主体、单一谓词、对象四个槽位；程序会按槽位顺序生成可签名事实，不会修补或拆分 raw JSON。',
+      '核心事件最小化：默认只输出 1 条 core source_fact，只保留足以决定本条线索推荐与去重的核心事件。仅当另一事实独立、必要且同样可由直接证据核验时才增加，总数最多 3 条 source_facts。禁止为了填充摘要加入原因、替代产品或背景信息。',
       'atomic_fact.subject 只能有一个完整主体；atomic_fact.predicate 只能有一个谓词，可包含紧邻该谓词的时态、否定、计划或“据报道”等限定；atomic_fact.object 只能有一个对象及其必要版本、地区和范围。',
       'source_facts.atomic_fact 必须沿用直接证据的源语言、实体原文与谓词表达：英文证据写英文 source fact，中文证据写中文 source fact，禁止先翻译再绑定连续原文。',
       'editorial_projection 是独立的严肃中文编辑投影。title 与 summary 的每个中文原子句必须填写自己的四槽 atomic_fact，并通过 source_fact_refs 显式映射且只映射一个 source fact；不得新增、删除或改变主体、动作、对象、版本、时间、地区、否定、情态或完成状态。',
@@ -1691,7 +1771,7 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
         occurred_at: 'source-supported ISO-8601 date/time|null',
         uncertainties: ['string'],
         source_facts: [{
-          fact_ref: 'fact-01, fact-02 ... in deterministic primary-event order',
+          fact_ref: 'fact-01 by default; at most fact-01..fact-03 in deterministic primary-event order',
           source_language: 'zh|en|other; language of the directly quoted evidence',
           atomic_fact: {
             subject: 'exactly one subject; source-language entity text; no predicate or conjunction',
@@ -1727,20 +1807,6 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
             },
             evidence_ids: ['<EXACT_ALLOWED_EVIDENCE_ID>'],
           },
-          {
-            fact_ref: 'fact-02', source_language: 'zh',
-            atomic_fact: {
-              subject: '阿里巴巴', subject_role: 'organization', predicate: '表示', object: '该决定与数据安全有关',
-            },
-            evidence_ids: ['<EXACT_ALLOWED_EVIDENCE_ID>'],
-          },
-          {
-            fact_ref: 'fact-03', source_language: 'zh',
-            atomic_fact: {
-              subject: '阿里巴巴', subject_role: 'organization', predicate: '要求', object: '员工改用其他产品',
-            },
-            evidence_ids: ['<EXACT_ALLOWED_EVIDENCE_ID>'],
-          },
         ],
         bad: [{
           claim: {
@@ -1752,7 +1818,7 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
             },
             evidence_ids: ['invented-evidence-id'],
           },
-          failure_codes: ['non_atomic_claim', 'unknown_evidence_id'],
+          failure_codes: ['non_atomic_source_predicate', 'non_atomic_source_object', 'unknown_evidence_id'],
         }],
         note: '<EXACT_ALLOWED_EVIDENCE_ID> 只是结构占位符；真实输出必须逐字复制 allowed ID。程序只连接已严格验证的四个槽位并生成稳定 fact id，不会从复合 prose 中猜测事实；示例不得在 evidence 未支持时复制。',
       },
@@ -1764,12 +1830,30 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
 export function buildManualLeadAssessmentRegenerationPrompt(
   input: ManualLeadAssessmentPromptInput,
   failureCode: string,
+  failurePath?: string,
 ): { system: string; user: string } {
   if (!isRegeneratableManualLeadAssessmentValidationCode(failureCode)) {
     throw new Error('assessment_regeneration_not_allowed');
   }
+  if (failurePath !== undefined && !SAFE_GENERATED_ASSESSMENT_PATH.test(failurePath)) {
+    throw new Error('assessment_regeneration_path_invalid');
+  }
+  if (/^non_atomic_(?:source|editorial)_(?:subject|predicate|object|assembled)$/u.test(failureCode)
+    && !failurePath) throw new Error('assessment_regeneration_path_invalid');
   const original = buildManualLeadAssessmentPrompt(input);
   const body = JSON.parse(original.user) as Record<string, unknown>;
+  const slot = failureCode.match(/_(subject|predicate|object|assembled)$/u)?.[1];
+  const mechanicalInstruction = slot === 'subject'
+    ? '只纠正同类 subject 槽：每个 subject 只能是一个完整主体实体，不得包含并列主体、动作、原因或背景。整份 schema 仍须从原证据重新生成。'
+    : slot === 'predicate'
+      ? '只纠正同类 predicate 槽：每个 predicate 只能有一个动作及其紧邻时态、否定、情态标记；多个动作必须拆成必要且可核验的独立 fact，否则删除非核心背景。整份 schema 仍须从原证据重新生成。'
+      : slot === 'object'
+        ? '只纠正同类 object 槽：对象若含逗号、同位语、并列、原因或第二动作，必须拆为必要且可核验的独立 fact，或删除非核心背景；不得把复合内容塞回一个 object。整份 schema 仍须从原证据重新生成。'
+        : slot === 'assembled'
+          ? '逐一检查 subject + predicate + object 连接后的完整句；若 assembled 句形成多个主体、动作或子句，拆为必要且可核验的独立 fact，或删除非核心背景。整份 schema 仍须从原证据重新生成。'
+          : failureCode === 'unknown_evidence_id'
+            ? '逐项从 allowed_evidence_ids 原样复制 evidence ID；不得猜测、改写或沿用任何旧 ID。整份 schema 仍须从原证据重新生成。'
+            : '仅纠正 failure_code 指向的 schema 契约类别；整份 schema 仍须从原证据重新生成，不得复用旧输出。';
   return {
     system: [
       original.system,
@@ -1781,7 +1865,9 @@ export function buildManualLeadAssessmentRegenerationPrompt(
       regeneration: {
         mode: 'validation_guided_regeneration',
         failure_code: failureCode,
+        ...(failurePath ? { failure_path: failurePath } : {}),
         instruction: '丢弃上一次输出；仅根据本 prompt 的原始任务与证据，从头生成完整 schema。',
+        mechanical_instruction: mechanicalInstruction,
       },
     }),
   };
@@ -4578,6 +4664,14 @@ const ASSESSMENT_VALIDATION_ERROR_CODES = new Set([
   'invalid_editorial_projection_time',
   'non_atomic_claim',
   'non_atomic_fact',
+  'non_atomic_source_subject',
+  'non_atomic_source_predicate',
+  'non_atomic_source_object',
+  'non_atomic_source_assembled',
+  'non_atomic_editorial_subject',
+  'non_atomic_editorial_predicate',
+  'non_atomic_editorial_object',
+  'non_atomic_editorial_assembled',
   'unknown_evidence_id',
   'invalid_matched_event_key',
   'unknown_matched_event_key',
@@ -4620,6 +4714,14 @@ const REGENERATABLE_ASSESSMENT_VALIDATION_CODES = new Set([
   'invalid_editorial_projection_time',
   'non_atomic_claim',
   'non_atomic_fact',
+  'non_atomic_source_subject',
+  'non_atomic_source_predicate',
+  'non_atomic_source_object',
+  'non_atomic_source_assembled',
+  'non_atomic_editorial_subject',
+  'non_atomic_editorial_predicate',
+  'non_atomic_editorial_object',
+  'non_atomic_editorial_assembled',
   'unknown_evidence_id',
   'invalid_matched_event_key',
   'unknown_matched_event_key',
@@ -4631,9 +4733,109 @@ export function isRegeneratableManualLeadAssessmentValidationCode(code: string):
 }
 
 export function manualLeadAssessmentValidationErrorCode(error: unknown): string {
+  return manualLeadAssessmentValidationFailure(error).code;
+}
+
+const SAFE_GENERATED_ASSESSMENT_PATH = /^(?:source_facts\[(?:0|1|2)\]\.(?:fact_ref|source_language|atomic_fact\.(?:subject|subject_role|predicate|object|assembled)|evidence_ids\[(?:[0-9]|1[0-5])\])|editorial_projection\.(?:title|summary\[(?:0|1|2)\])\.(?:projection_ref|source_fact_refs\[0\]|atomic_fact\.(?:subject|subject_role|predicate|object|assembled)))$/u;
+
+export interface ManualLeadAssessmentValidationFailure {
+  code: string;
+  path?: string;
+}
+
+export function manualLeadAssessmentValidationFailure(
+  error: unknown,
+): ManualLeadAssessmentValidationFailure {
   const message = error instanceof Error ? error.message : String(error);
-  const code = message.split(':', 1)[0];
-  return ASSESSMENT_VALIDATION_ERROR_CODES.has(code) ? code : 'assessment_validation_failed';
+  const separator = message.indexOf(':');
+  const rawCode = separator < 0 ? message : message.slice(0, separator);
+  const code = ASSESSMENT_VALIDATION_ERROR_CODES.has(rawCode)
+    ? rawCode
+    : 'assessment_validation_failed';
+  const candidatePath = separator < 0 ? '' : message.slice(separator + 1);
+  return SAFE_GENERATED_ASSESSMENT_PATH.test(candidatePath)
+    ? { code, path: candidatePath }
+    : { code };
+}
+
+export interface ManualNewsAssessmentGenerationAudit {
+  assessment_generation_attempts: 1 | 2;
+  assessment_first_validation_code: string;
+  assessment_first_validation_path?: string;
+  assessment_last_validation_code: string;
+  assessment_last_validation_path?: string;
+  assessment_regeneration_trigger_code?: string;
+  assessment_regeneration_trigger_path?: string;
+}
+
+function safeAssessmentAuditCode(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length <= 80
+    && (value === 'valid' || value === 'not_validated'
+      || value === 'assessment_validation_failed'
+      || ASSESSMENT_VALIDATION_ERROR_CODES.has(value));
+}
+
+function assessmentAuditPathMatchesCode(code: string, path: unknown): boolean {
+  if (path !== undefined && (typeof path !== 'string' || !SAFE_GENERATED_ASSESSMENT_PATH.test(path))) {
+    return false;
+  }
+  if (code === 'valid' || code === 'not_validated') return path === undefined;
+  const atomic = /^non_atomic_(source|editorial)_(subject|predicate|object|assembled)$/u.exec(code);
+  if (!atomic) return true;
+  if (typeof path !== 'string' || !path.endsWith(`.atomic_fact.${atomic[2]}`)) return false;
+  return atomic[1] === 'source'
+    ? path.startsWith('source_facts[')
+    : path.startsWith('editorial_projection.');
+}
+
+export function manualNewsAssessmentGenerationAudit(
+  value: unknown,
+): ManualNewsAssessmentGenerationAudit | null {
+  if (!isPlainObject(value)) return null;
+  const attempts = value.assessment_generation_attempts;
+  if (attempts !== 1 && attempts !== 2) return null;
+  const firstCode = value.assessment_first_validation_code;
+  const lastCode = value.assessment_last_validation_code;
+  const triggerCode = value.assessment_regeneration_trigger_code;
+  if (!safeAssessmentAuditCode(firstCode) || !safeAssessmentAuditCode(lastCode)
+    || (attempts === 1 && (triggerCode !== undefined
+      || value.assessment_regeneration_trigger_path !== undefined))
+    || (attempts === 2 && (!safeAssessmentAuditCode(triggerCode)
+      || triggerCode !== firstCode
+      || value.assessment_regeneration_trigger_path !== value.assessment_first_validation_path))) {
+    return null;
+  }
+  for (const field of [
+    'assessment_first_validation_path',
+    'assessment_last_validation_path',
+    'assessment_regeneration_trigger_path',
+  ] as const) {
+    const path = value[field];
+    if (path !== undefined && (typeof path !== 'string' || !SAFE_GENERATED_ASSESSMENT_PATH.test(path))) {
+      return null;
+    }
+  }
+  if (!assessmentAuditPathMatchesCode(firstCode, value.assessment_first_validation_path)
+    || !assessmentAuditPathMatchesCode(lastCode, value.assessment_last_validation_path)
+    || (typeof triggerCode === 'string'
+      && !assessmentAuditPathMatchesCode(triggerCode, value.assessment_regeneration_trigger_path))) {
+    return null;
+  }
+  const audit: ManualNewsAssessmentGenerationAudit = {
+    assessment_generation_attempts: attempts,
+    assessment_first_validation_code: firstCode,
+    assessment_last_validation_code: lastCode,
+    ...(typeof value.assessment_first_validation_path === 'string'
+      ? { assessment_first_validation_path: value.assessment_first_validation_path } : {}),
+    ...(typeof value.assessment_last_validation_path === 'string'
+      ? { assessment_last_validation_path: value.assessment_last_validation_path } : {}),
+    ...(typeof triggerCode === 'string'
+      ? { assessment_regeneration_trigger_code: triggerCode } : {}),
+    ...(typeof value.assessment_regeneration_trigger_path === 'string'
+      ? { assessment_regeneration_trigger_path: value.assessment_regeneration_trigger_path } : {}),
+  };
+  return audit;
 }
 
 export function applyManualLeadEvidencePolicy(

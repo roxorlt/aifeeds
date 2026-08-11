@@ -1165,8 +1165,11 @@ describe('manual lead D1-backed dedupe', () => {
         AND from_status = 'verifying' AND to_status = 'clustering'`).get(state.leadId) as { metadata_json: string };
     expect(JSON.parse(audit.metadata_json)).toEqual({
       assessment_generation_attempts: 2,
+      assessment_first_validation_code: 'unknown_evidence_id',
+      assessment_first_validation_path: 'source_facts[0].evidence_ids[0]',
       assessment_last_validation_code: 'valid',
       assessment_regeneration_trigger_code: 'unknown_evidence_id',
+      assessment_regeneration_trigger_path: 'source_facts[0].evidence_ids[0]',
       assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
       assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
       assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
@@ -1210,12 +1213,27 @@ describe('manual lead D1-backed dedupe', () => {
         AND from_status = 'verifying' AND to_status = 'needs_review'`).get(state.leadId) as { metadata_json: string };
     expect(JSON.parse(audit.metadata_json)).toEqual({
       assessment_generation_attempts: 2,
+      assessment_first_validation_code: 'unknown_evidence_id',
+      assessment_first_validation_path: 'source_facts[0].evidence_ids[0]',
       assessment_last_validation_code: 'unknown_evidence_id',
+      assessment_last_validation_path: 'source_facts[0].evidence_ids[0]',
       assessment_regeneration_trigger_code: 'unknown_evidence_id',
+      assessment_regeneration_trigger_path: 'source_facts[0].evidence_ids[0]',
       assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
       assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
       assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
       assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+    });
+    await expect(getManualNewsLead(state.env, state.leadId)).resolves.toMatchObject({
+      assessment_generation: {
+        assessment_generation_attempts: 2,
+        assessment_first_validation_code: 'unknown_evidence_id',
+        assessment_first_validation_path: 'source_facts[0].evidence_ids[0]',
+        assessment_last_validation_code: 'unknown_evidence_id',
+        assessment_last_validation_path: 'source_facts[0].evidence_ids[0]',
+        assessment_regeneration_trigger_code: 'unknown_evidence_id',
+        assessment_regeneration_trigger_path: 'source_facts[0].evidence_ids[0]',
+      },
     });
   });
 
