@@ -127,19 +127,134 @@ function sourceIdentity(urlValue: string): { source_type: ManualEvidenceSourceTy
   return { source_type: 'other', reliable: false, publisher: displayRegistrableDomain(host) };
 }
 
-function decodeHtml(value: string): string {
+const MANUAL_NEWS_EXCERPT_MAX_CHARS = 3_000;
+const MANUAL_NEWS_JSON_LD_MAX_CHARS = 256_000;
+const MANUAL_NEWS_ARTICLE_BODY_MAX_CHARS = 100_000;
+const MANUAL_NEWS_JSON_LD_MAX_DEPTH = 12;
+const MANUAL_NEWS_JSON_LD_MAX_NODES = 1_000;
+
+function decodeHtmlEntities(value: string): string {
+  const named: Record<string, string> = {
+    amp: '&', apos: "'", gt: '>', lt: '<', nbsp: ' ', quot: '"',
+  };
+  return value
+    .replace(/&([a-z]+);/gi, (entity, name: string) => named[name.toLowerCase()] ?? entity)
+    .replace(/&#(\d{1,7});/g, (entity, decimal: string) => {
+      const codePoint = Number(decimal);
+      return Number.isInteger(codePoint) && codePoint > 0 && codePoint <= 0x10ffff
+        ? String.fromCodePoint(codePoint)
+        : entity;
+    })
+    .replace(/&#x([\da-f]{1,6});/gi, (entity, hex: string) => {
+      const codePoint = Number.parseInt(hex, 16);
+      return Number.isInteger(codePoint) && codePoint > 0 && codePoint <= 0x10ffff
+        ? String.fromCodePoint(codePoint)
+        : entity;
+    });
+}
+
+function stripHtmlNonContent(value: string): string {
   return value
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<(noscript|template|svg)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ');
+}
+
+function decodeHtml(value: string): string {
+  const text = stripHtmlNonContent(value)
     .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
     .replace(/\s+/g, ' ')
     .trim();
+  return decodeHtmlEntities(text).replace(/\s+/g, ' ').trim();
+}
+
+function htmlAttribute(attributes: string, name: string): string | null {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = '(?:^|\\s)' + escaped + '\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\'|([^\\s"\'=<>`]+))';
+  const match = new RegExp(pattern, 'i').exec(attributes);
+  return match ? decodeHtmlEntities(match[1] ?? match[2] ?? match[3] ?? '') : null;
+}
+
+function isJsonLdArticleType(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(isJsonLdArticleType);
+  if (typeof value !== 'string') return false;
+  const type = value.trim().toLowerCase().replace(/[#/]$/, '').split(/[#/]/).pop();
+  return type === 'article' || type === 'newsarticle';
+}
+
+function boundedArticleText(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const size = Array.from(value).length;
+  if (size < 20 || size > MANUAL_NEWS_ARTICLE_BODY_MAX_CHARS) return null;
+  const decoded = decodeHtml(value);
+  return Array.from(decoded).length >= 20 ? decoded : null;
+}
+
+function jsonLdArticleBody(value: unknown): string | null {
+  let visited = 0;
+  const visit = (node: unknown, depth: number): string | null => {
+    visited += 1;
+    if (visited > MANUAL_NEWS_JSON_LD_MAX_NODES || depth > MANUAL_NEWS_JSON_LD_MAX_DEPTH) return null;
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const body = visit(item, depth + 1);
+        if (body) return body;
+      }
+      return null;
+    }
+    if (!node || typeof node !== 'object') return null;
+    const record = node as Record<string, unknown>;
+    if (isJsonLdArticleType(record['@type'])) {
+      const body = boundedArticleText(record.articleBody);
+      if (body) return body;
+    }
+    for (const [key, child] of Object.entries(record)) {
+      if (key === 'articleBody' || key === '@context') continue;
+      const body = visit(child, depth + 1);
+      if (body) return body;
+    }
+    return null;
+  };
+  return visit(value, 0);
+}
+
+function extractJsonLdArticleBody(html: string): string | null {
+  const activeHtml = html
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<(noscript|template|svg)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ');
+  const scripts = activeHtml.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi);
+  for (const match of scripts) {
+    const type = htmlAttribute(match[1], 'type')?.split(';', 1)[0].trim().toLowerCase();
+    if (type !== 'application/ld+json') continue;
+    const source = match[2].trim();
+    if (!source || Array.from(source).length > MANUAL_NEWS_JSON_LD_MAX_CHARS) continue;
+    try {
+      const body = jsonLdArticleBody(JSON.parse(source));
+      if (body) return body;
+    } catch {
+      // Invalid structured data is untrusted and falls through to the bounded HTML containers.
+    }
+  }
+  return null;
+}
+
+function longestDecodedElementBody(html: string, tag: 'article' | 'main'): string | null {
+  const candidates: string[] = [];
+  const pattern = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}\\s*>`, 'gi');
+  for (const match of html.matchAll(pattern)) {
+    const body = boundedArticleText(match[1]);
+    if (body) candidates.push(body);
+  }
+  return candidates.sort((left, right) => Array.from(right).length - Array.from(left).length)[0] || null;
+}
+
+function preferredHtmlEvidenceText(html: string): string {
+  const contentHtml = stripHtmlNonContent(html);
+  return extractJsonLdArticleBody(html)
+    || longestDecodedElementBody(contentHtml, 'article')
+    || longestDecodedElementBody(contentHtml, 'main')
+    || decodeHtml(contentHtml);
 }
 
 function normalizedPublishedAt(body: string, hinted: string | null | undefined): string | null {
@@ -181,7 +296,10 @@ export async function extractManualNewsEvidence(
   const html = document.extraction === 'html';
   const titleMatch = html ? /<title[^>]*>([\s\S]*?)<\/title>/i.exec(document.body) : null;
   const title = compact(hint?.title || (titleMatch ? decodeHtml(titleMatch[1]) : ''), 220);
-  const excerpt = compact(html ? decodeHtml(document.body) : document.body, 3_000);
+  const excerpt = compact(
+    html ? preferredHtmlEvidenceText(document.body) : document.body,
+    MANUAL_NEWS_EXCERPT_MAX_CHARS,
+  );
   if (!title && !excerpt) return null;
   return {
     id: await evidenceId(document.url),

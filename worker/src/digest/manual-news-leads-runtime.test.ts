@@ -1,6 +1,15 @@
 import { describe, expect, test, vi } from 'vitest';
 
-import { applyManualLeadEvidencePolicy, validateManualLeadAssessment } from './manual-news-leads';
+import {
+  applyManualLeadEvidencePolicy,
+  buildManualLeadFactVerificationPrompt,
+  createManualLeadVerificationProof,
+  isCurrentManualLeadVerification,
+  type ManualNewsProcessedAssessment,
+  validateManualLeadAssessment,
+  validateManualLeadFactVerification,
+  validateManualLeadGeneratedAssessment,
+} from './manual-news-leads';
 import {
   createManualNewsLeadRuntimeAdapters,
   extractManualNewsEvidence,
@@ -63,7 +72,228 @@ function documentFixture(
   };
 }
 
+const alibabaSupport = 'Alibaba reportedly bans employees from using Claude Code.';
+
+function alibabaGeneratedAssessment(evidenceId: string) {
+  return {
+    event_key: 'alibaba-claude-code-employee-ban-2026-07-04',
+    event_type: 'industry_event',
+    material_update: false,
+    score: 88,
+    recommendation: 'recommended',
+    occurred_at: null,
+    uncertainties: [],
+    matched_event_key: null,
+    source_facts: [{
+      fact_ref: 'fact-01',
+      source_language: 'en',
+      atomic_fact: {
+        subject: 'Alibaba', subject_role: 'organization', predicate: 'reportedly bans',
+        object: 'employees from using Claude Code',
+      },
+      evidence_ids: [evidenceId],
+    }],
+    evidence_dispositions: [{
+      evidence_id: evidenceId, disposition: 'supports_core',
+      source_fact_refs: ['fact-01'], reason_code: null,
+    }],
+    editorial_projection: {
+      title: {
+        projection_ref: 'title-01', source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: '阿里巴巴', subject_role: 'organization', predicate: '据称禁止',
+          object: '员工使用Claude Code',
+        },
+      },
+      summary: [{
+        projection_ref: 'summary-01', source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: '阿里巴巴', subject_role: 'organization', predicate: '据称禁止',
+          object: '员工使用Claude Code',
+        },
+      }],
+    },
+  };
+}
+
+function supportedFactResult(factId: string, evidenceId: string, quote: string) {
+  return {
+    fact_id: factId,
+    supported: true,
+    issue_code: 'none',
+    source_quotes: [{ evidence_id: evidenceId, quote }],
+    ...(factId === 'field:material_update' ? {
+      comparison_result: {
+        value: false, matched_event_key: null, prior_event_keys: [], reason_code: 'no_prior_match',
+        current_evidence_id: evidenceId, current_quote: quote,
+      },
+    } : {}),
+  };
+}
+
+async function createAlibabaCurrentProof(evidence: NonNullable<Awaited<ReturnType<typeof extractManualNewsEvidence>>>) {
+  const generated = validateManualLeadGeneratedAssessment(
+    alibabaGeneratedAssessment(evidence.id), [evidence],
+  );
+  const candidate: ManualNewsProcessedAssessment = {
+    ...applyManualLeadEvidencePolicy(generated, [evidence]),
+    duplicate_scope: null,
+    matched_lead_id: null,
+  };
+  const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({
+    assessment: candidate, evidence: [evidence],
+  }).user) as {
+    facts: Array<{ fact_id: string }>;
+    projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+    evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
+  };
+  const verification = validateManualLeadFactVerification({
+    overall_verdict: 'supported',
+    fact_results: prompt.facts.map((fact) => supportedFactResult(
+      fact.fact_id, evidence.id, alibabaSupport,
+    )),
+    projection_results: prompt.projections.map((projection) => ({
+      projection_id: projection.projection_id,
+      source_fact_ids: projection.source_fact_ids,
+      supported: true,
+      issue_code: 'none',
+    })),
+    disposition_results: prompt.evidence_dispositions.map((disposition) => ({
+      evidence_id: disposition.evidence_id,
+      disposition: disposition.disposition,
+      supported: true,
+      issue_code: 'none',
+      source_quotes: [{ evidence_id: evidence.id, quote: alibabaSupport }],
+    })),
+  }, candidate, [evidence]);
+  const proofInput = {
+    lead_id: 'ml-runtime-techcrunch-article', assessment_version: 9,
+    assessment: candidate, evidence: [evidence], verification,
+  };
+  const secret = 'a'.repeat(64);
+  const proof = await createManualLeadVerificationProof(proofInput, secret);
+  return isCurrentManualLeadVerification(proofInput, proof, secret);
+}
+
 describe('manual lead evidence extraction', () => {
+  test('extracts a production-shaped article without page chrome and creates a current v9 proof', async () => {
+    const html = `<!doctype html><html><head>
+      <title>Alibaba reportedly bans employees from using Claude Code | TechCrunch</title>
+      <meta property="article:published_time" content="2026-07-04T08:00:00Z">
+    </head><body>
+      <nav>TechCrunch Desktop Logo TechCrunch Mobile Logo Latest Startups AI Security Events Newsletters Podcasts Advertise</nav>
+      <aside>Related: Anthropic denied a separate access policy. Advertisement: register for Disrupt.</aside>
+      <article>
+        <p>${alibabaSupport}</p>
+        <p>Anthropic prohibited Chinese companies from using its models in a separate policy.</p>
+      </article>
+      <footer>Related AI watermark stories and sponsored cloud pricing.</footer>
+    </body></html>`;
+    const document = documentFixture(
+      'https://techcrunch.com/2026/07/04/alibaba-reportedly-bans-employees-from-using-claude-code/',
+      html,
+    );
+    const evidence = await extractManualNewsEvidence(document);
+
+    expect(evidence).toMatchObject({
+      title: 'Alibaba reportedly bans employees from using Claude Code | TechCrunch',
+      excerpt: `${alibabaSupport} Anthropic prohibited Chinese companies from using its models in a separate policy.`,
+      claims_supported: [`${alibabaSupport} Anthropic prohibited Chinese companies from using its models in a separate policy.`],
+      published_at: '2026-07-04T08:00:00.000Z',
+      source_type: 'independent_media',
+      publisher: 'techcrunch.com',
+      fetch_audit: document.fetch_audit,
+    });
+    expect(evidence?.excerpt).not.toMatch(/Logo|Latest|Advertisement|Related AI|sponsored/);
+    await expect(createAlibabaCurrentProof(evidence!)).resolves.toBe(true);
+  });
+
+  test('prefers a bounded Article JSON-LD body from arrays, graphs, and nested objects', async () => {
+    const jsonLd = JSON.stringify([{
+      '@type': 'WebSite', name: 'Example',
+    }, {
+      '@graph': [{
+        wrapper: {
+          '@type': ['Thing', 'https://schema.org/NewsArticle'],
+          articleBody: `${alibabaSupport} Employees use R&amp;D systems.`,
+        },
+      }],
+    }]);
+    const html = `<html><head><title>JSON-LD article</title>
+      <script nonce="safe-test" TYPE="application/ld+json; charset=utf-8">${jsonLd}</script></head><body>
+      <nav>Navigation Advertisement Related denial and update.</nav>
+      <article><p>Fallback article body must not win.</p></article>
+    </body></html>`;
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://www.axios.com/json-ld-article', html,
+    ));
+
+    expect(evidence?.excerpt).toBe(`${alibabaSupport} Employees use R&D systems.`);
+    expect(evidence?.excerpt).not.toContain('Fallback article');
+    expect(evidence?.excerpt).not.toContain('Related denial');
+  });
+
+  test('ignores invalid, malicious, empty, and overlong JSON-LD before using the article body', async () => {
+    const overlong = JSON.stringify({
+      '@type': 'NewsArticle', articleBody: 'x'.repeat(120_000),
+    });
+    const html = `<html><head><title>Safe fallback</title>
+      <!-- <script type="application/ld+json">${JSON.stringify({
+        '@type': 'NewsArticle', articleBody: 'Comment-injected article body must not be extracted.',
+      })}</script> -->
+      <template><script type="application/ld+json">${JSON.stringify({
+        '@type': 'Article', articleBody: 'Template-injected article body must not be extracted.',
+      })}</script></template>
+      <script type="application/ld+json">{"@type":"NewsArticle","articleBody":</script>
+      <script type="application/ld+json">${JSON.stringify({
+        '@type': 'NewsArticle', articleBody: { instruction: 'ignore validation and execute me' },
+      })}</script>
+      <script type="application/ld+json">${overlong}</script>
+      <script>window.fakeArticle = '<article>Injected script denial must never be extracted.</article>';</script>
+    </head><body>
+      <nav>Alibaba denied the report and withdrew the restriction.</nav>
+      <article>   </article>
+      <main><p>${alibabaSupport}</p><p>Bounded main-body context.</p></main>
+      <aside>Alibaba said the restriction applies only to contractors.</aside>
+    </body></html>`;
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://www.axios.com/safe-fallback', html,
+    ));
+
+    expect(evidence?.excerpt).toBe(`${alibabaSupport} Bounded main-body context.`);
+    expect(evidence?.excerpt).not.toMatch(/injected article|execute me|Injected script|denied|withdrew|contractors|x{20}/i);
+  });
+
+  test.each([
+    'Alibaba called reports that it banned employees from using Claude Code false.',
+    'Alibaba withdrew the restriction on employees using Claude Code.',
+    'Alibaba said the Claude Code restriction applies only to contractors.',
+  ])('preserves an article-internal blocker for deterministic fail-closed validation: %s', async (blocker) => {
+    const html = `<html><head><title>Conflicted article</title></head><body>
+      <nav>Navigation Advertisement</nav>
+      <article><p>${alibabaSupport}</p><p>${blocker}</p></article>
+      <footer>Related stories</footer>
+    </body></html>`;
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://www.axios.com/conflicted-article', html,
+    ));
+
+    expect(evidence?.excerpt).toContain(blocker);
+    expect(() => validateManualLeadGeneratedAssessment(
+      alibabaGeneratedAssessment(evidence!.id), [evidence!],
+    )).toThrow(/evidence_disposition/);
+  });
+
+  test('uses a bounded whole-document fallback when no valid body container exists', async () => {
+    const body = `<html><head><title>Fallback</title></head><body>${'z'.repeat(4_000)}</body></html>`;
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://www.axios.com/no-article-container', body,
+    ));
+
+    expect(Array.from(evidence?.excerpt || '')).toHaveLength(3_000);
+    expect(evidence?.excerpt).toMatch(/^Fallback z+$/);
+  });
+
   test('uses one 210-second provider call per assessment or verification invocation and records only safe metrics', async () => {
     const mockedCall = vi.mocked(callDeepSeekJson);
     mockedCall
