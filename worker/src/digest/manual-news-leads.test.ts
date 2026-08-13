@@ -27,6 +27,8 @@ import {
 } from './manual-news-leads';
 import {
   TEST_MANUAL_NEWS_RESPONSE_SECRET,
+  testManualNewsResponseKeyring,
+  testManualNewsVerificationKeyring,
   withSignedArticleTextV2Audit,
 } from './manual-news-signed-evidence.test-fixture';
 
@@ -39,7 +41,7 @@ async function createManualLeadVerificationProof(
     mutableEvidence[index] = withSignedArticleTextV2Audit(evidence);
   });
   return createManualLeadVerificationProofWithRawEvidence(
-    input, secret, TEST_MANUAL_NEWS_RESPONSE_SECRET,
+    input, testManualNewsVerificationKeyring(secret), testManualNewsResponseKeyring(),
   );
 }
 
@@ -49,7 +51,7 @@ function isCurrentManualLeadVerification(
   secret: string,
 ) {
   return isCurrentManualLeadVerificationWithResponseSecret(
-    input, proof, secret, TEST_MANUAL_NEWS_RESPONSE_SECRET,
+    input, proof, testManualNewsVerificationKeyring(secret), testManualNewsResponseKeyring(),
   );
 }
 
@@ -5090,9 +5092,16 @@ describe('manual news lead domain', () => {
     };
     const proof = await createManualLeadVerificationProof(input, secret);
 
-    expect(proof).toMatchObject({ canonical_digest: expect.stringMatching(/^[a-f0-9]{64}$/), hmac_sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(proof).toMatchObject({
+      verification_key_id: 'verification-key-2026-08-11',
+      canonical_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      hmac_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
     await expect(isCurrentManualLeadVerification(input, proof, secret)).resolves.toBe(true);
     await expect(isCurrentManualLeadVerification(input, proof, 'b'.repeat(64))).resolves.toBe(false);
+    await expect(isCurrentManualLeadVerification(input, {
+      ...proof, verification_key_id: 'verification-key-removed',
+    }, secret)).resolves.toBe(false);
     const assessmentMutations: ManualNewsProcessedAssessment[] = [
       { ...candidate, title: 'changed' },
       { ...candidate, summary: 'changed' },
@@ -5127,6 +5136,7 @@ describe('manual news lead domain', () => {
         .resolves.toBe(false);
     }
     const evidenceMutations: ManualNewsEvidence[] = [
+      { ...evidence[0], response_key_id: 'response-key-removed' },
       { ...evidence[0], id: 'changed-id' },
       { ...evidence[0], url: 'https://example.com/changed' },
       { ...evidence[0], source_type: 'other' },
@@ -5206,12 +5216,12 @@ describe('manual news lead domain', () => {
     await expect(isCurrentManualLeadVerification({
       ...input, assessment: legacyBilingualContract,
     }, proof, secret)).resolves.toBe(false);
-    await expect(createManualLeadVerificationProof(input, '')).rejects.toThrow(/manual_news_verification_secret_invalid/);
-    await expect(createManualLeadVerificationProof(input, 'too-short')).rejects.toThrow(/manual_news_verification_secret_invalid/);
+    await expect(createManualLeadVerificationProof(input, '')).rejects.toThrow(/manual_news_keys_unavailable/);
+    await expect(createManualLeadVerificationProof(input, 'too-short')).rejects.toThrow(/manual_news_keys_unavailable/);
     await expect(createManualLeadVerificationProof(input, 'verification-test-secret-32-bytes-minimum'))
-      .rejects.toThrow(/manual_news_verification_secret_invalid/);
+      .rejects.toThrow(/manual_news_keys_unavailable/);
     await expect(createManualLeadVerificationProof(input, 'A'.repeat(64)))
-      .rejects.toThrow(/manual_news_verification_secret_invalid/);
+      .rejects.toThrow(/manual_news_keys_unavailable/);
   });
 
   test('uses a conservative exact compound anchor for an ASCII entity plus standalone version', () => {

@@ -209,6 +209,7 @@ export async function extractManualNewsEvidence(
   if (!title && !excerpt) return null;
   return {
     id: await evidenceId(document.url),
+    response_key_id: document.response_key_id,
     url: document.url,
     source_type: identity.source_type,
     publisher: compact(identity.publisher, 120),
@@ -249,11 +250,14 @@ async function searchExistingNews(env: Env, input: { text: string }): Promise<Ma
 
 function researchService(env: Env, fetcher?: TrustedGatewayFetcher): TrustedResearchService | undefined {
   if (!env.MANUAL_NEWS_RESEARCH_ORIGIN || !env.MANUAL_NEWS_RESEARCH_TOKEN
-    || !env.MANUAL_NEWS_RESEARCH_RESPONSE_SECRET) return undefined;
+    || !env.MANUAL_NEWS_RESEARCH_RESPONSE_SECRET
+    || !env.MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID) return undefined;
   return {
     origin: env.MANUAL_NEWS_RESEARCH_ORIGIN,
     token: env.MANUAL_NEWS_RESEARCH_TOKEN,
+    responseKeyId: env.MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID,
     responseSecret: env.MANUAL_NEWS_RESEARCH_RESPONSE_SECRET,
+    responseKeyringJson: env.MANUAL_NEWS_RESEARCH_RESPONSE_KEYRING_JSON,
     ...(fetcher ? { fetcher } : {}),
   };
 }

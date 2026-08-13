@@ -13,6 +13,7 @@ import {
 } from './safe-url-fetch';
 
 const responseSecret = '11'.repeat(32);
+const responseKeyId = 'response-key-2026-08-11';
 const requestNonce = '22'.repeat(16);
 const protocolNow = Date.parse('2026-08-12T00:00:00.000Z');
 const requestTimestamp = new Date(protocolNow).toISOString();
@@ -86,11 +87,18 @@ function proofExcerptClaims(body: string) {
   };
 }
 
-function service(fetcher: typeof fetch, overrides: Partial<TrustedResearchService> = {}): TrustedResearchService {
+function service(
+  fetcher: typeof fetch,
+  overrides: Partial<TrustedResearchService> & {
+    responseKeyId?: string;
+    responseKeyringJson?: string;
+  } = {},
+): TrustedResearchService {
   return {
-    origin: 'https://research-gateway.example', token: 'test-token', responseSecret, fetcher,
+    origin: 'https://research-gateway.example', token: 'test-token',
+    responseKeyId, responseSecret, fetcher,
     protocolNow: () => protocolNow, nonceFactory: () => requestNonce, ...overrides,
-  };
+  } as TrustedResearchService;
 }
 
 function canonicalJson(value: unknown): string {
@@ -211,6 +219,33 @@ const publicHop = (url = 'https://example.com/story') => ({
 });
 
 describe('trusted manual-news research boundary', () => {
+  test('matches a retained response key by ID and returns the matched ID with the bounded document', async () => {
+    const document = await fetchPublicDocument('https://example.com/story', {
+      service: service(async () => gatewayResponse('Signed old-key body.', {
+        hops: [publicHop()], body: 'Signed old-key body.',
+      }) as never, {
+        responseKeyId: 'response-key-2026-09-01',
+        responseSecret: '22'.repeat(32),
+        responseKeyringJson: JSON.stringify([{ id: responseKeyId, secret: responseSecret }]),
+      }),
+    });
+
+    expect(document).toMatchObject({
+      excerpt: 'Signed old-key body.',
+      response_key_id: responseKeyId,
+    });
+  });
+
+  test('rejects a malformed response keyring before issuing a gateway request', async () => {
+    const fetcher = vi.fn(async () => gatewayResponse('unused', { hops: [publicHop()], body: 'unused' }) as never);
+    await expect(fetchPublicDocument('https://example.com/story', {
+      service: service(fetcher, {
+        responseKeyringJson: JSON.stringify([{ id: responseKeyId, secret: responseSecret }]),
+      }),
+    })).rejects.toThrow(/trusted_research_response_keys_unavailable/);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   test.each([
     ['unspecified IPv4', '0.0.0.1'],
     ['private IPv4', '10.2.3.4'],
@@ -492,7 +527,7 @@ describe('trusted manual-news research boundary', () => {
     for (const responseSecretValue of [undefined, '', 'aa', 'AA'.repeat(32)]) {
       await expect(fetchPublicDocument('https://example.com/story', {
         service: service(fetcher as typeof fetch, { responseSecret: responseSecretValue }),
-      })).rejects.toThrow(/trusted_research_response_secret_required/);
+      })).rejects.toThrow(/trusted_research_response_keys_unavailable/);
     }
     expect(fetcher).not.toHaveBeenCalled();
   });

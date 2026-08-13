@@ -24,7 +24,11 @@ import {
   manualNewsProviderDiagnostics,
   manualNewsProviderFailureAudit,
 } from './manual-news-provider';
-import { proofForLegacyPolicy } from './manual-news-signed-evidence.test-fixture';
+import {
+  proofForLegacyPolicy,
+  testManualNewsResponseKeyring,
+  testManualNewsVerificationKeyring,
+} from './manual-news-signed-evidence.test-fixture';
 
 vi.mock('../hf-paper/llm', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../hf-paper/llm')>();
@@ -62,7 +66,11 @@ function createManualLeadVerificationProof(
   secret: string,
   evidenceResponseSecret = responseSecret,
 ) {
-  return createManualLeadVerificationProofWithResponseSecret(input, secret, evidenceResponseSecret);
+  return createManualLeadVerificationProofWithResponseSecret(
+    input,
+    testManualNewsVerificationKeyring(secret),
+    testManualNewsResponseKeyring(evidenceResponseSecret),
+  );
 }
 
 function isCurrentManualLeadVerification(
@@ -72,7 +80,9 @@ function isCurrentManualLeadVerification(
   evidenceResponseSecret = responseSecret,
 ) {
   return isCurrentManualLeadVerificationWithResponseSecret(
-    input, proof, secret, evidenceResponseSecret,
+    input, proof,
+    testManualNewsVerificationKeyring(secret),
+    testManualNewsResponseKeyring(evidenceResponseSecret),
   );
 }
 
@@ -176,6 +186,7 @@ function documentFixture(
   const signedFetchAudit = withResponseHmac(fetchAudit);
   const excerpt = referenceProofExcerpt(body);
   return {
+    response_key_id: 'response-key-2026-08-11',
     url, content_type: contentType, extraction, excerpt, redirects: 0,
     fetch_audit: signedFetchAudit,
     ...(extraction === 'article_text' ? {
@@ -821,6 +832,7 @@ describe('manual lead evidence extraction', () => {
       MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
       MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
       MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
+      MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID: 'response-key-2026-08-11',
     } as never, {
       researchFetcher: async () => new Response(JSON.stringify({ results: [{
         url: 'https://www.axios.com/report', title: 'Independent report', snippet: 'Independent evidence.',
@@ -842,6 +854,7 @@ describe('manual lead evidence extraction', () => {
       MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
       MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
       MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
+      MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID: 'response-key-2026-08-11',
     } as never, { researchFetcher });
 
     await expect(adapters.search({ date: '2026-08-11', text: 'Anthropic watermark', note: '' }))
@@ -859,6 +872,7 @@ describe('manual lead evidence extraction', () => {
       MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
       MANUAL_NEWS_RESEARCH_TOKEN: 'secret-test-token',
       MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
+      MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID: 'response-key-2026-08-11',
     } as never, {
       researchFetcher: async () => {
         throw new TypeError('Illegal invocation for Bearer secret-test-token');
@@ -887,6 +901,7 @@ describe('manual lead evidence extraction', () => {
       MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
       MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
       MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
+      MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID: 'response-key-2026-08-11',
     } as never, {
       researchFetcher: async () => {
         throw new Error(
@@ -927,6 +942,7 @@ describe('manual lead evidence extraction', () => {
       MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
       MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
       MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
+      MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID: 'response-key-2026-08-11',
     } as never, {
       researchFetcher: async () => { throw new Error(unsafeMessage); },
     });
@@ -974,6 +990,7 @@ describe('manual lead evidence extraction', () => {
       MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
       MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
       MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
+      MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID: 'response-key-2026-08-11',
     } as never, { researchFetcher: fetcher });
     const letter = await adapters.extract(await adapters.fetch('https://www.sanders.senate.gov/letter.pdf'));
     const report = await adapters.extract(await adapters.fetch('https://www.axios.com/report'));

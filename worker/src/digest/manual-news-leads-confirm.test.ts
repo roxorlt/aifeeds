@@ -32,6 +32,8 @@ import { confirmManualNewsLeadCandidate } from './manual-news-leads-store';
 import {
   proofForLegacyPolicy,
   TEST_MANUAL_NEWS_RESPONSE_SECRET,
+  testManualNewsResponseKeyring,
+  testManualNewsVerificationKeyring,
   withSignedArticleTextV2Audit,
 } from './manual-news-signed-evidence.test-fixture';
 import {
@@ -101,6 +103,7 @@ async function fakeConfirmationEnv() {
   });
   const evidence = {
     evidence_id: evidenceForMarker.id,
+    response_key_id: evidenceForMarker.response_key_id,
     url: evidenceForMarker.url,
     source_type: evidenceForMarker.source_type,
     publisher: evidenceForMarker.publisher,
@@ -156,7 +159,7 @@ async function fakeConfirmationEnv() {
   const proof = await createManualLeadVerificationProof({
     lead_id: row.id, assessment_version: assessmentVersion, assessment,
     evidence: [evidenceForMarker], verification: factVerification,
-  }, verificationSecret, TEST_MANUAL_NEWS_RESPONSE_SECRET);
+  }, testManualNewsVerificationKeyring(verificationSecret), testManualNewsResponseKeyring());
   const verification: Record<string, any> = {
     verification_id: 'mav-confirm-7',
     lead_id: row.id,
@@ -182,6 +185,22 @@ async function fakeConfirmationEnv() {
         bind(...values: any[]) { binds = values; return stmt; },
         async first() {
           if (sql.includes('manual_lead:by_id')) return { ...row };
+          if (sql.includes('manual_evidence:preflight')) {
+            return {
+              evidence_count: 1,
+              max_evidence_id_bytes: 4,
+              max_response_key_id_bytes: 26,
+              max_url_bytes: 42,
+              max_source_type_bytes: 13,
+              max_publisher_bytes: 9,
+              max_published_at_bytes: 0,
+              max_title_bytes: 13,
+              max_excerpt_code_points: evidenceForMarker.excerpt.length,
+              max_excerpt_bytes: new TextEncoder().encode(evidenceForMarker.excerpt).length,
+              max_claims_bytes: evidence.claims_supported_json.length,
+              max_fetch_audit_bytes: evidence.fetch_audit_json.length,
+            };
+          }
           if (sql.includes('manual_verification:active_assessment')) {
             return verification.status === 'active' ? { ...verification } : null;
           }
@@ -240,7 +259,9 @@ async function fakeConfirmationEnv() {
       DB: db,
       DAILY_NEWS_REVIEW_SECRET: 'secret',
       MANUAL_NEWS_VERIFICATION_SECRET: verificationSecret,
+      MANUAL_NEWS_VERIFICATION_KEY_ID: 'verification-key-2026-08-11',
       MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: TEST_MANUAL_NEWS_RESPONSE_SECRET,
+      MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID: 'response-key-2026-08-11',
     } as never,
     row,
     evidence,

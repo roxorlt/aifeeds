@@ -34,8 +34,11 @@ import {
 import { loadManualNewsEvidence } from './manual-news-leads-verification';
 import { ManualNewsProviderError } from './manual-news-provider';
 import {
+  TEST_MANUAL_NEWS_RESPONSE_KEY_ID,
   proofForLegacyPolicy,
   TEST_MANUAL_NEWS_RESPONSE_SECRET,
+  testManualNewsResponseKeyring,
+  testManualNewsVerificationKeyring,
   withSignedArticleTextV2Audit,
 } from './manual-news-signed-evidence.test-fixture';
 
@@ -43,6 +46,9 @@ class SqliteD1 {
   readonly sqlite = new DatabaseSync(':memory:');
   failAudit = false;
   failAssessmentInvalidate = false;
+  failQuarantineAudit = false;
+  rejectEvidenceBlobMaterialization = false;
+  readonly preparedSql: string[] = [];
   private batchTail: Promise<void> = Promise.resolve();
   private nextBatchGate: { entered: () => void; released: Promise<void> } | null = null;
   private nextFirstGate: { marker: string; entered: () => void; released: Promise<void> } | null = null;
@@ -66,7 +72,9 @@ class SqliteD1 {
         confirmed_batch_id TEXT, confirmed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       );
       CREATE TABLE manual_news_evidence (
-        lead_id TEXT NOT NULL, evidence_id TEXT NOT NULL, url TEXT NOT NULL, source_type TEXT NOT NULL,
+        lead_id TEXT NOT NULL, evidence_id TEXT NOT NULL,
+        response_key_id TEXT NOT NULL DEFAULT 'response-key-2026-08-11',
+        url TEXT NOT NULL, source_type TEXT NOT NULL,
         publisher TEXT NOT NULL, published_at TEXT, retrieved_at INTEGER NOT NULL, title TEXT NOT NULL,
         excerpt TEXT NOT NULL, claims_supported_json TEXT NOT NULL, fetch_audit_json TEXT NOT NULL DEFAULT 'null',
         reliable INTEGER NOT NULL,
@@ -82,7 +90,9 @@ class SqliteD1 {
         ON manual_news_event_assessments(event_key, created_at DESC);
       CREATE TABLE manual_news_assessment_verifications (
         verification_id TEXT PRIMARY KEY, lead_id TEXT NOT NULL, assessment_version INTEGER NOT NULL,
-        policy_version TEXT NOT NULL, canonical_digest TEXT NOT NULL, hmac_sha256 TEXT NOT NULL,
+        policy_version TEXT NOT NULL,
+        verification_key_id TEXT NOT NULL DEFAULT 'verification-key-2026-08-11',
+        canonical_digest TEXT NOT NULL, hmac_sha256 TEXT NOT NULL,
         verification_json TEXT NOT NULL, processing_owner TEXT NOT NULL,
         processing_attempt INTEGER NOT NULL, creation_nonce TEXT NOT NULL UNIQUE,
         invalidation_nonce TEXT UNIQUE,
@@ -129,6 +139,7 @@ class SqliteD1 {
   }
 
   prepare(sql: string) {
+    this.preparedSql.push(sql);
     let bindings: SQLInputValue[] = [];
     const statement = this.sqlite.prepare(sql);
     const prepared = {
@@ -152,11 +163,19 @@ class SqliteD1 {
         }
         return (statement.get(...bindings) as T | undefined) ?? null;
       },
-      all: async <T>() => ({ results: statement.all(...bindings) as T[], success: true, meta: {} }),
+      all: async <T>() => {
+        if (this.rejectEvidenceBlobMaterialization && sql.includes('manual_evidence:list')) {
+          throw new Error('evidence_blob_materialized');
+        }
+        return { results: statement.all(...bindings) as T[], success: true, meta: {} };
+      },
       run: async () => {
         if (this.failAudit && sql.includes('manual_audit:mutation')) throw new Error('injected_audit_failure');
         if (this.failAssessmentInvalidate && sql.includes('manual_verification:invalidate')) {
           throw new Error('injected_invalidate_failure');
+        }
+        if (this.failQuarantineAudit && sql.includes('manual_verification:quarantine_audit')) {
+          throw new Error('injected_quarantine_audit_failure');
         }
         const result = statement.run(...bindings);
         return { success: true, meta: { changes: Number(result.changes) } };
@@ -228,6 +247,7 @@ afterEach(() => {
 
 const PROCESSING_OWNER = 'manual-news-test-owner';
 const VERIFICATION_SECRET = 'a'.repeat(64);
+const VERIFICATION_KEY_ID = 'verification-key-2026-08-11';
 
 function fixture(status = 'verifying', version = 4, processingOwner: string | null = PROCESSING_OWNER) {
   const db = new SqliteD1();
@@ -254,7 +274,9 @@ function fixture(status = 'verifying', version = 4, processingOwner: string | nu
     env: {
       DB: db as unknown as D1Database,
       MANUAL_NEWS_VERIFICATION_SECRET: VERIFICATION_SECRET,
+      MANUAL_NEWS_VERIFICATION_KEY_ID: VERIFICATION_KEY_ID,
       MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: TEST_MANUAL_NEWS_RESPONSE_SECRET,
+      MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID: TEST_MANUAL_NEWS_RESPONSE_KEY_ID,
     } as Env,
     leadId,
   };
@@ -416,7 +438,9 @@ function allowDuplicatePersistedEvidenceIds(state: ReturnType<typeof fixture>): 
   state.db.sqlite.exec(`
     ALTER TABLE manual_news_evidence RENAME TO manual_news_evidence_unique;
     CREATE TABLE manual_news_evidence (
-      lead_id TEXT NOT NULL, evidence_id TEXT NOT NULL, url TEXT NOT NULL, source_type TEXT NOT NULL,
+      lead_id TEXT NOT NULL, evidence_id TEXT NOT NULL,
+      response_key_id TEXT NOT NULL DEFAULT 'response-key-2026-08-11',
+      url TEXT NOT NULL, source_type TEXT NOT NULL,
       publisher TEXT NOT NULL, published_at TEXT, retrieved_at INTEGER NOT NULL, title TEXT NOT NULL,
       excerpt TEXT NOT NULL, claims_supported_json TEXT NOT NULL, fetch_audit_json TEXT NOT NULL DEFAULT 'null',
       reliable INTEGER NOT NULL
@@ -873,11 +897,12 @@ describe('manual lead D1-backed dedupe', () => {
       verification: verifiedAssessment(candidate),
     };
     const proof = await createManualLeadVerificationProof(
-      proofInput, VERIFICATION_SECRET, TEST_MANUAL_NEWS_RESPONSE_SECRET,
+      proofInput, testManualNewsVerificationKeyring(VERIFICATION_SECRET), testManualNewsResponseKeyring(),
     );
     expect(JSON.stringify(proof)).not.toContain('COMPLETE-BODY-TAIL-SENTINEL');
     await expect(isCurrentManualLeadVerification(
-      proofInput, proof, VERIFICATION_SECRET, TEST_MANUAL_NEWS_RESPONSE_SECRET,
+      proofInput, proof,
+      testManualNewsVerificationKeyring(VERIFICATION_SECRET), testManualNewsResponseKeyring(),
     )).resolves.toBe(true);
   });
 
@@ -999,6 +1024,135 @@ describe('manual lead D1-backed dedupe', () => {
     });
     await expect(store.findPriorEventsByEventKey(processedAssessment().event_key, 'other-lead'))
       .resolves.toEqual([]);
+  });
+
+  test.each([
+    ['many rows', (state: ReturnType<typeof fixture>) => {
+      for (let index = 2; index <= 64; index += 1) {
+        insertPersistedEvidenceCopy(
+          state, `ev-many-${index}`, `https://support.claude.com/many-${index}`,
+        );
+      }
+    }],
+    ['multi-megabyte legacy column', (state: ReturnType<typeof fixture>) => {
+      state.db.sqlite.prepare(`UPDATE manual_news_evidence SET claims_supported_json = ?
+        WHERE lead_id = ?`).run(`"${'X'.repeat(2 * 1024 * 1024)}"`, state.leadId);
+    }],
+  ] as const)('preflights %s and quarantines without materializing evidence blobs', async (_name, corrupt) => {
+    const state = fixture('verifying', 9);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    await saveFixtureAssessment(store, state.leadId, 9);
+    addPublishedManualItem(state);
+    corrupt(state);
+    state.db.preparedSql.length = 0;
+    state.db.rejectEvidenceBlobMaterialization = true;
+
+    await expect(loadManualNewsEvidence(state.env, state.leadId)).resolves.toEqual([]);
+
+    expect(state.db.preparedSql.some((sql) => sql.includes('manual_evidence:preflight'))).toBe(true);
+    expect(state.db.preparedSql.some((sql) => sql.includes('manual_evidence:list'))).toBe(false);
+    expect(state.db.sqlite.prepare(`SELECT status, reason FROM manual_news_assessment_verifications
+      WHERE lead_id = ?`).get(state.leadId)).toEqual({
+      status: 'invalidated', reason: 'verification_integrity_invalid',
+    });
+    expect(state.db.sqlite.prepare('SELECT deleted_at FROM items WHERE id = ?')
+      .get(`blog:manual:${state.leadId}`)).toEqual({ deleted_at: expect.any(String) });
+  });
+
+  test.each(['detail', 'confirm', 'prior-event'] as const)(
+    '%s boundary preflights an overcount and quarantines without materializing evidence',
+    async (boundary) => {
+      const state = fixture('verifying', 9);
+      const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+      await saveFixtureAssessment(store, state.leadId, 9);
+      addPublishedManualItem(state);
+      for (let index = 2; index <= 9; index += 1) {
+        insertPersistedEvidenceCopy(
+          state, `ev-${boundary}-${index}`, `https://support.claude.com/${boundary}-${index}`,
+        );
+      }
+      state.db.preparedSql.length = 0;
+      state.db.rejectEvidenceBlobMaterialization = true;
+      const apiEnv = {
+        ...state.env,
+        DAILY_NEWS_REVIEW_SECRET: 'shared-secret',
+        DAILY_NEWS_REVIEW_ENABLED: '1',
+      } as Env;
+
+      if (boundary === 'detail') {
+        const result = await handleManualNewsLeadsApi(new Request(
+          `https://api.example.test/api/digest/daily-news-leads/${state.leadId}`,
+          { headers: { Authorization: 'Bearer shared-secret' } },
+        ), apiEnv, { waitUntil() {} } as never);
+        expect(result.status).toBe(200);
+        await expect(result.json()).resolves.toMatchObject({
+          lead: { assessment: null, evidence: [] },
+        });
+      } else if (boundary === 'confirm') {
+        const result = await handleManualNewsLeadsApi(new Request(
+          `https://api.example.test/api/digest/daily-news-leads/${state.leadId}/confirm-candidate`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: 'Bearer shared-secret', 'Content-Type': 'application/json',
+              'Idempotency-Key': 'confirm-preflight-overcount',
+            },
+            body: JSON.stringify({ expected_version: 9, expected_batch_revision: 0 }),
+          },
+        ), apiEnv, { waitUntil() {} } as never);
+        expect(result.status).toBe(409);
+        await expect(result.json()).resolves.toMatchObject({ error: 'lead_not_fact_verified' });
+      } else {
+        await expect(store.findPriorEventsByEventKey(
+          processedAssessment().event_key, 'different-lead',
+        )).resolves.toEqual([]);
+      }
+
+      expect(state.db.preparedSql.some((sql) => sql.includes('manual_evidence:preflight'))).toBe(true);
+      expect(state.db.preparedSql.some((sql) => sql.includes('manual_evidence:list'))).toBe(false);
+      expect(state.db.sqlite.prepare(`SELECT status, reason FROM manual_news_assessment_verifications
+        WHERE lead_id = ?`).get(state.leadId)).toEqual({
+        status: 'invalidated', reason: 'verification_integrity_invalid',
+      });
+      expect(state.db.sqlite.prepare('SELECT deleted_at FROM items WHERE id = ?')
+        .get(`blog:manual:${state.leadId}`)).toEqual({ deleted_at: expect.any(String) });
+    },
+  );
+
+  test('materializes at most nine bounded evidence rows after a successful preflight', async () => {
+    const state = fixture();
+
+    await expect(loadManualNewsEvidence(state.env, state.leadId)).resolves.toHaveLength(1);
+
+    const listSql = state.db.preparedSql.find((sql) => sql.includes('manual_evidence:list')) || '';
+    expect(listSql).toMatch(/LIMIT\s+9\b/i);
+    expect(listSql).not.toContain('SELECT *');
+  });
+
+  test('rolls back the entire preflight quarantine when its causal audit write fails', async () => {
+    const state = fixture('verifying', 9);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    await saveFixtureAssessment(store, state.leadId, 9);
+    addPublishedManualItem(state);
+    for (let index = 2; index <= 9; index += 1) {
+      insertPersistedEvidenceCopy(
+        state, `ev-rollback-${index}`, `https://support.claude.com/rollback-${index}`,
+      );
+    }
+    state.db.rejectEvidenceBlobMaterialization = true;
+    state.db.failQuarantineAudit = true;
+
+    await expect(loadManualNewsEvidence(state.env, state.leadId))
+      .rejects.toThrow(/injected_quarantine_audit_failure/);
+
+    expect(state.db.sqlite.prepare(`SELECT status, reason, invalidation_nonce
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId)).toEqual({
+      status: 'active', reason: null, invalidation_nonce: null,
+    });
+    expect(state.db.sqlite.prepare('SELECT deleted_at FROM items WHERE id = ?')
+      .get(`blog:manual:${state.leadId}`)).toEqual({ deleted_at: null });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'verification_quarantine'`).get(state.leadId)).toEqual({ count: 0 });
   });
 
   test('quarantines a real legacy claims body and keeps mutation responses bounded', async () => {
@@ -1446,13 +1600,144 @@ describe('manual lead D1-backed dedupe', () => {
     ).get(state.leadId)).toEqual({ count: 0 });
   });
 
+  test('loads historical response and proof keys only by their retained explicit IDs', async () => {
+    const state = fixture('verifying', 9);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    await saveFixtureAssessment(store, state.leadId, 9);
+    const rotatedEnv = {
+      ...state.env,
+      MANUAL_NEWS_VERIFICATION_KEY_ID: 'verification-key-2026-09-01',
+      MANUAL_NEWS_VERIFICATION_SECRET: 'b'.repeat(64),
+      MANUAL_NEWS_VERIFICATION_KEYRING_JSON: JSON.stringify([
+        { id: VERIFICATION_KEY_ID, secret: VERIFICATION_SECRET },
+      ]),
+      MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID: 'response-key-2026-09-01',
+      MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '22'.repeat(32),
+      MANUAL_NEWS_RESEARCH_RESPONSE_KEYRING_JSON: JSON.stringify([
+        { id: TEST_MANUAL_NEWS_RESPONSE_KEY_ID, secret: TEST_MANUAL_NEWS_RESPONSE_SECRET },
+      ]),
+    } as Env;
+
+    const loaded = await new D1ManualLeadProcessingStore(rotatedEnv).getLead(state.leadId);
+
+    expect(loaded?.assessment).not.toBeNull();
+    expect(state.db.sqlite.prepare(`SELECT status, reason FROM manual_news_assessment_verifications
+      WHERE lead_id = ?`).get(state.leadId)).toEqual({ status: 'active', reason: null });
+  });
+
+  test.each([
+    ['verification key', (env: Env) => ({
+      ...env,
+      MANUAL_NEWS_VERIFICATION_KEY_ID: 'verification-key-2026-09-01',
+      MANUAL_NEWS_VERIFICATION_SECRET: 'b'.repeat(64),
+    })],
+    ['response key', (env: Env) => ({
+      ...env,
+      MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID: 'response-key-2026-09-01',
+      MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '22'.repeat(32),
+    })],
+  ] as const)('hides a removed historical %s without mutating durable state', async (_name, removeKey) => {
+    const state = fixture('verifying', 9);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    await saveFixtureAssessment(store, state.leadId, 9);
+    addPublishedManualItem(state);
+
+    expect((await new D1ManualLeadProcessingStore(removeKey(state.env) as Env)
+      .getLead(state.leadId))?.assessment).toBeNull();
+    expect(state.db.sqlite.prepare(`SELECT status, reason, invalidation_nonce
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId)).toEqual({
+      status: 'active', reason: null, invalidation_nonce: null,
+    });
+    expect(state.db.sqlite.prepare('SELECT deleted_at FROM items WHERE id = ?')
+      .get(`blog:manual:${state.leadId}`)).toEqual({ deleted_at: null });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'verification_quarantine'`).get(state.leadId)).toEqual({ count: 0 });
+  });
+
+  test('unknown key lineage takes dependency-unavailable precedence over malformed evidence bounds', async () => {
+    const state = fixture('verifying', 9);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    await saveFixtureAssessment(store, state.leadId, 9);
+    addPublishedManualItem(state);
+    state.db.sqlite.prepare(`UPDATE manual_news_evidence
+      SET claims_supported_json = ? WHERE lead_id = ?`)
+      .run(`"${'X'.repeat(2 * 1024 * 1024)}"`, state.leadId);
+    for (let index = 2; index <= 9; index += 1) {
+      insertPersistedEvidenceCopy(
+        state, `ev-known-${index}`, `https://support.claude.com/known-${index}`,
+      );
+    }
+    state.db.sqlite.prepare(`UPDATE manual_news_evidence
+      SET response_key_id = 'response-key-removed' WHERE evidence_id = 'ev-known-9'`).run();
+    state.db.rejectEvidenceBlobMaterialization = true;
+
+    await expect(loadManualNewsEvidence(state.env, state.leadId)).resolves.toEqual([]);
+
+    expect(state.db.sqlite.prepare(`SELECT status, reason, invalidation_nonce
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId)).toEqual({
+      status: 'active', reason: null, invalidation_nonce: null,
+    });
+    expect(state.db.sqlite.prepare('SELECT deleted_at FROM items WHERE id = ?')
+      .get(`blog:manual:${state.leadId}`)).toEqual({ deleted_at: null });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'verification_quarantine'`).get(state.leadId)).toEqual({ count: 0 });
+  });
+
+  test.each([
+    ['missing current key ID', (env: Env) => ({ ...env, MANUAL_NEWS_VERIFICATION_KEY_ID: undefined })],
+    ['missing current secret', (env: Env) => ({ ...env, MANUAL_NEWS_VERIFICATION_SECRET: undefined })],
+    ['malformed keyring', (env: Env) => ({
+      ...env,
+      MANUAL_NEWS_VERIFICATION_KEYRING_JSON: JSON.stringify([
+        { id: VERIFICATION_KEY_ID, secret: VERIFICATION_SECRET },
+      ]),
+    })],
+  ] as const)('treats %s as unavailable and never quarantines', async (_name, configure) => {
+    const state = fixture('verifying', 9);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    await saveFixtureAssessment(store, state.leadId, 9);
+    addPublishedManualItem(state);
+
+    const loaded = await new D1ManualLeadProcessingStore(configure(state.env) as Env).getLead(state.leadId);
+
+    expect(loaded?.assessment).toBeNull();
+    expect(state.db.sqlite.prepare(`SELECT status, reason, invalidation_nonce
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId)).toEqual({
+      status: 'active', reason: null, invalidation_nonce: null,
+    });
+    expect(state.db.sqlite.prepare('SELECT deleted_at FROM items WHERE id = ?')
+      .get(`blog:manual:${state.leadId}`)).toEqual({ deleted_at: null });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'verification_quarantine'`).get(state.leadId)).toEqual({ count: 0 });
+  });
+
+  test('quarantines a known response key whose persisted HMAC is cryptographically invalid', async () => {
+    const state = fixture('verifying', 9);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    await saveFixtureAssessment(store, state.leadId, 9);
+    addPublishedManualItem(state);
+    const audit = JSON.parse(String(state.db.sqlite.prepare(`SELECT fetch_audit_json
+      FROM manual_news_evidence WHERE lead_id = ?`).get(state.leadId)!.fetch_audit_json));
+    audit.response_hmac = '0'.repeat(64);
+    state.db.sqlite.prepare(`UPDATE manual_news_evidence SET fetch_audit_json = ? WHERE lead_id = ?`)
+      .run(JSON.stringify(audit), state.leadId);
+
+    expect((await store.getLead(state.leadId))?.assessment).toBeNull();
+    expect(state.db.sqlite.prepare(`SELECT status, reason FROM manual_news_assessment_verifications
+      WHERE lead_id = ?`).get(state.leadId)).toEqual({
+      status: 'invalidated', reason: 'verification_integrity_invalid',
+    });
+    expect(state.db.sqlite.prepare('SELECT deleted_at FROM items WHERE id = ?')
+      .get(`blog:manual:${state.leadId}`)).toEqual({ deleted_at: expect.any(String) });
+  });
+
   test('fails closed when verification secret or HMAC is invalid', async () => {
     const state = fixture('verifying', 9);
     const missingSecret = { ...state.env, MANUAL_NEWS_VERIFICATION_SECRET: undefined } as Env;
     await expect(saveFixtureAssessment(
       new D1ManualLeadProcessingStore(missingSecret, PROCESSING_OWNER, 1), state.leadId, 9,
     ))
-      .rejects.toThrow(/manual_news_verification_secret_invalid/);
+      .rejects.toThrow(/manual_news_verification_keys_unavailable/);
     expect(state.db.sqlite.prepare(
       'SELECT COUNT(*) AS count FROM manual_news_event_assessments WHERE lead_id = ?',
     ).get(state.leadId)).toEqual({ count: 0 });
@@ -1463,6 +1748,10 @@ describe('manual lead D1-backed dedupe', () => {
       ...state.env, MANUAL_NEWS_VERIFICATION_SECRET: 'b'.repeat(64),
     } as Env);
     expect((await rotatedSecretStore.getLead(state.leadId))?.assessment).toBeNull();
+    expect(state.db.sqlite.prepare(`SELECT status, reason FROM manual_news_assessment_verifications
+      WHERE lead_id = ?`).get(state.leadId)).toEqual({
+      status: 'invalidated', reason: 'verification_integrity_invalid',
+    });
     state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications SET hmac_sha256 = ?
       WHERE lead_id = ?`).run('0'.repeat(64), state.leadId);
     expect((await store.getLead(state.leadId))?.assessment).toBeNull();

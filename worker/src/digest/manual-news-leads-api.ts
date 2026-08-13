@@ -1,5 +1,9 @@
 import type { Env } from '../index';
 import {
+  manualNewsResponseKeyring,
+  manualNewsVerificationKeyring,
+} from '../security/manual-news-keyring';
+import {
   confirmManualNewsLeadCandidate,
   getManualNewsLead,
   getManualNewsLeadCandidateState,
@@ -11,10 +15,7 @@ import {
   submitManualNewsLead,
 } from './manual-news-leads-store';
 import { newsReviewSecret } from './news-review';
-import {
-  isManualNewsVerificationSecretConfigured,
-  type ManualNewsEvidence,
-} from './manual-news-leads';
+import type { ManualNewsEvidence } from './manual-news-leads';
 import type { ManualNewsLeadRecord, ManualNewsLeadSummary } from './manual-news-leads-pipeline';
 
 const MAX_BODY_BYTES = 16 * 1024;
@@ -67,6 +68,8 @@ function manualNewsEvidenceDetail(item: ManualNewsEvidence) {
 
 function manualNewsLeadDetail(lead: ManualNewsLeadRecord) {
   return {
+    response_profile: 'manual_news_lead_detail_v1' as const,
+    schema_version: 1 as const,
     ...manualNewsLeadBase(lead),
     ...(lead.assessment_generation ? { assessment_generation: lead.assessment_generation } : {}),
     ...(lead.provider_failure ? { provider_failure: lead.provider_failure } : {}),
@@ -104,14 +107,19 @@ function scheduleLeadProcessing(
 }
 
 function processingDependenciesAvailable(env: Env): boolean {
-  return Boolean(
+  if (!(
     env.MANUAL_NEWS_LEAD_WORKFLOW
     && env.MANUAL_NEWS_RESEARCH_ORIGIN
     && env.MANUAL_NEWS_RESEARCH_TOKEN
-    && /^[a-f0-9]{64}$/.test(env.MANUAL_NEWS_RESEARCH_RESPONSE_SECRET || '')
     && env.DEEPSEEK_API_KEY
-    && isManualNewsVerificationSecretConfigured(env.MANUAL_NEWS_VERIFICATION_SECRET),
-  );
+  )) return false;
+  try {
+    manualNewsResponseKeyring(env);
+    manualNewsVerificationKeyring(env);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function response(payload: unknown, status = 200): Response {
@@ -206,7 +214,12 @@ async function handleManualNewsLeadsApiInternal(
         getManualNewsLeadCandidateState(env, date),
       ]);
       return response({
-        ok: true, date, leads: leads.slice(0, 50).map(manualNewsLeadSummary), candidate_batch: candidateBatch,
+        ok: true,
+        response_profile: 'manual_news_leads_summary_v1',
+        schema_version: 1,
+        date,
+        leads: leads.slice(0, 50).map(manualNewsLeadSummary),
+        candidate_batch: candidateBatch,
       });
     }
     if (request.method !== 'POST') return response({ ok: false, error: 'method_not_allowed' }, 405);

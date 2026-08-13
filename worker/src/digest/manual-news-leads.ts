@@ -4,6 +4,7 @@ import {
   verifyDocumentFetchAuditResponseHmac,
   type DocumentFetchAudit,
 } from '../security/safe-url-fetch';
+import type { ManualNewsKeyring } from '../security/manual-news-keyring';
 
 export const MANUAL_NEWS_LEAD_STATUSES = [
   'submitted', 'validating', 'researching', 'extracting', 'verifying', 'clustering', 'scored',
@@ -23,6 +24,7 @@ export type ManualEvidenceSourceType =
 
 export interface ManualNewsEvidence {
   id: string;
+  response_key_id?: string;
   url: string;
   source_type: ManualEvidenceSourceType;
   publisher: string;
@@ -181,6 +183,7 @@ export interface ManualNewsProcessedAssessment extends ManualNewsLeadAssessment 
 
 export interface ManualLeadVerificationProof {
   policy_version: typeof MANUAL_LEAD_VERIFICATION_POLICY_VERSION;
+  verification_key_id: string;
   canonical_digest: string;
   hmac_sha256: string;
 }
@@ -5690,6 +5693,7 @@ function canonicalVerificationPayload(
 function canonicalEvidence(evidence: readonly ManualNewsEvidence[]) {
   return [...evidence].sort((left, right) => left.id.localeCompare(right.id)).map((item) => ({
     id: item.id,
+    response_key_id: item.response_key_id ?? null,
     url: item.url,
     source_type: item.source_type,
     publisher: item.publisher,
@@ -5936,9 +5940,14 @@ function normalizedSignedEvidenceProvenance(item: ManualNewsEvidence): DocumentF
 function canonicalProofEvidence(evidence: readonly ManualNewsEvidence[]) {
   if (!evidence.length) return invalidManualNewsEvidenceProvenance();
   return [...evidence].sort((left, right) => left.id.localeCompare(right.id)).map((item) => {
+    if (typeof item.response_key_id !== 'string'
+      || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(item.response_key_id)) {
+      return invalidManualNewsEvidenceProvenance();
+    }
     const provenance = normalizedSignedEvidenceProvenance(item);
     return {
       id: item.id,
+      response_key_id: item.response_key_id,
       url: item.url,
       source_type: item.source_type,
       publisher: item.publisher,
@@ -5979,14 +5988,14 @@ export function assertManualNewsEvidenceSet(evidence: readonly ManualNewsEvidenc
 
 async function assertManualNewsEvidenceBodyDigests(
   evidence: readonly ManualNewsEvidence[],
-  responseSecret: string,
+  responseKeys: ManualNewsKeyring,
 ): Promise<void> {
-  if (!/^[a-f0-9]{64}$/.test(responseSecret)) {
-    throw new Error('manual_news_research_response_secret_invalid');
-  }
   assertManualNewsEvidenceSet(evidence);
   for (const item of evidence) {
     const provenance = normalizedSignedEvidenceProvenance(item);
+    const responseSecret = typeof item.response_key_id === 'string'
+      ? responseKeys.keys.get(item.response_key_id) : undefined;
+    if (!responseSecret) throw new Error('manual_news_response_key_unavailable');
     if (!await verifyDocumentFetchAuditResponseHmac(provenance, responseSecret)) {
       throw new Error('manual_news_evidence_response_hmac_invalid');
     }
@@ -6041,10 +6050,11 @@ export async function createManualLeadVerificationProof(
     evidence: readonly ManualNewsEvidence[];
     verification: ManualLeadFactVerification;
   },
-  secret: string,
-  responseSecret: string,
+  verificationKeys: ManualNewsKeyring,
+  responseKeys: ManualNewsKeyring,
 ): Promise<ManualLeadVerificationProof> {
-  assertVerificationSecret(secret);
+  const verificationSecret = verificationKeys.keys.get(verificationKeys.currentKeyId);
+  if (!verificationSecret) throw new Error('manual_news_verification_keys_unavailable');
   if (input.assessment.generated_claim_contract !== MANUAL_LEAD_GENERATED_CLAIM_CONTRACT
     || input.assessment.source_fact_contract !== MANUAL_LEAD_SOURCE_FACT_CONTRACT
     || input.assessment.editorial_projection_contract !== MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT
@@ -6057,17 +6067,19 @@ export async function createManualLeadVerificationProof(
     || !input.verification.completeness_results?.length) {
     throw new Error('manual_news_verification_contract_invalid');
   }
-  await assertManualNewsEvidenceBodyDigests(input.evidence, responseSecret);
+  await assertManualNewsEvidenceBodyDigests(input.evidence, responseKeys);
   const canonicalDigest = await sha256Hex(canonicalVerificationPayload(
     input.assessment, input.evidence, input.verification,
   ));
   const hmacPayload = [
-    MANUAL_LEAD_VERIFICATION_POLICY_VERSION, input.lead_id, String(input.assessment_version), canonicalDigest,
+    MANUAL_LEAD_VERIFICATION_POLICY_VERSION, verificationKeys.currentKeyId,
+    input.lead_id, String(input.assessment_version), canonicalDigest,
   ].join('\n');
   return {
     policy_version: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+    verification_key_id: verificationKeys.currentKeyId,
     canonical_digest: canonicalDigest,
-    hmac_sha256: await hmacSha256Hex(secret, hmacPayload),
+    hmac_sha256: await hmacSha256Hex(verificationSecret, hmacPayload),
   };
 }
 
@@ -6089,25 +6101,36 @@ export async function isCurrentManualLeadVerification(
     verification: ManualLeadFactVerification;
   },
   proof: unknown,
-  secret: string,
-  responseSecret: string,
+  verificationKeys: ManualNewsKeyring,
+  responseKeys: ManualNewsKeyring,
 ): Promise<boolean> {
-  assertVerificationSecret(secret);
   if (!isPlainObject(proof)
-    || Object.keys(proof).length !== 3
+    || Object.keys(proof).length !== 4
     || proof.policy_version !== MANUAL_LEAD_VERIFICATION_POLICY_VERSION
+    || typeof proof.verification_key_id !== 'string'
+    || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(proof.verification_key_id)
     || typeof proof.canonical_digest !== 'string'
     || !/^[a-f0-9]{64}$/.test(proof.canonical_digest)
     || typeof proof.hmac_sha256 !== 'string'
     || !/^[a-f0-9]{64}$/.test(proof.hmac_sha256)) return false;
-  let expected: ManualLeadVerificationProof;
+  const verificationSecret = verificationKeys.keys.get(proof.verification_key_id);
+  if (!verificationSecret) return false;
+  let canonicalDigest: string;
   try {
-    expected = await createManualLeadVerificationProof(input, secret, responseSecret);
+    await assertManualNewsEvidenceBodyDigests(input.evidence, responseKeys);
+    canonicalDigest = await sha256Hex(canonicalVerificationPayload(
+      input.assessment, input.evidence, input.verification,
+    ));
   } catch {
     return false;
   }
-  return constantTimeHexEqual(proof.canonical_digest, expected.canonical_digest)
-    && constantTimeHexEqual(proof.hmac_sha256, expected.hmac_sha256);
+  const hmacPayload = [
+    MANUAL_LEAD_VERIFICATION_POLICY_VERSION, proof.verification_key_id,
+    input.lead_id, String(input.assessment_version), canonicalDigest,
+  ].join('\n');
+  const expectedHmac = await hmacSha256Hex(verificationSecret, hmacPayload);
+  return constantTimeHexEqual(proof.canonical_digest, canonicalDigest)
+    && constantTimeHexEqual(proof.hmac_sha256, expectedHmac);
 }
 
 const ASSESSMENT_VALIDATION_ERROR_CODES = new Set([

@@ -1,8 +1,25 @@
 import { createHash, createHmac } from 'node:crypto';
 
 import type { ManualNewsEvidence, ManualLeadVerificationProof } from './manual-news-leads';
+import { parseManualNewsKeyring } from '../security/manual-news-keyring';
 
 export const TEST_MANUAL_NEWS_RESPONSE_SECRET = '11'.repeat(32);
+export const TEST_MANUAL_NEWS_RESPONSE_KEY_ID = 'response-key-2026-08-11';
+export const TEST_MANUAL_NEWS_VERIFICATION_KEY_ID = 'verification-key-2026-08-11';
+
+export function testManualNewsResponseKeyring(
+  secret = TEST_MANUAL_NEWS_RESPONSE_SECRET,
+  keyId = TEST_MANUAL_NEWS_RESPONSE_KEY_ID,
+) {
+  return parseManualNewsKeyring({ keyId, secret });
+}
+
+export function testManualNewsVerificationKeyring(
+  secret: string,
+  keyId = TEST_MANUAL_NEWS_VERIFICATION_KEY_ID,
+) {
+  return parseManualNewsKeyring({ keyId, secret });
+}
 
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
@@ -14,7 +31,10 @@ function canonicalJson(value: unknown): string {
 export function withSignedArticleTextV2Audit<T extends ManualNewsEvidence>(
   evidence: T,
   completeBody = evidence.excerpt,
-): T & { fetch_audit: NonNullable<ManualNewsEvidence['fetch_audit']> } {
+): T & {
+  response_key_id: string;
+  fetch_audit: NonNullable<ManualNewsEvidence['fetch_audit']>;
+} {
   const bytes = Buffer.byteLength(completeBody, 'utf8');
   const excerptBytes = Buffer.byteLength(evidence.excerpt, 'utf8');
   const publishedAt = evidence.published_at && !/^\d{4}-\d{2}-\d{2}$/.test(evidence.published_at)
@@ -70,6 +90,7 @@ export function withSignedArticleTextV2Audit<T extends ManualNewsEvidence>(
   };
   return {
     ...evidence,
+    response_key_id: TEST_MANUAL_NEWS_RESPONSE_KEY_ID,
     published_at: publishedAt,
     claims_supported: [evidence.excerpt],
     fetch_audit: {
@@ -77,7 +98,10 @@ export function withSignedArticleTextV2Audit<T extends ManualNewsEvidence>(
       response_hmac: createHmac('sha256', Buffer.from(TEST_MANUAL_NEWS_RESPONSE_SECRET, 'hex'))
         .update(canonicalJson(unsignedAudit)).digest('hex'),
     },
-  } as T & { fetch_audit: NonNullable<ManualNewsEvidence['fetch_audit']> };
+  } as T & {
+    response_key_id: string;
+    fetch_audit: NonNullable<ManualNewsEvidence['fetch_audit']>;
+  };
 }
 
 export function proofForLegacyPolicy(

@@ -33,6 +33,13 @@
 
 CF bounded API/persistence 不变量：
 
+### Stage-2 key rotation、API profile 与 evidence preflight threat model
+
+- **CF-S2-01（P1）**：response/verification key 轮换时，已知 key 上的 HMAC mismatch 是 tamper；配置缺失/畸形或历史 `key_id` 不在已配置 keyring 中是 dependency unavailable。前者才允许原子 quarantine；后者只能 fail-hidden 且不得修改 verification、item 或 audit。当前 key 必须同时有显式 bounded `KEY_ID` 与 64 位 lowercase-hex secret；可选 keyring JSON 最多 8 项，字段精确为 `id/secret`，ID 与 secret 在 current+history 全集合中都唯一。任何 secret 不得进入日志、错误或 audit metadata。
+- 网关 response HMAC 必须先在配置 keyring 中匹配唯一 key，再把匹配的 `response_key_id` 写入 evidence；manual proof canonical evidence 绑定该 ID。proof 带 `verification_key_id`，签名 payload 同时绑定该 ID；历史 load 只按 persisted ID 选择 exact key，不尝试“任一 key 能否验证”。所有 persisted 判断继续只依赖结构、绑定字段和 HMAC，不用当前墙钟淘汰历史证据。
+- **CF-S2-02（P1）**：现有 list route 保持 bounded summary，但 response 必须显式标识 profile/version；detail 与所有 mutation lead 使用同一个显式 detail profile/version DTO。HK client 必须先通过共享 contract fixture 的 full-list 与 summary→detail 测试并部署；production smoke 先验证旧 current response，再验证新 summary response，之后 CF 才可部署。不得让 unprofiled client 静默解释 summary 为旧 full-list。
+- **CF-S2-03（P2）**：读取 evidence blob 前必须先读取 bounded key-lineage columns；配置不可用或 exact persisted key ID 未知立即 fail-hidden/non-mutating。key lineage 已知后，再用 lightweight aggregate SQL 检查 count 与每列最大长度；超限直接对 active verification snapshot 执行同一原子 quarantine，且不得读取/解析 blob。materialize query 显式列名并 `LIMIT 9`。quarantine batch 任一步失败必须整体 rollback；direct/detail/confirm/candidate/freeze/finalize/prior-event 全部汇合到该 preflight。
+
 1. 每个 lead 的 store/load 允许 0–8 条 evidence，proof/create/current 只允许 1–8 条；拒绝第 9 条、重复 evidence ID 和重复规范化 final URL。0 条证据只允许沿既有 `needs_review` 失败关闭路径，不能创建 proof。
 2. 每条持久化 excerpt 最多 3000 Unicode code points、最多 12000 UTF-8 bytes，且 digest/size 必须与 signed `proof_excerpt` 完全相同。`claims_supported` 只允许恰好一个与 excerpt 相同的 bounded 字符串，不能成为第二正文通道。
 3. `article_text`、`text`、`json`、`pdf_text` 使用同一个 excerpt contract。transport 首先认证完整正文，持久化/current 则只用 response HMAC 与 signed excerpt digest/sizes 确定性复验，不读取当前墙钟。
@@ -55,9 +62,10 @@ CF bounded API/persistence 不变量：
 
 1. 先把 HK feature 合入 HK 主线；安装 dedicated Chromium account/sandbox/resource gate、研究网关与 `AIFEEDS_MANUAL_NEWS_RESPONSE_SECRET`，完成真实 offline Chromium sandbox smoke。
 2. 在 HK 完成 authenticated gateway/secret 及 legacy、v1、v2、tamper、stale、private-target smoke；任何 skip 或环境缺口都不得视为通过。此门禁通过前不得部署 CF consumer。
-3. 再配置 CF staging 的 `MANUAL_NEWS_RESEARCH_ORIGIN`、`MANUAL_NEWS_RESEARCH_TOKEN`、与 HK response secret 匹配的 `MANUAL_NEWS_RESEARCH_RESPONSE_SECRET`、`MANUAL_NEWS_VERIFICATION_SECRET` 和 Workflow binding；按序确认既有 migration 033、034 后部署 Worker/Workflow。
-4. 在 CF staging 验证文字-only、URL-only、状态轮询、失败重试、v9/unsigned proof 隐藏与隔离、确认候选、freeze/finalize 以及原 1–5 条排序/重生成回归；确认 Top 5 与渲染任务无自动变化。
-5. staging 全部通过后才进入 CF production，按同一 secret/binding/migration inventory 部署并完成两条示例线索的证据范围人工验收。禁止 consumer-first 发布。
+3. HK client 先读取 `workflows/aifeeds-daily/fixtures/manual-news-leads-api-v1-contract.json`，通过旧 full-list/current response 与新 `manual_news_leads_summary_v1` list→`manual_news_lead_detail_v1` detail contract 测试并部署；先在 production 对尚未变更的 CF 验证旧 current response。未通过此门禁不得部署 CF schema change。
+4. 再配置 CF staging 的 `MANUAL_NEWS_RESEARCH_ORIGIN`、`MANUAL_NEWS_RESEARCH_TOKEN`、两组 current `*_KEY_ID` + 64 位 lowercase-hex secret、可选最多 8 项的 `*_KEYRING_JSON` 和 Workflow binding；按序确认既有 migration 033-036，再执行 additive migration 037 后部署 Worker/Workflow。
+5. 在 CF staging 验证文字-only、URL-only、状态轮询、失败重试、retained/unknown/malformed key rotation、v9/unsigned proof 隐藏与隔离、确认候选、freeze/finalize 以及原 1–5 条排序/重生成回归；确认 Top 5 与渲染任务无自动变化。
+6. staging 全部通过后才进入 CF production，按同一 key ID/secret/keyring/binding/migration inventory 部署；随后验证新的 summary marker→detail production smoke，并完成两条示例线索的证据范围人工验收。禁止 consumer-first 发布。
 
 新线索正常成本是两次 DeepSeek V4 Pro 调用。同一次 Workflow 的状态转换重放若 active verification 的 policy、完整 digest 与 HMAC 都仍有效，则复用 assessment，模型调用为 0；运营侧显式 retry 在同一 D1 batch 中先审计并失效旧 active verification，确保下一轮重新检索和生成。旧记录、证据变化或无效凭证也会先失效再生成。第一次模型调用后、verification 原子持久化前发生瞬时失败时，Workflow 保持 at-least-once，下一次会重新执行两次模型调用，不在代码中伪造恢复结果。
 

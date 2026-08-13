@@ -20,6 +20,7 @@ describe('manual news lead migration', () => {
     db.exec(fs.readFileSync(path.join(migrations, '034-manual-news-assessment-verifications.sql'), 'utf8'));
     db.exec(fs.readFileSync(path.join(migrations, '035-manual-news-assessment-generation-cycles.sql'), 'utf8'));
     db.exec(fs.readFileSync(path.join(migrations, '036-manual-news-assessment-generation-cycles-v2.sql'), 'utf8'));
+    db.exec(fs.readFileSync(path.join(migrations, '037-manual-news-proof-key-ids.sql'), 'utf8'));
 
     expect(tableColumns(db, 'daily_news_review_batches')).toEqual(expect.arrayContaining([
       'batch_revision', 'supersedes_batch_id', 'revision_origin', 'lineage_id', 'is_current',
@@ -34,12 +35,12 @@ describe('manual news lead migration', () => {
       'processing_owner', 'processing_attempt', 'processing_lease_until',
     ]));
     expect(tableColumns(db, 'manual_news_evidence')).toEqual(expect.arrayContaining([
-      'claims_supported_json', 'fetch_audit_json',
+      'response_key_id', 'claims_supported_json', 'fetch_audit_json',
     ]));
     expect(tableColumns(db, 'manual_news_event_assessments')).toContain('assessment_json');
     expect(tableColumns(db, 'manual_news_assessment_verifications')).toEqual(expect.arrayContaining([
       'verification_id', 'lead_id', 'assessment_version', 'policy_version', 'canonical_digest',
-      'hmac_sha256', 'verification_json', 'processing_owner', 'processing_attempt',
+      'verification_key_id', 'hmac_sha256', 'verification_json', 'processing_owner', 'processing_attempt',
       'creation_nonce', 'invalidation_nonce', 'status', 'reason', 'created_at', 'invalidated_at',
     ]));
     expect(tableColumns(db, 'manual_news_leads')).toContain('assessment_generation_cycle_id');

@@ -27,6 +27,8 @@ import {
 import {
   proofForLegacyPolicy,
   TEST_MANUAL_NEWS_RESPONSE_SECRET,
+  testManualNewsResponseKeyring,
+  testManualNewsVerificationKeyring,
   withSignedArticleTextV2Audit,
 } from './manual-news-signed-evidence.test-fixture';
 
@@ -35,6 +37,8 @@ const migrations = path.resolve(here, '../../migrations');
 
 class SerialSqliteD1 {
   readonly sqlite = new DatabaseSync(':memory:');
+  readonly preparedSql: string[] = [];
+  rejectEvidenceBlobMaterialization = false;
   private batchTail: Promise<unknown> = Promise.resolve();
   private nextBatchGate: {
     entered: () => void;
@@ -53,9 +57,11 @@ class SerialSqliteD1 {
     this.sqlite.exec(fs.readFileSync(path.join(migrations, '034-manual-news-assessment-verifications.sql'), 'utf8'));
     this.sqlite.exec(fs.readFileSync(path.join(migrations, '035-manual-news-assessment-generation-cycles.sql'), 'utf8'));
     this.sqlite.exec(fs.readFileSync(path.join(migrations, '036-manual-news-assessment-generation-cycles-v2.sql'), 'utf8'));
+    this.sqlite.exec(fs.readFileSync(path.join(migrations, '037-manual-news-proof-key-ids.sql'), 'utf8'));
   }
 
   prepare(sql: string) {
+    this.preparedSql.push(sql);
     let bindings: SQLInputValue[] = [];
     const statement = this.sqlite.prepare(sql);
     const prepared = {
@@ -64,7 +70,12 @@ class SerialSqliteD1 {
         return prepared;
       },
       first: async <T>() => (statement.get(...bindings) as T | undefined) ?? null,
-      all: async <T>() => ({ results: statement.all(...bindings) as T[], success: true, meta: {} }),
+      all: async <T>() => {
+        if (this.rejectEvidenceBlobMaterialization && sql.includes('manual_evidence:list')) {
+          throw new Error('evidence_blob_materialized');
+        }
+        return { results: statement.all(...bindings) as T[], success: true, meta: {} };
+      },
       run: async () => {
         const result = statement.run(...bindings);
         return { success: true, meta: { changes: Number(result.changes) } };
@@ -128,7 +139,9 @@ function state() {
     DB: db as unknown as D1Database,
     DAILY_NEWS_REVIEW_SECRET: 'test-secret',
     MANUAL_NEWS_VERIFICATION_SECRET: 'b'.repeat(64),
+    MANUAL_NEWS_VERIFICATION_KEY_ID: 'verification-key-2026-08-11',
     MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: TEST_MANUAL_NEWS_RESPONSE_SECRET,
+    MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID: 'response-key-2026-08-11',
   } as Env;
   return { db, env };
 }
@@ -226,7 +239,7 @@ async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Pro
   }, assessment, [evidence]);
   const proof = await createManualLeadVerificationProof({
     lead_id: id, assessment_version: 7, assessment, evidence: [evidence], verification,
-  }, 'b'.repeat(64), TEST_MANUAL_NEWS_RESPONSE_SECRET);
+  }, testManualNewsVerificationKeyring('b'.repeat(64)), testManualNewsResponseKeyring());
   db.sqlite.prepare(`INSERT INTO manual_news_leads (
     id, review_date, input_type, input_text, input_url, note, status, version,
     submit_idempotency_key, processing_owner, processing_attempt, created_at, updated_at
@@ -234,11 +247,11 @@ async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Pro
     id, `https://www.anthropic.com/news/${id}`, `submit-${id}`,
   );
   db.sqlite.prepare(`INSERT INTO manual_news_evidence (
-    lead_id, evidence_id, url, source_type, publisher, published_at, retrieved_at,
+    lead_id, evidence_id, response_key_id, url, source_type, publisher, published_at, retrieved_at,
     title, excerpt, claims_supported_json, reliable, fetch_audit_json
-  ) VALUES (?, ?, ?, 'official_primary', 'anthropic.com', '2026-08-11', 1,
+  ) VALUES (?, ?, ?, ?, 'official_primary', 'anthropic.com', '2026-08-11', 1,
     'Official product release documentation', ?, ?, 1, ?)`).run(
-    id, `ev-${id}`, `https://www.anthropic.com/news/${id}`, supportingText,
+    id, `ev-${id}`, evidence.response_key_id, `https://www.anthropic.com/news/${id}`, supportingText,
     JSON.stringify([supportingText]), JSON.stringify(evidence.fetch_audit),
   );
   db.sqlite.prepare(`INSERT INTO manual_news_event_assessments (
@@ -248,11 +261,12 @@ async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Pro
     id, eventKey, JSON.stringify(assessment),
   );
   db.sqlite.prepare(`INSERT INTO manual_news_assessment_verifications (
-    verification_id, lead_id, assessment_version, policy_version, canonical_digest,
+    verification_id, lead_id, assessment_version, policy_version, verification_key_id, canonical_digest,
     hmac_sha256, verification_json, processing_owner, processing_attempt,
     creation_nonce, status, reason, created_at, invalidated_at
-  ) VALUES (?, ?, 7, ?, ?, ?, ?, 'workflow-owner', 1, ?, 'active', NULL, 1, NULL)`).run(
-    `mav-${id}`, id, proof.policy_version, proof.canonical_digest, proof.hmac_sha256,
+  ) VALUES (?, ?, 7, ?, ?, ?, ?, ?, 'workflow-owner', 1, ?, 'active', NULL, 1, NULL)`).run(
+    `mav-${id}`, id, proof.policy_version, proof.verification_key_id,
+    proof.canonical_digest, proof.hmac_sha256,
     JSON.stringify(verification), `verification-create-${id}`,
   );
 }
@@ -284,9 +298,9 @@ function oversizePersistedEvidence(db: SerialSqliteD1, leadId: string, excerpt: 
 function appendPersistedEvidenceToNine(db: SerialSqliteD1, leadId: string): void {
   for (let index = 2; index <= 9; index += 1) {
     db.sqlite.prepare(`INSERT INTO manual_news_evidence (
-      lead_id, evidence_id, url, source_type, publisher, published_at, retrieved_at,
+      lead_id, evidence_id, response_key_id, url, source_type, publisher, published_at, retrieved_at,
       title, excerpt, claims_supported_json, reliable, fetch_audit_json
-    ) SELECT lead_id, ?, ?, source_type, publisher, published_at, retrieved_at,
+    ) SELECT lead_id, ?, response_key_id, ?, source_type, publisher, published_at, retrieved_at,
       title, excerpt, claims_supported_json, reliable, fetch_audit_json
       FROM manual_news_evidence WHERE lead_id = ? LIMIT 1`).run(
       `ev-${leadId}-${index}`, `https://www.anthropic.com/news/${leadId}-${index}`, leadId,
@@ -401,9 +415,13 @@ describe('news review revision CAS', () => {
       current.env, leadId, 7, frozen.batch.batch_revision, 'confirm-bounded-candidate', 110,
     );
     oversizePersistedEvidence(current.db, leadId, 'x'.repeat(3_001));
+    current.db.preparedSql.length = 0;
+    current.db.rejectEvidenceBlobMaterialization = true;
 
     const sanitized = await sanitizeCurrentNewsReviewBatch(current.env, '2026-08-11', 120);
 
+    expect(current.db.preparedSql.some((sql) => sql.includes('manual_evidence:preflight'))).toBe(true);
+    expect(current.db.preparedSql.some((sql) => sql.includes('manual_evidence:list'))).toBe(false);
     expect(sanitized.dropped_ids).toContain(`blog:manual:${leadId}`);
     expect(sanitized.batch.candidates.some((candidate) => candidate.lead_id === leadId)).toBe(false);
     expect(current.db.sqlite.prepare(`SELECT status, reason FROM manual_news_assessment_verifications
@@ -488,9 +506,13 @@ describe('news review revision CAS', () => {
     const oversized = `${'😀'.repeat(3_000)}x`;
     expect(Buffer.byteLength(oversized, 'utf8')).toBe(12_001);
     oversizePersistedEvidence(current.db, leadId, oversized);
+    current.db.preparedSql.length = 0;
+    current.db.rejectEvidenceBlobMaterialization = true;
 
     const snapshot = await getVerifiedNewsReviewSelectionSnapshot(current.env, '2026-08-11', 120);
 
+    expect(current.db.preparedSql.some((sql) => sql.includes('manual_evidence:preflight'))).toBe(true);
+    expect(current.db.preparedSql.some((sql) => sql.includes('manual_evidence:list'))).toBe(false);
     expect(snapshot?.selected_ids).not.toContain(`blog:manual:${leadId}`);
     expect(snapshot?.manual_verifications).toEqual([]);
     expect(current.db.sqlite.prepare(`SELECT status, reason FROM manual_news_assessment_verifications
@@ -1063,12 +1085,16 @@ describe('news review revision CAS', () => {
       current.env, leadId, 7, 1, 'confirm-bounded-freeze', 110,
     );
     appendPersistedEvidenceToNine(current.db, leadId);
+    current.db.preparedSql.length = 0;
+    current.db.rejectEvidenceBlobMaterialization = true;
 
     const refreshed = await freezeNewsReviewBatch(
       current.env, '2026-08-11', candidates('bounded-freeze-v2'),
       candidates('bounded-freeze-v2').map((item) => item.item_id), 120,
     );
 
+    expect(current.db.preparedSql.some((sql) => sql.includes('manual_evidence:preflight'))).toBe(true);
+    expect(current.db.preparedSql.some((sql) => sql.includes('manual_evidence:list'))).toBe(false);
     expect(refreshed.batch.candidates.some((candidate) => candidate.lead_id === leadId)).toBe(false);
     expect(current.db.sqlite.prepare(`SELECT status, reason FROM manual_news_assessment_verifications
       WHERE lead_id = ?`).get(leadId)).toEqual({

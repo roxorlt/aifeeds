@@ -1,5 +1,9 @@
 import type { Env } from '../index';
 import {
+  manualNewsResponseKeyring,
+  manualNewsVerificationKeyring,
+} from '../security/manual-news-keyring';
+import {
   assertManualLeadTransition,
   createManualEvidenceDigest,
   createManualLeadVerificationProof,
@@ -1270,11 +1274,12 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       ).bind(id, id, expectedVersion, owner, attempt);
     const insertEvidenceStatements = evidence.map((item) => this.env.DB.prepare(
         `/* manual_evidence:insert */ INSERT INTO manual_news_evidence (
-           lead_id, evidence_id, url, source_type, publisher, published_at, retrieved_at,
+           lead_id, evidence_id, response_key_id, url, source_type, publisher, published_at, retrieved_at,
            title, excerpt, claims_supported_json, fetch_audit_json, reliable
-         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${leadGuard}`,
+         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${leadGuard}`,
       ).bind(
-        id, item.id, item.url, item.source_type, item.publisher, item.published_at, item.retrieved_at,
+        id, item.id, item.response_key_id || '', item.url, item.source_type, item.publisher,
+        item.published_at, item.retrieved_at,
         item.title, item.excerpt, JSON.stringify(item.claims_supported), JSON.stringify(item.fetch_audit || null),
         item.reliable ? 1 : 0, id, expectedVersion, owner, attempt,
       ));
@@ -1419,6 +1424,8 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     verificationRaw: unknown,
   ): Promise<{ assessment_version: number }> {
     const { owner, attempt } = this.fence();
+    const verificationKeys = manualNewsVerificationKeyring(this.env);
+    const responseKeys = manualNewsResponseKeyring(this.env);
     const evidence = await loadManualNewsEvidence(this.env, id);
     const priorEvents = assessment.matched_event_key
       ? await this.findPriorEventsByEventKey(assessment.matched_event_key, id)
@@ -1445,7 +1452,7 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       assessment: validatedAssessment,
       evidence,
       verification,
-    }, this.env.MANUAL_NEWS_VERIFICATION_SECRET || '', this.env.MANUAL_NEWS_RESEARCH_RESPONSE_SECRET || '');
+    }, verificationKeys, responseKeys);
     const now = Date.now();
     const invalidationNonce = createMutationNonce('assessment_invalidate');
     const creationNonce = createMutationNonce('verification_create');
@@ -1507,12 +1514,13 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       ),
       this.env.DB.prepare(
         `/* manual_verification:insert */ INSERT INTO manual_news_assessment_verifications (
-           verification_id, lead_id, assessment_version, policy_version, canonical_digest,
+           verification_id, lead_id, assessment_version, policy_version, verification_key_id, canonical_digest,
            hmac_sha256, verification_json, processing_owner, processing_attempt,
            creation_nonce, status, reason, created_at, invalidated_at
-         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?, NULL WHERE ${preSaveGuard}`,
+         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?, NULL WHERE ${preSaveGuard}`,
       ).bind(
-        verificationId, id, assessmentVersion, proof.policy_version, proof.canonical_digest,
+        verificationId, id, assessmentVersion, proof.policy_version, proof.verification_key_id,
+        proof.canonical_digest,
         proof.hmac_sha256, JSON.stringify(verification), owner, attempt, creationNonce, now,
         id, expectedVersion, owner, attempt, id, owner, attempt,
       ),
@@ -1532,6 +1540,7 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
           verification_id: verificationId,
           assessment_version: assessmentVersion,
           policy_version: proof.policy_version,
+          verification_key_id: proof.verification_key_id,
           canonical_digest: proof.canonical_digest,
           assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
           assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,

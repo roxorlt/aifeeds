@@ -1,3 +1,5 @@
+import { parseManualNewsKeyring } from './manual-news-keyring';
+
 const DEFAULT_TIMEOUT_MS = 12_000;
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MAX_SOURCE_BYTES = 8 * 1024 * 1024;
@@ -16,7 +18,6 @@ const PROOF_EXCERPT_MAX_UTF8_BYTES = 12_000;
 const ARTICLE_TEXT_V2_MAX_SKEW_MS = 5 * 60_000;
 const ARTICLE_TEXT_V2_MAX_FUTURE_MS = 30_000;
 const ARTICLE_TEXT_V2_MIN_CHROMIUM_MAJOR = 149;
-const RESPONSE_SECRET_RE = /^[a-f0-9]{64}$/;
 
 const ALLOWED_SOURCE_TYPES = new Set([
   'text/html', 'application/xhtml+xml', 'text/plain', 'application/json', 'application/pdf',
@@ -31,6 +32,9 @@ export interface TrustedResearchService {
   token: string;
   /** Independent 32-byte hex key used only to authenticate document responses. */
   responseSecret?: string;
+  /** Explicit ID for the current response key plus optional retained historical keys. */
+  responseKeyId?: string;
+  responseKeyringJson?: string;
   fetcher?: TrustedGatewayFetcher;
   /** Test seams; production callers leave these unset. */
   protocolNow?: () => number;
@@ -44,6 +48,7 @@ export interface PublicDocument {
   excerpt: string;
   redirects: number;
   fetch_audit: DocumentFetchAudit;
+  response_key_id: string;
   title?: string;
   published_at?: string | null;
   selection?: 'article' | 'main';
@@ -693,10 +698,11 @@ export async function fetchPublicDocument(
   // Preserve the base trusted-origin dependency/error contract before applying
   // the v2-only response-authentication dependency.
   trustedEndpoint(deps.service, '/v1/document');
-  const responseSecret = deps.service?.responseSecret;
-  if (!RESPONSE_SECRET_RE.test(responseSecret || '')) {
-    throw new Error('trusted_research_response_secret_required');
-  }
+  const responseKeys = parseManualNewsKeyring({
+    keyId: deps.service?.responseKeyId,
+    secret: deps.service?.responseSecret,
+    keyringJson: deps.service?.responseKeyringJson,
+  }, 'trusted_research_response_keys_unavailable');
   const protocolNow = deps.service?.protocolNow || Date.now;
   const requestNow = protocolNow();
   if (!Number.isFinite(requestNow)) throw new Error('invalid_trusted_research_clock');
@@ -729,7 +735,14 @@ export async function fetchPublicDocument(
       now: protocolNow(),
     });
     const body = await readBoundedBody(response, maxBytes, deadline, controller);
-    if (!await verifyDocumentFetchAuditResponseHmac(audit, responseSecret!)) {
+    let responseKeyId: string | null = null;
+    for (const [keyId, secret] of responseKeys.keys) {
+      if (await verifyDocumentFetchAuditResponseHmac(audit, secret)) {
+        responseKeyId = keyId;
+        break;
+      }
+    }
+    if (!responseKeyId) {
       throw new Error('unsafe_gateway_audit:response_hmac');
     }
     const bodyCharacters = Array.from(body.text).length;
@@ -757,6 +770,7 @@ export async function fetchPublicDocument(
       excerpt,
       redirects: audit.hops.length - 1,
       fetch_audit: audit,
+      response_key_id: responseKeyId,
       ...(audit.document ? {
         title: audit.document.title,
         published_at: audit.document.published_at,

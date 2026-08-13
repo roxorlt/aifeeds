@@ -33,6 +33,7 @@ test('workerd rejects unsupported redirect before outbound and accepts the produ
           const document = await fetchPublicDocument('https://example.com/', {
             service: {
               origin: 'https://research-gateway.example', token: 'test-token',
+              responseKeyId: 'response-key-2026-08-11',
               responseSecret: '${responseSecret}',
             },
           });

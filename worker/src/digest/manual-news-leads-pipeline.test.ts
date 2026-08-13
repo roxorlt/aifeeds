@@ -38,6 +38,7 @@ function documentFixture(
     source_bytes: 8_388_608, extracted_text_bytes: 2_097_152, extracted_text_characters: 1_000_000,
   };
   return {
+    response_key_id: 'response-key-2026-08-11',
     url, content_type: contentType, extraction, excerpt: body, redirects: 0,
     fetch_audit: {
       hops: [{ url, validated_ip: '93.184.216.34', connected_ip: '93.184.216.34' }],
