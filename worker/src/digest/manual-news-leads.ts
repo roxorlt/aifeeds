@@ -1011,6 +1011,7 @@ const BILINGUAL_FACT_CONCEPTS: ReadonlyArray<readonly [string, RegExp]> = [
   ['code', /(?:代码)|\bcode\b/iu],
   ['content', /(?:内容)|\bcontent\b/iu],
   ['coverage', /(?:覆盖|适用于)|\bcoverage\b/iu],
+  ['feature', /(?:功能)|\bfeatures?\b/iu],
   ['legal_claim', /(?:版权|诉讼)|\b(?:copyright|lawsuit)\b/iu],
   ['model', /(?:模型)|\bmodels?\b/iu],
   ['output', /(?:输出)|\boutputs?\b/iu],
@@ -1332,13 +1333,20 @@ function consumeSemanticSpan(mask: boolean[], span: Pick<IndexedSemanticValue, '
 
 function consumeAdjacentChineseFunctionWords(mask: boolean[], value: string): void {
   const structural = new Set(['在', '于', '对', '向', '为', '由', '被', '从', '至', '的', '了', '该', '其']);
+  const adjacentSemanticIndex = (start: number, direction: -1 | 1): number => {
+    let cursor = start + direction;
+    while (cursor >= 0 && cursor < value.length && /\s/u.test(value[cursor])) cursor += direction;
+    return cursor;
+  };
   let changed = true;
   while (changed) {
     changed = false;
     for (let index = 0; index < value.length; index += 1) {
       if (mask[index] || !structural.has(value[index])) continue;
+      const left = adjacentSemanticIndex(index, -1);
+      const right = adjacentSemanticIndex(index, 1);
       const adjacentConsumed = index === 0 || index === value.length - 1
-        || mask[index - 1] || mask[index + 1];
+        || left < 0 || right >= value.length || mask[left] || mask[right];
       if (adjacentConsumed) {
         mask[index] = true;
         changed = true;
@@ -3589,7 +3597,7 @@ const ORGANIZATION_ENTITY_REGISTRY: Readonly<Record<string, readonly string[]>> 
 };
 const PRODUCT_ENTITY_REGISTRY: Readonly<Record<string, readonly string[]>> = {
   gpt: ['gpt'], claude: ['claude'], kimi: ['kimi'], gemini: ['gemini'], codex: ['codex'],
-  google_sheets: ['google sheets', '谷歌表格'],
+  google_sheets: ['google sheets', 'sheets canvas', '谷歌表格'],
   chatgpt: ['chatgpt'], ernie: ['ernie', '文心', '文心一言'], qwen: ['qwen', '通义', '通义千问'],
   hunyuan: ['hunyuan', '混元'], doubao: ['doubao', '豆包'], pangu: ['pangu', '盘古'],
   deepseek: ['deepseek', '深度求索'], glm: ['glm'], minimax: ['minimax'], llama: ['llama'],
@@ -3920,6 +3928,21 @@ function productComplementObjectLength(rawTail: string): number {
   return 0;
 }
 
+function isRegisteredProductFeatureObject(value: string): boolean {
+  const normalized = value.normalize('NFKC');
+  const products = registeredEntityOccurrences(normalized, PRODUCT_ENTITY_REGISTRY);
+  const features = regexSemanticSpans(normalized, /(?:功能)|\bfeatures?\b/iu, 'feature');
+  if (!products.length || !features.length) return false;
+  const mask = new Array<boolean>(normalized.length).fill(false);
+  for (const product of products) consumeSemanticSpan(mask, product);
+  for (const feature of features) consumeSemanticSpan(mask, feature);
+  consumeSemanticPattern(mask, normalized, /\b(?:in|of|the)\b|的/iu);
+  consumeAdjacentChineseFunctionWords(mask, normalized);
+  const residue = normalized.split('').map((character, index) => mask[index] ? ' ' : character)
+    .join('').replace(/[\p{P}\p{S}\s]+/gu, '');
+  return !residue;
+}
+
 function controlComplementTailRemainder(
   value: string,
   action: FactActionOccurrence,
@@ -3931,6 +3954,7 @@ function controlComplementTailRemainder(
     .replace(/\b(?:on|at)\s*$/iu, '')
     .trim();
   if (strictObject) {
+    if (isRegisteredProductFeatureObject(rawTail)) return '';
     const productLength = productComplementObjectLength(rawTail);
     if (productLength) return rawTail.slice(productLength).trim();
     if (/^[a-z]\d+(?:\.\d+)*(?:[-_][a-z0-9]+)?$/iu.test(rawTail)) return '';
@@ -3984,13 +4008,21 @@ function prefixContainsDetachedUnknownPredicate(value: string): boolean {
 
 function looksLikeDetachedEnglishPredicate(remainder: string): boolean {
   if (!remainder) return false;
-  const englishWords = remainder.match(/[A-Za-z][A-Za-z0-9._+-]*/gu) || [];
+  const englishWords = [...remainder.matchAll(/[A-Za-z][A-Za-z0-9._+-]*/gu)].map((match) => ({
+    raw: match[0],
+    start: match.index,
+    end: match.index + match[0].length,
+  }));
+  const productSpans = registeredEntityOccurrences(remainder, PRODUCT_ENTITY_REGISTRY);
   for (let index = 0; index + 2 < englishWords.length; index += 1) {
-    const rawSubject = englishWords[index];
-    const rawPredicate = englishWords[index + 1];
-    const object = englishWords[index + 2].toLowerCase();
+    const rawSubject = englishWords[index].raw;
+    const rawPredicate = englishWords[index + 1].raw;
+    const object = englishWords[index + 2].raw.toLowerCase();
     const subject = rawSubject.toLowerCase();
     const predicate = rawPredicate.toLowerCase();
+    const subjectPredicateInsideProduct = productSpans.some((span) =>
+      englishWords[index].start >= span.start && englishWords[index + 1].end <= span.end);
+    if (subjectPredicateInsideProduct) continue;
     if (/^[A-Z]/u.test(rawSubject) && /^[A-Z]/u.test(rawPredicate)
       && /^(?:operations?|business|market|region)$/u.test(object)) continue;
     if (!LATIN_ENTITY_STOPWORDS.has(subject)

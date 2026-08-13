@@ -195,6 +195,19 @@ const techCrunchAlibabaEvidence: ManualNewsEvidence = {
   reliable: true,
 };
 
+const googleSheetsCanvasEvidence: ManualNewsEvidence = {
+  id: 'ev-google-sheets-canvas-production',
+  url: 'https://blog.google/products/workspace/build-mini-apps-gemini-sheets/',
+  source_type: 'official_primary',
+  publisher: 'Google Blog',
+  published_at: null,
+  retrieved_at: 2,
+  title: 'Build mini-apps with Gemini in Google Sheets',
+  excerpt: 'Google releases Sheets canvas feature in Google Sheets.',
+  claims_supported: ['Google releases Sheets canvas feature in Google Sheets.'],
+  reliable: true,
+};
+
 function assessed(overrides: Record<string, unknown> = {}) {
   const overrideClaims = Array.isArray(overrides.claims) ? overrides.claims : null;
   const baseFact = {
@@ -754,6 +767,70 @@ describe('manual lead processing pipeline', () => {
         assessment_last_validation_code: 'valid',
       }),
     }));
+  });
+
+  test('sends the exact production Google Sheets canvas assessment to verification', async () => {
+    const memory = memoryStore(lead({
+      input_type: 'url', input_url: googleSheetsCanvasEvidence.url, input_text: '',
+    }));
+    let assessCalls = 0;
+    let verifyCalls = 0;
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [],
+      fetch: async () => documentFixture(googleSheetsCanvasEvidence.url, 'doc'),
+      extract: async () => googleSheetsCanvasEvidence,
+      assess: async () => {
+        assessCalls += 1;
+        return {
+          event_key: 'google-sheets-canvas-feature-2026-08-14',
+          event_type: 'product_release', material_update: false, score: 86,
+          recommendation: 'recommended', occurred_at: null, uncertainties: [],
+          source_facts: [{
+            fact_ref: 'fact-01', source_language: 'en',
+            atomic_fact: {
+              subject: 'Google', subject_role: 'organization', predicate: 'releases',
+              object: 'Sheets canvas feature in Google Sheets',
+            },
+            evidence_ids: [googleSheetsCanvasEvidence.id],
+          }],
+          evidence_dispositions: [{
+            evidence_id: googleSheetsCanvasEvidence.id, disposition: 'supports_core',
+            source_fact_refs: ['fact-01'], reason_code: null,
+          }],
+          editorial_projection: {
+            title: {
+              projection_ref: 'title-01', source_fact_refs: ['fact-01'],
+              atomic_fact: {
+                subject: 'Google', subject_role: 'organization', predicate: '发布',
+                object: 'Google Sheets 的 Sheets canvas 功能',
+              },
+            },
+            summary: [{
+              projection_ref: 'summary-01', source_fact_refs: ['fact-01'],
+              atomic_fact: {
+                subject: 'Google', subject_role: 'organization', predicate: '发布',
+                object: 'Google Sheets 的 Sheets canvas 功能',
+              },
+            }],
+          },
+          matched_event_key: null,
+        };
+      },
+      verify: async (prompt) => { verifyCalls += 1; return verifiedFromPrompt(prompt); },
+    });
+
+    expect(assessCalls).toBe(1);
+    expect(verifyCalls).toBe(1);
+    expect(memory.saveCalls()).toBe(1);
+    expect(memory.current()).toMatchObject({
+      status: 'recommended',
+      assessment: {
+        title: 'Google发布Google Sheets 的 Sheets canvas 功能。',
+        source_facts: [{ atomic_fact: {
+          subject: 'Google', predicate: 'releases', object: 'Sheets canvas feature in Google Sheets',
+        } }],
+      },
+    });
   });
 
   test('keeps unknown subject-role failure code and both safe paths observable across regeneration', async () => {

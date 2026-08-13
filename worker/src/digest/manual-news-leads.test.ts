@@ -2378,6 +2378,71 @@ describe('manual news lead domain', () => {
     });
   });
 
+  test('accepts the exact production Google Sheets canvas source fact as one atomic release', () => {
+    const evidence: ManualNewsEvidence = {
+      ...techCrunchAlibabaBan,
+      id: 'ev-google-sheets-canvas-production',
+      url: 'https://blog.google/products/workspace/build-mini-apps-gemini-sheets/',
+      source_type: 'official_primary',
+      publisher: 'Google Blog',
+      title: 'Build mini-apps with Gemini in Google Sheets',
+      excerpt: 'Google releases Sheets canvas feature in Google Sheets.',
+      claims_supported: ['Google releases Sheets canvas feature in Google Sheets.'],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.event_key = 'google-sheets-canvas-feature-2026-08-14';
+    raw.event_type = 'product_release';
+    raw.recommendation = 'recommended';
+    raw.source_facts[0].atomic_fact = {
+      subject: 'Google', subject_role: 'organization', predicate: 'releases',
+      object: 'Sheets canvas feature in Google Sheets',
+    };
+    raw.source_facts[0].evidence_ids = [evidence.id];
+    raw.evidence_dispositions[0].evidence_id = evidence.id;
+    raw.editorial_projection.title.atomic_fact = {
+      subject: 'Google', subject_role: 'organization', predicate: '发布',
+      object: 'Google Sheets 的 Sheets canvas 功能',
+    };
+    raw.editorial_projection.summary[0].atomic_fact = {
+      subject: 'Google', subject_role: 'organization', predicate: '发布',
+      object: 'Google Sheets 的 Sheets canvas 功能',
+    };
+
+    expect(validateManualLeadGeneratedAssessment(raw, [evidence])).toMatchObject({
+      recommendation: 'recommended',
+      source_facts: [{
+        atomic_fact: {
+          subject: 'Google', subject_role: 'organization', predicate: 'releases',
+          object: 'Sheets canvas feature in Google Sheets',
+        },
+      }],
+    });
+  });
+
+  test('does not exempt an unregistered two-word phrase from detached-predicate detection', () => {
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.source_facts[0].atomic_fact = {
+      subject: 'Google', subject_role: 'organization', predicate: 'releases',
+      object: 'Acme Sheets canvas feature',
+    };
+    expect(() => validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan]))
+      .toThrow(/non_atomic_source_assembled:source_facts\[0\]\.atomic_fact\.assembled/);
+  });
+
+  test.each([
+    'Sheets canvas feature in Google Sheets and Microsoft Copilot',
+    'Sheets canvas feature while Microsoft launches Copilot',
+    'Sheets canvas feature in Google Sheets Microsoft launches Copilot',
+    'Microsoft launches Copilot before Sheets canvas feature in Google Sheets',
+  ])('keeps a real second subject or action outside the product span non-atomic: %s', (object) => {
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.source_facts[0].atomic_fact = {
+      subject: 'Google', subject_role: 'organization', predicate: 'releases', object,
+    };
+    expect(() => validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan]))
+      .toThrow(/non_atomic_source_(?:object|assembled)/);
+  });
+
   test.each(['publisher', 'model'])('does not normalize an unknown or contradictory role alias: %s', (role) => {
     const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
     raw.source_facts[0].atomic_fact.subject_role = role;
