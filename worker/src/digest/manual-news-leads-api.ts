@@ -11,10 +11,71 @@ import {
   submitManualNewsLead,
 } from './manual-news-leads-store';
 import { newsReviewSecret } from './news-review';
-import { isManualNewsVerificationSecretConfigured } from './manual-news-leads';
+import {
+  assertManualNewsEvidenceSet,
+  isManualNewsVerificationSecretConfigured,
+  type ManualNewsEvidence,
+} from './manual-news-leads';
+import type { ManualNewsLeadRecord, ManualNewsLeadSummary } from './manual-news-leads-pipeline';
 
 const MAX_BODY_BYTES = 16 * 1024;
 const BASE_PATH = '/api/digest/daily-news-leads';
+
+type ManualNewsListInput = ManualNewsLeadSummary | ManualNewsLeadRecord;
+
+function manualNewsLeadBase(lead: ManualNewsListInput) {
+  return {
+    id: lead.id,
+    review_date: lead.review_date,
+    input_type: lead.input_type,
+    input_text: lead.input_text,
+    input_url: lead.input_url,
+    note: lead.note,
+    status: lead.status,
+    version: lead.version,
+    error_code: lead.error_code,
+    error_message: lead.error_message,
+    processing_owner: lead.processing_owner,
+    processing_attempt: lead.processing_attempt,
+    processing_lease_until: lead.processing_lease_until,
+    confirmed_batch_id: lead.confirmed_batch_id,
+    confirmed_at: lead.confirmed_at,
+    created_at: lead.created_at,
+    updated_at: lead.updated_at,
+  };
+}
+
+function manualNewsLeadSummary(lead: ManualNewsListInput) {
+  return {
+    ...manualNewsLeadBase(lead),
+    evidence_count: 'evidence_count' in lead ? lead.evidence_count : lead.evidence.length,
+  };
+}
+
+function manualNewsEvidenceDetail(item: ManualNewsEvidence) {
+  return {
+    id: item.id,
+    url: item.url,
+    source_type: item.source_type,
+    publisher: item.publisher,
+    published_at: item.published_at,
+    retrieved_at: item.retrieved_at,
+    title: item.title,
+    excerpt: item.excerpt,
+    reliable: item.reliable,
+  };
+}
+
+function manualNewsLeadDetail(lead: ManualNewsLeadRecord) {
+  assertManualNewsEvidenceSet(lead.evidence);
+  return {
+    ...manualNewsLeadBase(lead),
+    ...(lead.assessment_generation ? { assessment_generation: lead.assessment_generation } : {}),
+    ...(lead.provider_failure ? { provider_failure: lead.provider_failure } : {}),
+    assessment: lead.assessment,
+    evidence: lead.evidence.map(manualNewsEvidenceDetail),
+  };
+}
 
 function scheduleLeadProcessing(
   env: Env,
@@ -135,7 +196,9 @@ async function handleManualNewsLeadsApiInternal(
         listManualNewsLeads(env, date),
         getManualNewsLeadCandidateState(env, date),
       ]);
-      return response({ ok: true, date, leads, candidate_batch: candidateBatch });
+      return response({
+        ok: true, date, leads: leads.slice(0, 50).map(manualNewsLeadSummary), candidate_batch: candidateBatch,
+      });
     }
     if (request.method !== 'POST') return response({ ok: false, error: 'method_not_allowed' }, 405);
     if (!processingDependenciesAvailable(env)) return response({ ok: false, error: 'dependency_unavailable' }, 503);
@@ -162,7 +225,9 @@ async function handleManualNewsLeadsApiInternal(
   if (!action) {
     if (request.method !== 'GET') return response({ ok: false, error: 'method_not_allowed' }, 405);
     const lead = await getManualNewsLead(env, leadId);
-    return lead ? response({ ok: true, lead }) : response({ ok: false, error: 'manual_news_lead_not_found' }, 404);
+    return lead
+      ? response({ ok: true, lead: manualNewsLeadDetail(lead) })
+      : response({ ok: false, error: 'manual_news_lead_not_found' }, 404);
   }
   if (request.method !== 'POST') return response({ ok: false, error: 'method_not_allowed' }, 405);
   const key = idempotencyKey(request);

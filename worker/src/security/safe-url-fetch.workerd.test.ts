@@ -36,7 +36,7 @@ test('workerd rejects unsupported redirect before outbound and accepts the produ
               responseSecret: '${responseSecret}',
             },
           });
-          return Response.json({ ok: true, url: document.url, bytes: document.bytes });
+          return Response.json({ ok: true, url: document.url, excerpt: document.excerpt });
         } catch (error) {
           return Response.json({
             ok: false,
@@ -101,9 +101,12 @@ test('workerd rejects unsupported redirect before outbound and accepts the produ
     outboundService: async (request: Request) => {
       gatewayCalls += 1;
       const payload = await request.clone().json() as {
-        extraction_mode: string; request_nonce: string; request_timestamp: string;
+        extraction_mode: string; response_profile: string;
+        request_nonce: string; request_timestamp: string;
       };
-      expect(payload).toMatchObject({ extraction_mode: 'article_text_v2' });
+      expect(payload).toMatchObject({
+        extraction_mode: 'article_text_v2', response_profile: 'proof_excerpt_v1',
+      });
       const unsigned = {
         ...auditBase,
         protocol_version: 'article_text_v2',
@@ -112,6 +115,16 @@ test('workerd rejects unsupported redirect before outbound and accepts the produ
         extracted_at: payload.request_timestamp,
         final_url: 'https://example.com/',
         body_sha256: createHash('sha256').update(body).digest('hex'),
+        response_profile: 'proof_excerpt_v1',
+        response_hmac_contract: 'canonical-json-excluding-response_hmac-v1',
+        proof_excerpt: {
+          contract: 'proof_excerpt_v1',
+          algorithm: 'utf8-nfc-ws1-codepoint-prefix-v1',
+          max: 3_000,
+          sha256: createHash('sha256').update(body).digest('hex'),
+          utf8_bytes: bytes,
+          code_points: Array.from(body).length,
+        },
       };
       const audit = encodeURIComponent(JSON.stringify({
         ...unsigned,
@@ -141,7 +154,7 @@ test('workerd rejects unsupported redirect before outbound and accepts the produ
     expect(await response.json()).toEqual({
       ok: true,
       url: 'https://example.com/',
-      bytes,
+      excerpt: body,
     });
     expect(gatewayCalls).toBe(1);
   } finally {

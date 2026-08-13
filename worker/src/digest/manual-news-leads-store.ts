@@ -33,6 +33,7 @@ import type {
   ManualLeadProcessingStore,
   ManualLeadTransitionPatch,
   ManualNewsLeadRecord,
+  ManualNewsLeadSummary,
 } from './manual-news-leads-pipeline';
 import {
   isValidManualNewsProviderFailureAudit,
@@ -78,6 +79,7 @@ interface ManualLeadRow {
   confirmed_at: number | null;
   created_at: number;
   updated_at: number;
+  evidence_count?: number;
 }
 
 interface ManualAssessmentGenerationCycleRow {
@@ -359,12 +361,35 @@ export async function getManualNewsLead(env: Env, id: string): Promise<ManualNew
   return row ? leadFromRow(env, row) : null;
 }
 
-export async function listManualNewsLeads(env: Env, date: string): Promise<ManualNewsLeadRecord[]> {
+export async function listManualNewsLeads(env: Env, date: string): Promise<ManualNewsLeadSummary[]> {
   const result = await env.DB.prepare(
-    `/* manual_lead:list_date */ SELECT * FROM manual_news_leads
+    `/* manual_lead:list_date */ SELECT lead.*,
+       (SELECT COUNT(*) FROM manual_news_evidence evidence WHERE evidence.lead_id = lead.id) AS evidence_count
+     FROM manual_news_leads lead
      WHERE review_date = ? ORDER BY created_at DESC LIMIT 50`,
   ).bind(date).all<ManualLeadRow>();
-  return Promise.all((result.results || []).map((row) => leadFromRow(env, row)));
+  return (result.results || []).map((row): ManualNewsLeadSummary => ({
+    id: row.id,
+    review_date: row.review_date,
+    input_type: row.input_type,
+    input_text: row.input_text || '',
+    input_url: row.input_url || '',
+    note: row.note || '',
+    status: row.status,
+    version: Number(row.version),
+    error_code: row.error_code,
+    error_message: row.error_message,
+    processing_owner: row.processing_owner || null,
+    processing_attempt: Number(row.processing_attempt || 0),
+    processing_lease_until: row.processing_lease_until === null || row.processing_lease_until === undefined
+      ? null
+      : Number(row.processing_lease_until),
+    confirmed_batch_id: row.confirmed_batch_id,
+    confirmed_at: row.confirmed_at,
+    created_at: Number(row.created_at),
+    updated_at: Number(row.updated_at),
+    evidence_count: Number(row.evidence_count || 0),
+  }));
 }
 
 export async function getManualNewsLeadCandidateState(

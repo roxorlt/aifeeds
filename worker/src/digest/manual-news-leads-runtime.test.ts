@@ -32,6 +32,30 @@ vi.mock('../hf-paper/llm', async (importOriginal) => {
 });
 
 const responseSecret = '11'.repeat(32);
+const responseProfile = 'proof_excerpt_v1';
+const responseHmacContract = 'canonical-json-excluding-response_hmac-v1';
+const proofExcerptAlgorithm = 'utf8-nfc-ws1-codepoint-prefix-v1';
+
+function referenceProofExcerpt(value: string): string {
+  return Array.from(value.normalize('NFC')
+    .replace(/[\u0009-\u000d\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/gu, ' ')
+    .replace(/^ +| +$/gu, ''))
+    .slice(0, 3_000)
+    .join('')
+    .replace(/ +$/gu, '');
+}
+
+function proofExcerptClaims(body: string) {
+  const excerpt = referenceProofExcerpt(body);
+  return {
+    contract: 'proof_excerpt_v1' as const,
+    algorithm: 'utf8-nfc-ws1-codepoint-prefix-v1' as const,
+    max: 3_000 as const,
+    sha256: createHash('sha256').update(excerpt).digest('hex'),
+    utf8_bytes: new TextEncoder().encode(excerpt).byteLength,
+    code_points: Array.from(excerpt).length,
+  };
+}
 
 function createManualLeadVerificationProof(
   input: Parameters<typeof createManualLeadVerificationProofWithResponseSecret>[0],
@@ -108,6 +132,9 @@ function auditObject(
     extracted_at: protocol.request_timestamp || '2026-08-12T00:00:00.000Z',
     final_url: url,
     body_sha256: createHash('sha256').update(body).digest('hex'),
+    response_profile: responseProfile,
+    response_hmac_contract: responseHmacContract,
+    proof_excerpt: proofExcerptClaims(body),
     response_hmac: '',
   });
 }
@@ -147,9 +174,9 @@ function documentFixture(
     };
   }
   const signedFetchAudit = withResponseHmac(fetchAudit);
+  const excerpt = referenceProofExcerpt(body);
   return {
-    url, content_type: contentType, extraction, body, redirects: 0,
-    bytes: new TextEncoder().encode(body).byteLength,
+    url, content_type: contentType, extraction, excerpt, redirects: 0,
     fetch_audit: signedFetchAudit,
     ...(extraction === 'article_text' ? {
       title: signedFetchAudit.document!.title,
@@ -164,27 +191,8 @@ const alibabaSupport = 'Alibaba reportedly bans employees from using Claude Code
 
 function longSignedBody(_extraction: 'text' | 'json' | 'pdf_text'): string {
   const repeatedSupport = Array.from({ length: 64 }, () => alibabaSupport);
-  return repeatedSupport.join(' ');
+  return `${repeatedSupport.join(' ')} COMPLETE-BODY-TAIL-SENTINEL`;
 }
-
-// Valid v10 HMACs for the substituted inputs when the derivation equality check is absent.
-const substitutedExcerptProofs = {
-  text: {
-    policy_version: 'fact-evidence-projection-hmac-v10',
-    canonical_digest: 'b5be6cac8f7a811715d1d3f713f2ae5edb89a8d186f76f1d9bb311c57ce14dea',
-    hmac_sha256: '1a716208be296ad9f2f13550d083953ee839579be4b74edcaf4d0fc295e1dff9',
-  },
-  json: {
-    policy_version: 'fact-evidence-projection-hmac-v10',
-    canonical_digest: '88568370337686d3a31aacf22991784bd4d37e0c6541acbfb7b59a44129747b8',
-    hmac_sha256: '0111bf8e49cb45bcb66461c8a9702c6e511e0770f22ed747e134d4da7b30d61b',
-  },
-  pdf_text: {
-    policy_version: 'fact-evidence-projection-hmac-v10',
-    canonical_digest: '823aaeb41d1d7ac737e190756fcaa565787e6186029e7ce4edec5cdaf0c4dbac',
-    hmac_sha256: '243b08bdbd304e7ff1064fc564ec1e365f1f0afc2d3524c90d0323f3bbb31e3e',
-  },
-} as const;
 
 function alibabaGeneratedAssessment(evidenceId: string) {
   return {
@@ -456,7 +464,7 @@ describe('manual lead evidence extraction', () => {
     mockedCall.mockReset();
   });
 
-  test('uses the complete trusted article body and creates a current v10 proof', async () => {
+  test('uses the bounded trusted article excerpt and creates a current v10 proof', async () => {
     const body = alibabaSupport;
     const evidence = await extractManualNewsEvidence(documentFixture(
       'https://techcrunch.com/2026/07/04/alibaba-claude-code/', body, 'article_text', {
@@ -473,6 +481,7 @@ describe('manual lead evidence extraction', () => {
       retrieved_at: 1234,
       fetch_audit: {
         extraction: 'article_text',
+        response_profile: responseProfile,
         parser: { version: 'chromium/149.0.7735.12' },
         document: { content_complete: true },
       },
@@ -599,7 +608,8 @@ describe('manual lead evidence extraction', () => {
 
     expect(evidence?.fetch_audit).toMatchObject({ source_content_type: sourceType, extraction });
     expect(Array.from(evidence!.excerpt)).toHaveLength(3_000);
-    expect(evidence!.claims_supported).toEqual([body]);
+    expect(evidence!.claims_supported).toEqual([evidence!.excerpt]);
+    expect(JSON.stringify(evidence)).not.toContain('COMPLETE-BODY-TAIL-SENTINEL');
     const { proofInput, proof, secret } = await createAlibabaProof(evidence!);
     const verificationPrompt = JSON.parse(buildManualLeadFactVerificationPrompt({
       assessment: proofInput.assessment, evidence: proofInput.evidence,
@@ -630,12 +640,39 @@ describe('manual lead evidence extraction', () => {
     const { proofInput, secret } = await createAlibabaProof(evidence!);
     const substituted = structuredClone(proofInput);
     substituted.evidence[0]!.excerpt = `${alibabaSupport} substituted persisted excerpt`;
+    substituted.evidence[0]!.claims_supported = [substituted.evidence[0]!.excerpt];
 
     await expect(createManualLeadVerificationProof(substituted, secret, responseSecret))
-      .rejects.toThrow(/manual_news_evidence_body_derivation_invalid/);
+      .rejects.toThrow(/manual_news_evidence_proof_excerpt_invalid/);
     await expect(isCurrentManualLeadVerification(
-      substituted, substitutedExcerptProofs[extraction], secret,
+      substituted, { policy_version: 'fact-evidence-projection-hmac-v10', canonical_digest: '0'.repeat(64), hmac_sha256: '0'.repeat(64) }, secret,
     )).resolves.toBe(false);
+  });
+
+  test('enforces the 8-source proof boundary and rejects duplicate identities or full-body claims', async () => {
+    const evidence = await Promise.all(Array.from({ length: 9 }, async (_, index) => {
+      const url = `https://techcrunch.com/2026/07/04/alibaba-claude-code-${index}/`;
+      return (await extractManualNewsEvidence(documentFixture(url, alibabaSupport), undefined, 1_723_420_800_000))!;
+    }));
+    const { proofInput, secret } = await createAlibabaProof(evidence[0]);
+    const eightSources = { ...proofInput, evidence: evidence.slice(0, 8) };
+    const eightProof = await createManualLeadVerificationProof(eightSources, secret, responseSecret);
+    await expect(isCurrentManualLeadVerification(eightSources, eightProof, secret)).resolves.toBe(true);
+
+    await expect(createManualLeadVerificationProof(
+      { ...proofInput, evidence }, secret, responseSecret,
+    )).rejects.toThrow(/manual_news_evidence_set_invalid/);
+    await expect(createManualLeadVerificationProof(
+      { ...proofInput, evidence: [evidence[0], evidence[0]] }, secret, responseSecret,
+    )).rejects.toThrow(/manual_news_evidence_set_invalid/);
+    await expect(createManualLeadVerificationProof({
+      ...proofInput,
+      evidence: [evidence[0], { ...evidence[0], id: 'ev-duplicate-final-url' }],
+    }, secret, responseSecret)).rejects.toThrow(/manual_news_evidence_set_invalid/);
+    await expect(createManualLeadVerificationProof({
+      ...proofInput,
+      evidence: [{ ...evidence[0], claims_supported: [`${evidence[0].excerpt} COMPLETE-BODY-TAIL-SENTINEL`] }],
+    }, secret, responseSecret)).rejects.toThrow(/manual_news_evidence_set_invalid/);
   });
 
   test('does not expire historically persisted signed evidence against the current wall clock', async () => {
@@ -652,13 +689,13 @@ describe('manual lead evidence extraction', () => {
     }
   });
 
-  test('does not truncate a complete trusted article to the former 3000-character prefix', async () => {
+  test('applies the same bounded proof excerpt contract to article_text', async () => {
     const body = `Opening material. ${'A'.repeat(3_100)} Final denial remains present.`;
     const evidence = await extractManualNewsEvidence(documentFixture(
       'https://www.axios.com/complete-article', body, 'article_text', { title: 'Complete article' },
     ));
-    expect(evidence?.excerpt).toBe(body);
-    expect(evidence?.excerpt).toContain('Final denial remains present.');
+    expect(evidence?.excerpt).toBe(referenceProofExcerpt(body));
+    expect(JSON.stringify(evidence)).not.toContain('Final denial remains present.');
   });
 
   test.each([
@@ -695,11 +732,11 @@ describe('manual lead evidence extraction', () => {
     legacyV1.fetch_audit.protocol_version = undefined;
     expect(await extractManualNewsEvidence(legacyV1)).toBeNull();
 
-    const forgedDigest = documentFixture(
+    const forgedExcerpt = documentFixture(
       'https://www.axios.com/forged', alibabaSupport, 'article_text', { title: 'Report' },
     );
-    forgedDigest.fetch_audit.body_sha256 = '00'.repeat(32);
-    expect(await extractManualNewsEvidence(forgedDigest)).toBeNull();
+    forgedExcerpt.fetch_audit.proof_excerpt!.sha256 = '00'.repeat(32);
+    expect(await extractManualNewsEvidence(forgedExcerpt)).toBeNull();
 
     for (const body of [
       `${alibabaSupport}\u200b hidden blocker`,

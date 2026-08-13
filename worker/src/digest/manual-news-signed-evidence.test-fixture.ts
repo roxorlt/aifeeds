@@ -13,8 +13,10 @@ function canonicalJson(value: unknown): string {
 
 export function withSignedArticleTextV2Audit<T extends ManualNewsEvidence>(
   evidence: T,
+  completeBody = evidence.excerpt,
 ): T & { fetch_audit: NonNullable<ManualNewsEvidence['fetch_audit']> } {
-  const bytes = Buffer.byteLength(evidence.excerpt, 'utf8');
+  const bytes = Buffer.byteLength(completeBody, 'utf8');
+  const excerptBytes = Buffer.byteLength(evidence.excerpt, 'utf8');
   const publishedAt = evidence.published_at && !/^\d{4}-\d{2}-\d{2}$/.test(evidence.published_at)
     ? new Date(evidence.published_at).toISOString()
     : evidence.published_at;
@@ -39,7 +41,7 @@ export function withSignedArticleTextV2Audit<T extends ManualNewsEvidence>(
     actual_sizes: {
       source_bytes: bytes,
       extracted_text_bytes: bytes,
-      extracted_text_characters: Array.from(evidence.excerpt).length,
+      extracted_text_characters: Array.from(completeBody).length,
     },
     truncation: { source: false, extracted_text: false },
     parser: { result: 'success' as const, version: 'chromium/149.0.7735.12' },
@@ -54,7 +56,17 @@ export function withSignedArticleTextV2Audit<T extends ManualNewsEvidence>(
     request_timestamp: '2026-08-11T00:00:00.000Z',
     extracted_at: '2026-08-11T00:00:01.000Z',
     final_url: evidence.url,
-    body_sha256: createHash('sha256').update(evidence.excerpt).digest('hex'),
+    body_sha256: createHash('sha256').update(completeBody).digest('hex'),
+    response_profile: 'proof_excerpt_v1' as const,
+    response_hmac_contract: 'canonical-json-excluding-response_hmac-v1' as const,
+    proof_excerpt: {
+      contract: 'proof_excerpt_v1' as const,
+      algorithm: 'utf8-nfc-ws1-codepoint-prefix-v1' as const,
+      max: 3_000 as const,
+      sha256: createHash('sha256').update(evidence.excerpt).digest('hex'),
+      utf8_bytes: excerptBytes,
+      code_points: Array.from(evidence.excerpt).length,
+    },
   };
   return {
     ...evidence,

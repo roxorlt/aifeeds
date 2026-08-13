@@ -6,6 +6,8 @@ import { processManualNewsLead, type ManualLeadProcessingAdapters } from './manu
 import {
   applyManualLeadEvidencePolicy,
   buildManualLeadFactVerificationPrompt,
+  createManualLeadVerificationProof,
+  isCurrentManualLeadVerification,
   MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
   MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
   MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
@@ -773,28 +775,9 @@ describe('manual lead D1-backed dedupe', () => {
     ).get(first.lead.id)).toMatchObject({ count: 1 });
   });
 
-  test('persists the normalized bounded-fetch audit with evidence', async () => {
+  test('persists the signed bounded proof-excerpt audit with evidence', async () => {
     const state = fixture('extracting');
-    const fetchAudit = {
-      hops: [{
-        url: 'https://support.claude.com/example',
-        validated_ip: '93.184.216.34',
-        connected_ip: '93.184.216.34',
-      }],
-      source_content_type: 'text/html',
-      extraction: 'html' as const,
-      requested_limits: {
-        source_bytes: 8_388_608, extracted_text_bytes: 2_097_152, extracted_text_characters: 1_000_000,
-      },
-      applied_limits: {
-        source_bytes: 8_388_608, extracted_text_bytes: 2_097_152, extracted_text_characters: 1_000_000,
-      },
-      actual_sizes: { source_bytes: 80, extracted_text_bytes: 60, extracted_text_characters: 60 },
-      truncation: { source: false, extracted_text: false },
-      parser: { result: 'success' as const, version: 'research-gateway-parser/1.0.0' },
-    };
-    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
-    await store.replaceEvidence(state.leadId, 4, [{
+    const signedEvidence = withSignedArticleTextV2Audit({
       id: 'ev-audited',
       url: 'https://support.claude.com/example',
       source_type: 'official_help',
@@ -805,14 +788,17 @@ describe('manual lead D1-backed dedupe', () => {
       excerpt: 'Supported products only.',
       claims_supported: ['Supported products only.'],
       reliable: true,
-      fetch_audit: fetchAudit,
-    }]);
+    });
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    await store.replaceEvidence(state.leadId, 4, [signedEvidence]);
 
     const saved = await store.getLead(state.leadId);
-    expect(saved?.evidence).toEqual([expect.objectContaining({ id: 'ev-audited', fetch_audit: fetchAudit })]);
+    expect(saved?.evidence).toEqual([expect.objectContaining({
+      id: 'ev-audited', fetch_audit: signedEvidence.fetch_audit,
+    })]);
     expect(JSON.parse(String(state.db.sqlite.prepare(
       'SELECT fetch_audit_json FROM manual_news_evidence WHERE lead_id = ? AND evidence_id = ?',
-    ).get(state.leadId, 'ev-audited')?.fetch_audit_json))).toEqual(fetchAudit);
+    ).get(state.leadId, 'ev-audited')?.fetch_audit_json))).toEqual(signedEvidence.fetch_audit);
     const audit = state.db.sqlite.prepare(`SELECT mutation_nonce, metadata_json FROM manual_news_lead_audit
       WHERE lead_id = ? AND action = 'evidence_replace'`).get(state.leadId) as {
         mutation_nonce: string;
@@ -825,6 +811,70 @@ describe('manual lead D1-backed dedupe', () => {
       evidence_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
       mutation_nonce: audit.mutation_nonce,
     });
+  });
+
+  test('persists and reloads 8 bounded sources as current without retaining a complete-body tail', async () => {
+    const state = fixture('extracting');
+    const excerpt = `${fixtureFact} ${'A'.repeat(3_000 - Array.from(fixtureFact).length - 1)}`;
+    const completeBody = `${excerpt} COMPLETE-BODY-TAIL-SENTINEL`;
+    const first = withSignedArticleTextV2Audit({
+      ...fixtureEvidence()[0], excerpt, claims_supported: [excerpt],
+    }, completeBody);
+    const evidence = [first, ...replacementEvidence(7)];
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+
+    await store.replaceEvidence(state.leadId, 4, evidence);
+    const loaded = (await store.getLead(state.leadId))!.evidence;
+    expect(loaded).toHaveLength(8);
+    expect(JSON.stringify(loaded)).not.toContain('COMPLETE-BODY-TAIL-SENTINEL');
+    expect(JSON.stringify(state.db.sqlite.prepare(
+      'SELECT * FROM manual_news_evidence WHERE lead_id = ? ORDER BY evidence_id',
+    ).all(state.leadId))).not.toContain('COMPLETE-BODY-TAIL-SENTINEL');
+    expect(JSON.stringify(state.db.sqlite.prepare(
+      'SELECT * FROM manual_news_lead_audit WHERE lead_id = ? ORDER BY id',
+    ).all(state.leadId))).not.toContain('COMPLETE-BODY-TAIL-SENTINEL');
+
+    const candidate = processedAssessment();
+    const proofInput = {
+      lead_id: state.leadId,
+      assessment_version: 4,
+      assessment: candidate,
+      evidence: loaded,
+      verification: verifiedAssessment(candidate),
+    };
+    const proof = await createManualLeadVerificationProof(
+      proofInput, VERIFICATION_SECRET, TEST_MANUAL_NEWS_RESPONSE_SECRET,
+    );
+    expect(JSON.stringify(proof)).not.toContain('COMPLETE-BODY-TAIL-SENTINEL');
+    await expect(isCurrentManualLeadVerification(
+      proofInput, proof, VERIFICATION_SECRET, TEST_MANUAL_NEWS_RESPONSE_SECRET,
+    )).resolves.toBe(true);
+  });
+
+  test('fails closed when persisted evidence is bypassed to a ninth source before load', async () => {
+    const state = fixture('extracting');
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    const beforeRejectedStore = state.db.sqlite.prepare(
+      'SELECT COUNT(*) AS count FROM manual_news_evidence WHERE lead_id = ?',
+    ).get(state.leadId);
+    await expect(store.replaceEvidence(state.leadId, 4, replacementEvidence(9)))
+      .rejects.toThrow(/manual_news_evidence_set_invalid/);
+    expect(state.db.sqlite.prepare(
+      'SELECT COUNT(*) AS count FROM manual_news_evidence WHERE lead_id = ?',
+    ).get(state.leadId)).toEqual(beforeRejectedStore);
+    await store.replaceEvidence(state.leadId, 4, replacementEvidence(8));
+    const ninth = replacementEvidence(9)[8];
+    state.db.sqlite.prepare(`INSERT INTO manual_news_evidence (
+      lead_id, evidence_id, url, source_type, publisher, published_at, retrieved_at,
+      title, excerpt, claims_supported_json, fetch_audit_json, reliable
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      state.leadId, ninth.id, ninth.url, ninth.source_type, ninth.publisher, ninth.published_at,
+      ninth.retrieved_at, ninth.title, ninth.excerpt, JSON.stringify(ninth.claims_supported),
+      JSON.stringify(ninth.fetch_audit), ninth.reliable ? 1 : 0,
+    );
+
+    await expect(getManualNewsLead(state.env, state.leadId))
+      .rejects.toThrow(/manual_news_evidence_set_invalid/);
   });
 
   test('replaces an initially empty evidence set without treating DELETE changes=0 as stale', async () => {

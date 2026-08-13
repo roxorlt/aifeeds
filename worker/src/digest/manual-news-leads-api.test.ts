@@ -35,6 +35,21 @@ const record = {
   created_at: 1, updated_at: 1,
 };
 
+const boundedDetailEvidence = Array.from({ length: 8 }, (_, index) => ({
+  id: `ev-detail-${index + 1}`,
+  url: `https://example.com/detail-${index + 1}`,
+  source_type: 'independent_media',
+  publisher: 'example.com',
+  published_at: null,
+  retrieved_at: 1,
+  title: `Evidence ${index + 1}`,
+  excerpt: '😀'.repeat(3_000),
+  claims_supported: ['😀'.repeat(3_000)],
+  reliable: true,
+  fetch_audit: { final_url: `https://example.com/detail-${index + 1}` },
+  body: 'COMPLETE-BODY-TAIL-SENTINEL',
+}));
+
 const workflowCreate = vi.fn(async () => ({ id: 'manual-news-lead-workflow-instance' }));
 
 function env(overrides: Record<string, unknown> = {}) {
@@ -169,15 +184,45 @@ describe('manual daily news leads API', () => {
     expect(processManualNewsLeadWithEnv).not.toHaveBeenCalled();
   });
 
-  test('lists date-scoped status and returns a single lead with evidence details', async () => {
+  test('keeps the workbench list bounded and fetches one bounded detail on demand', async () => {
+    const detailRecord = {
+      ...record,
+      evidence: boundedDetailEvidence,
+      complete_body: 'COMPLETE-BODY-TAIL-SENTINEL',
+    };
+    vi.mocked(listManualNewsLeads).mockResolvedValueOnce(Array.from(
+      { length: 51 }, (_, index) => ({ ...detailRecord, id: `${record.id}-${index}` }),
+    ) as never);
+    vi.mocked(getManualNewsLead).mockResolvedValueOnce(detailRecord as never);
     const listResponse = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads?date=2026-08-11'), env(), { waitUntil() {} } as never);
     expect(listResponse.status).toBe(200);
     expect(listManualNewsLeads).toHaveBeenCalledWith(expect.anything(), '2026-08-11');
-    await expect(listResponse.clone().json()).resolves.toMatchObject({ candidate_batch: { revision: 1 } });
+    const listPayload = await listResponse.clone().json<{
+      leads: Array<Record<string, unknown>>;
+      candidate_batch: { revision: number };
+    }>();
+    expect(listPayload.candidate_batch).toMatchObject({ revision: 1 });
+    expect(listPayload.leads).toHaveLength(50);
+    expect(listPayload.leads[0]).toMatchObject({ status: record.status, evidence_count: 8 });
+    expect(listPayload.leads[0]).not.toHaveProperty('evidence');
+    expect(listPayload.leads[0]).not.toHaveProperty('assessment');
+    expect(JSON.stringify(listPayload)).not.toContain('COMPLETE-BODY-TAIL-SENTINEL');
 
     const detailResponse = await handleManualNewsLeadsApi(request(`/api/digest/daily-news-leads/${record.id}`), env(), { waitUntil() {} } as never);
     expect(detailResponse.status).toBe(200);
     expect(getManualNewsLead).toHaveBeenCalledWith(expect.anything(), record.id);
+    const detailPayload = await detailResponse.clone().json<{
+      lead: { evidence: Array<Record<string, unknown>> };
+    }>();
+    expect(detailPayload.lead.evidence).toHaveLength(8);
+    for (const evidence of detailPayload.lead.evidence) {
+      expect(Array.from(String(evidence.excerpt))).toHaveLength(3_000);
+      expect(new TextEncoder().encode(String(evidence.excerpt)).byteLength).toBe(12_000);
+      expect(evidence).not.toHaveProperty('body');
+      expect(evidence).not.toHaveProperty('claims_supported');
+      expect(evidence).not.toHaveProperty('fetch_audit');
+    }
+    expect(JSON.stringify(detailPayload)).not.toContain('COMPLETE-BODY-TAIL-SENTINEL');
   });
 
   test.each(['assessment', 'verification'] as const)(
@@ -415,6 +460,7 @@ describe('manual daily news leads API', () => {
   });
 
   test('maps idempotency conflicts, validation, dependency, and internal errors without leaking raw exceptions', async () => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     vi.mocked(submitManualNewsLead).mockRejectedValueOnce(new Error('idempotency_key_reused_with_different_payload'));
     const conflict = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
       method: 'POST', headers: { 'Idempotency-Key': 'submit-conflict' },
@@ -438,6 +484,7 @@ describe('manual daily news leads API', () => {
     expect(internal.status).toBe(500);
     await expect(internal.clone().json()).resolves.toEqual({ ok: false, error: 'internal_error' });
     expect(await internal.clone().text()).not.toContain('SENTINEL');
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain('SENTINEL');
   });
 
   test('maps malformed and oversized bodies to client errors and catches internal failures on read routes', async () => {

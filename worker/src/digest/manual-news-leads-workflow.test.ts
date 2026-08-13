@@ -49,6 +49,27 @@ describe('manual news lead workflow', () => {
     expect(failManualNewsLeadAfterExhaustion).not.toHaveBeenCalled();
   });
 
+  test('never serializes a complete-body tail into durable workflow step output', async () => {
+    const completeBodyTail = 'COMPLETE-BODY-TAIL-SENTINEL';
+    vi.mocked(processManualNewsLeadWithEnv).mockImplementationOnce(async () => ({
+      complete_body: completeBodyTail,
+    }) as never);
+    let durableStepOutput: unknown = 'not-called';
+    const step = {
+      do: vi.fn(async (_name, _options, callback: () => Promise<void>) => {
+        durableStepOutput = await callback();
+        return durableStepOutput;
+      }),
+    };
+
+    await runManualNewsLeadWorkflow({} as never, {
+      lead_id: 'ml-20260811-abc123def456', processing_owner: 'workflow-no-body-output',
+    }, step as never);
+
+    expect(durableStepOutput).toBeUndefined();
+    expect(JSON.stringify({ durableStepOutput })).not.toContain(completeBodyTail);
+  });
+
   test('lets the durable step retry two transient failures before succeeding', async () => {
     vi.mocked(claimManualNewsLeadProcessing)
       .mockResolvedValueOnce(1)

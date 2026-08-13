@@ -19,9 +19,29 @@
 
 ## 安全与一致性
 
+### 2026-08-13 架构重置：ARCH-01 / ARCH-02 / ARCH-03
+
+本节是跨仓冻结计划 `2026-08-13-manual-news-proof-and-extractor-closure.md` 的 CF consumer addendum。稳定 finding ID 不重编号：
+
+- **ARCH-01（HK，CF 明确不接管）**：Chromium preflight、session/process group、profile、TERM→KILL、wait/close、PGID 消失确认及 semaphore 释放只能由 HK Node 单一生命周期所有者负责。CF 不增加 browser 或任意用户域名网络能力。
+- **ARCH-02（CF 阻断）**：完整网关正文若进入 `ManualNewsEvidence`、`claims_supported`、D1、Workflow step output、API DTO、日志/错误 metadata 或 proof canonical payload，会造成持久化泄露、响应放大和不同边界对正文/摘要关系的重新解释。完整正文只能在 `/v1/document` transport 函数局部存活；认证 HMAC、完整正文 SHA-256/UTF-8 byte/Unicode code-point size 后，CF 按冻结算法派生 excerpt，并在返回 transport DTO 前解除完整正文引用。任何后续层都不得接收完整正文参数。
+- **ARCH-03（跨 HK/CF 阻断）**：只有请求显式协商 `response_profile='proof_excerpt_v1'` 时，HK 才增加已签名的 `response_profile`、`response_hmac_contract` 与 `proof_excerpt`。CF v10 每次 document 请求都必须显式发送该 profile，并对缺失、未知或结构不精确的 profile 失败关闭；旧 v2 兼容只属于 HK，不属于 CF v10 consumer。
+
+`proof_excerpt_v1` 的冻结字段为：`contract='proof_excerpt_v1'`、`algorithm='utf8-nfc-ws1-codepoint-prefix-v1'`、`max=3000`、`sha256`（64 位小写 hex）、`utf8_bytes`、`code_points`。`response_hmac_contract='canonical-json-excluding-response_hmac-v1'`；response HMAC 覆盖 audit 中除 `response_hmac` 外的全部字段，header 不携带 excerpt 文本。
+
+冻结派生算法按以下顺序执行且不得使用运行时 `\s`、locale 或 grapheme segmentation：正文 NFC；把连续的显式 whitespace code point 集合折叠为一个 ASCII space U+0020；去除首尾 ASCII space；取前 3000 个 Unicode code points；再次只去除尾部 ASCII space；不加省略号。冻结集合为 U+0009–U+000D、U+0020、U+00A0、U+1680、U+2000–U+200A、U+2028、U+2029、U+202F、U+205F、U+3000、U+FEFF。CJK、emoji、combining sequence、CRLF、NBSP、全角空格、FEFF 与 2999/3000/3001 边界必须共享 golden vectors。
+
+CF bounded API/persistence 不变量：
+
+1. 每个 lead 的 store/load 允许 0–8 条 evidence，proof/create/current 只允许 1–8 条；拒绝第 9 条、重复 evidence ID 和重复规范化 final URL。0 条证据只允许沿既有 `needs_review` 失败关闭路径，不能创建 proof。
+2. 每条持久化 excerpt 最多 3000 Unicode code points、最多 12000 UTF-8 bytes，且 digest/size 必须与 signed `proof_excerpt` 完全相同。`claims_supported` 只允许恰好一个与 excerpt 相同的 bounded 字符串，不能成为第二正文通道。
+3. `article_text`、`text`、`json`、`pdf_text` 使用同一个 excerpt contract。transport 首先认证完整正文，持久化/current 则只用 response HMAC 与 signed excerpt digest/sizes 确定性复验，不读取当前墙钟。
+4. list API 最多 50 条 summary，只返回 `evidence_count`，不返回 evidence/audit/excerpt；detail API 最多返回 8 条上述 bounded evidence。工作台先 list，再在需要展示详情或执行基于 version 的动作前 GET detail；CF API 自动化必须覆盖该交互。
+5. D1 row、Workflow step return、API JSON、审计和错误日志的测试 sentinel 均不得出现完整正文尾部；旧无 profile、旧 full-body carrier、超限或重复证据统一走现有 invalid-proof 隐藏/隔离及显式 retry/re-evidence，不原地升级。
+
 - Mutating API 同时要求 Bearer secret、`Idempotency-Key` 与 `expected_version`；D1 条件更新负责并发冲突检测。
 - 只允许 HTTP(S) 标准端口、无 URL credentials；Worker 的唯一网络 peer 是 `MANUAL_NEWS_RESEARCH_ORIGIN` 指定的固定 HTTPS origin。网关逐跳返回 target URL、DNS 验证 IP 和实际连接 IP；Worker 要求两 IP 相同且均为公网，否则在读取正文前失败关闭。最多 3 跳，读取正文期间继续执行 12 秒 deadline，并以流式方式执行 2 MiB 增量上限。
-- 正式证据统一使用 signed `article_text_v2` envelope。请求携带 `extraction_mode=article_text_v2`、随机 nonce、canonical request timestamp、limits 与 max redirects；响应 audit 必须完整包含相同 nonce/timestamp、canonical extracted timestamp、逐跳 peer、final URL、source/extraction、requested/applied/actual limits、无截断标记、成功 parser、body SHA-256、`protocol_version=article_text_v2`，以及用环境独立 response secret 对除 `response_hmac` 外完整 canonical audit 计算的 HMAC。HTML/XHTML 只接受 Chromium 提取的完整单一 `article_text` 及一致的 title/published_at/selection/content_complete metadata，CF 不重解释 raw HTML；text/plain、JSON、PDF 分别保留 `text`、`json`、`pdf_text` 语义，但也必须位于同一 v2 envelope。所有模式都先认证 audit HMAC，再按 signed body digest/actual sizes 验证唯一持久化完整 body；`signed-body-to-proof-excerpt-v1` 规定 article excerpt 为 identity，text/JSON/PDF excerpt 为 whitespace-normalized Unicode 前 3000 字符，并把 derivation、body digest、完整 body 与 excerpt 一并绑定 verification HMAC。PDF bytes 绝不在 Worker 中按 UTF-8/HTML 处理。
+- 正式证据统一使用 negotiated signed `article_text_v2` + `proof_excerpt_v1` envelope。请求携带 `extraction_mode=article_text_v2`、`response_profile=proof_excerpt_v1`、随机 nonce、canonical request timestamp、limits 与 max redirects；响应 audit 必须完整包含相同 nonce/timestamp、canonical extracted timestamp、逐跳 peer、final URL、source/extraction、requested/applied/actual limits、无截断标记、成功 parser、完整 body SHA-256、`protocol_version=article_text_v2`、精确 profile/HMAC contract/proof excerpt claims，以及用环境独立 response secret 对除 `response_hmac` 外完整 canonical audit 计算的 HMAC。HTML/XHTML 只接受 Chromium 提取的完整单一 `article_text` 及一致的 title/published_at/selection/content_complete metadata，CF 不重解释 raw HTML；text/plain、JSON、PDF 分别保留 `text`、`json`、`pdf_text` 语义。所有模式都在 transport 层先认证 HMAC 和完整 body digest/sizes，再按冻结算法独立派生 bounded excerpt 并立即丢弃 body；后续 evidence/proof/D1/API 只持有 excerpt 与 signed audit。PDF bytes 绝不在 Worker 中按 UTF-8/HTML 处理。
 - 来源权威等级只由最终抓取 URL 的精确 registrable-domain allowlist 决定；用户和搜索 hint 不能指定 `source_type`、`reliable` 或官方身份。
 - 模型额外字段、缺字段、非法枚举、未知 evidence ID 均失败关闭；不确定范围/时间必须显式输出。
 - 结构化高置信 anchor 在模型调用前执行精确 token-set 门控；URL 和 note 不参与，`o3` 不匹配 `o3-mini`，`GPT-5.6` 不匹配 preview/5.60，并保守支持 `Claude 5` 这类实体+独立版本组合。纯中文且无结构 anchor 的线索交给双模型与 quote gate，不做伪中文分词。
@@ -29,7 +49,7 @@
 - evidence、assessment、verification 的写入/失效全部绑定 lead version、processing owner、`processing_attempt` fencing token 和状态。接管后即使 owner 相同，旧 attempt 对 `replaceEvidence`、`saveVerifiedAssessment`、`invalidateAssessment` 和状态转换均为零写入；失效只保留带 owner/attempt/version/digest/nonce 的审计并把 verification 标记为 invalidated，不物理删除历史 assessment。
 - 候选批次最多 10 条，确认操作保留当前 production selection，`rerender_enqueued` 固定为 `false`。
 - `daily_news_review_candidate_generations` 按日期/lineage 懒初始化为 0；历史日期及既有 batch 的 `candidate_generation` 默认 0。它只在成功的 pre-freeze confirmation 中单调递增，同幂等键重放不重复递增；active revision 仍沿用原 batch revision CAS。
-- CF 将规范化抓取审计持久化在每条 `manual_news_evidence.fetch_audit_json`；HK 不存事实副本，只展示 CF 响应。
+- CF 将规范化抓取审计持久化在每条 `manual_news_evidence.fetch_audit_json`，但绝不持久化完整正文；HK 不存事实副本，只展示 CF bounded list/detail 响应。
 
 ## 发布与验收
 
@@ -44,5 +64,5 @@
 ## 研究网关契约
 
 - `/v1/search` 返回严格 `{results:[{url,title,snippet,published_at}]}`，最多 8 条；搜索摘要只用于发现 URL，所有候选 URL 仍须经过 `/v1/document` 重新取证。
-- `/v1/document` 请求体为 `{url,extraction_mode:'article_text_v2',request_nonce,request_timestamp,limits:{source_bytes,extracted_text_bytes,extracted_text_characters},max_redirects}`；只返回 UTF-8 提取文本，并通过 `X-AIFeeds-Fetch-Audit` 提供上述严格 signed v2 audit。`requested_limits` 必须与 Worker 请求一致，applied 不得放宽 requested，actual 不得超过 applied；成功证据禁止任何截断且 parser result 必须为 `success`。HTML/XHTML 不得返回 raw HTML，PDF 必须由生产级 parser 转换成 `pdf_text`。
+- `/v1/document` 的 CF v10 请求体为 `{url,extraction_mode:'article_text_v2',response_profile:'proof_excerpt_v1',request_nonce,request_timestamp,limits:{source_bytes,extracted_text_bytes,extracted_text_characters},max_redirects}`；只返回 UTF-8 提取文本，并通过 `X-AIFeeds-Fetch-Audit` 提供上述严格 signed profile audit。`requested_limits` 必须与 Worker 请求一致，applied 不得放宽 requested，actual 不得超过 applied；成功证据禁止任何截断且 parser result 必须为 `success`。HTML/XHTML 不得返回 raw HTML，PDF 必须由生产级 parser 转换成 `pdf_text`。
 - origin 未配置、token 缺失、schema 不合法、审计缺失、peer 不一致、正文超时或超限时，线索进入失败/待复核状态，绝不能把仅有 D1 或搜索摘要伪装成已完成开放网络研究。

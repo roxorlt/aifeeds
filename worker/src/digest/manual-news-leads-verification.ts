@@ -1,5 +1,6 @@
 import type { Env } from '../index';
 import {
+  assertManualNewsEvidenceLoadBounds,
   isCurrentManualLeadVerification,
   isManualNewsVerificationSecretConfigured,
   validateManualLeadFactVerification,
@@ -159,7 +160,9 @@ export async function loadManualNewsEvidence(env: Env, leadId: string): Promise<
   const result = await env.DB.prepare(
     `/* manual_evidence:list */ SELECT * FROM manual_news_evidence WHERE lead_id = ? ORDER BY evidence_id`,
   ).bind(leadId).all<ManualEvidenceRow>();
-  return (result.results || []).map(evidenceFromRow);
+  const evidence = (result.results || []).map(evidenceFromRow);
+  assertManualNewsEvidenceLoadBounds(evidence);
+  return evidence;
 }
 
 export async function verifyPersistedManualAssessment(

@@ -13,6 +13,30 @@ const responseSecret = '11'.repeat(32);
 const requestNonce = '22'.repeat(16);
 const protocolNow = Date.parse('2026-08-12T00:00:00.000Z');
 const requestTimestamp = new Date(protocolNow).toISOString();
+const responseProfile = 'proof_excerpt_v1';
+const responseHmacContract = 'canonical-json-excluding-response_hmac-v1';
+const proofExcerptAlgorithm = 'utf8-nfc-ws1-codepoint-prefix-v1';
+
+function referenceProofExcerpt(value: string): string {
+  return Array.from(value.normalize('NFC')
+    .replace(/[\u0009-\u000d\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/gu, ' ')
+    .replace(/^ +| +$/gu, ''))
+    .slice(0, 3_000)
+    .join('')
+    .replace(/ +$/gu, '');
+}
+
+function proofExcerptClaims(body: string) {
+  const excerpt = referenceProofExcerpt(body);
+  return {
+    contract: responseProfile,
+    algorithm: proofExcerptAlgorithm,
+    max: 3_000,
+    sha256: createHash('sha256').update(excerpt).digest('hex'),
+    utf8_bytes: new TextEncoder().encode(excerpt).byteLength,
+    code_points: Array.from(excerpt).length,
+  };
+}
 
 function service(fetcher: typeof fetch, overrides: Partial<TrustedResearchService> = {}): TrustedResearchService {
   return {
@@ -63,6 +87,11 @@ function fetchAudit(input: {
     body_sha256: string;
     response_hmac: string;
   }>;
+  profile?: false | Partial<{
+    response_profile: string;
+    response_hmac_contract: string;
+    proof_excerpt: ReturnType<typeof proofExcerptClaims>;
+  }>;
   body?: string;
 }): string {
   const sourceContentType = input.source_content_type || 'text/html';
@@ -92,6 +121,11 @@ function fetchAudit(input: {
     extracted_at: input.protocol?.extracted_at || requestTimestamp,
     final_url: input.protocol?.final_url || input.hops.at(-1)!.url,
     body_sha256: input.protocol?.body_sha256 || createHash('sha256').update(body).digest('hex'),
+    ...(input.profile === false ? {} : {
+      response_profile: input.profile?.response_profile || responseProfile,
+      response_hmac_contract: input.profile?.response_hmac_contract || responseHmacContract,
+      proof_excerpt: input.profile?.proof_excerpt || proofExcerptClaims(body),
+    }),
   };
   const audit = {
     ...unsigned,
@@ -215,6 +249,7 @@ describe('trusted manual-news research boundary', () => {
       limits: documentLimits,
       max_redirects: 3,
       extraction_mode: 'article_text_v2',
+      response_profile: 'proof_excerpt_v1',
       request_nonce: requestNonce,
       request_timestamp: requestTimestamp,
     });
@@ -241,7 +276,7 @@ describe('trusted manual-news research boundary', () => {
       published_at: '2026-07-04T08:00:00.000Z',
       content_complete: true,
       selection: 'article',
-      body,
+      excerpt: body,
       fetch_audit: {
         extraction: 'article_text',
         applied_limits: articleAppliedLimits,
@@ -251,6 +286,88 @@ describe('trusted manual-news research boundary', () => {
         final_url: 'https://example.com/story',
       },
     });
+  });
+
+  test('negotiates proof_excerpt_v1 and returns only the independently derived excerpt', async () => {
+    const completeBody = `${'A'.repeat(3_001)} COMPLETE-BODY-TAIL-SENTINEL`;
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        extraction_mode: 'article_text_v2', response_profile: responseProfile,
+      });
+      return gatewayResponse(completeBody, { hops: [publicHop()], profile: {} });
+    });
+
+    const document = await fetchPublicDocument('https://example.com/story', {
+      service: service(fetcher as typeof fetch),
+    });
+
+    expect(document).toMatchObject({
+      excerpt: 'A'.repeat(3_000),
+      fetch_audit: {
+        response_profile: responseProfile,
+        response_hmac_contract: responseHmacContract,
+        proof_excerpt: proofExcerptClaims(completeBody),
+      },
+    });
+    expect(document).not.toHaveProperty('body');
+    expect(JSON.stringify(document)).not.toContain('COMPLETE-BODY-TAIL-SENTINEL');
+  });
+
+  test.each([
+    ['CJK', '　你好\t世界\n再见　', '你好 世界 再见'],
+    ['emoji', '😀\t👩‍💻', '😀 👩‍💻'],
+    ['combining NFC', ' Cafe\u0301 ', 'Café'],
+    ['CRLF', 'alpha\r\nbeta', 'alpha beta'],
+    ['NBSP/fullwidth/FEFF', 'a\u00a0b\u3000c\ufeffd', 'a b c d'],
+    ['2999 code points', '界'.repeat(2_999), '界'.repeat(2_999)],
+    ['3000 code points', '界'.repeat(3_000), '界'.repeat(3_000)],
+    ['3001 code points', '界'.repeat(3_001), '界'.repeat(3_000)],
+    ['trailing trim after prefix', `${'x'.repeat(2_999)} tail`, 'x'.repeat(2_999)],
+  ])('matches the shared proof_excerpt_v1 golden vector: %s', async (_name, body, expected) => {
+    const document = await fetchPublicDocument('https://example.com/story', {
+      service: service(async () => gatewayResponse(body, {
+        hops: [publicHop()], source_content_type: 'text/plain', extraction: 'text', profile: {},
+      }) as never),
+    });
+    expect(document).toMatchObject({ excerpt: expected });
+    expect(document.fetch_audit.proof_excerpt).toEqual(proofExcerptClaims(body));
+  });
+
+  test('fails closed when the negotiated profile is absent or its signed excerpt claims are substituted', async () => {
+    const body = 'Signed complete body.';
+    await expect(fetchPublicDocument('https://example.com/story', {
+      service: service(async () => gatewayResponse(body, { hops: [publicHop()], profile: false }) as never),
+    })).rejects.toThrow(/unsafe_gateway_audit:(invalid_schema|profile)/);
+
+    await expect(fetchPublicDocument('https://example.com/story', {
+      service: service(async () => gatewayResponse(body, {
+        hops: [publicHop()],
+        profile: { proof_excerpt: { ...proofExcerptClaims(body), sha256: '00'.repeat(32) } },
+      }) as never),
+    })).rejects.toThrow(/unsafe_gateway_audit:proof_excerpt/);
+  });
+
+  test.each([
+    ['text/plain', 'text'],
+    ['application/json', 'json'],
+    ['application/pdf', 'pdf_text'],
+  ])('accepts a max-size signed %s %s body without retaining its tail', async (sourceType, extraction) => {
+    const tail = '🔒MAX-BODY-TAIL-SENTINEL';
+    const completeBody = `${'😀'.repeat(524_281)}${tail}`;
+    const bytes = new TextEncoder().encode(completeBody).byteLength;
+    expect(bytes).toBeLessThanOrEqual(documentLimits.extracted_text_bytes);
+    const document = await fetchPublicDocument('https://example.com/story', {
+      service: service(async () => gatewayResponse(completeBody, {
+        hops: [publicHop()], source_content_type: sourceType, extraction, profile: {},
+        actual_sizes: {
+          source_bytes: sourceType === 'application/pdf' ? 8_000_000 : bytes,
+          extracted_text_bytes: bytes,
+          extracted_text_characters: Array.from(completeBody).length,
+        },
+      }) as never),
+    });
+    expect(Array.from(document.excerpt)).toHaveLength(3_000);
+    expect(JSON.stringify(document)).not.toContain(tail);
   });
 
   test('rejects legacy HTML and forged or incomplete article_text audits for the opt-in request', async () => {
@@ -376,7 +493,7 @@ describe('trusted manual-news research boundary', () => {
     const document = await fetchPublicDocument('https://example.com/story', {
       service: service(async () => gatewayResponse('<p>final</p>', { hops }) as never),
     });
-    expect(document).toMatchObject({ url: 'https://www.example.com/final', redirects: 1, body: '<p>final</p>' });
+    expect(document).toMatchObject({ url: 'https://www.example.com/final', redirects: 1, excerpt: '<p>final</p>' });
 
     await expect(fetchPublicDocument('https://example.com/story', {
       maxRedirects: 1,
@@ -514,7 +631,7 @@ describe('trusted manual-news research boundary', () => {
       }) as never),
     });
     expect(document).toMatchObject({
-      content_type: sourceType, extraction, body,
+      content_type: sourceType, extraction, excerpt: body,
       fetch_audit: { protocol_version: 'article_text_v2', body_sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
     });
   });
