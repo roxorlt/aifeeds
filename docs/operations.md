@@ -3,7 +3,9 @@
 > 维护目标：跨 session、跨设备、跨人都能快速搞清楚「谁在哪里跑什么」。
 > 每次新增/下线服务都要同步改这个文档。
 
-最后更新：2026-08-11（手工补录行业新闻线索 vertical MVP 已完成本地实现，新增 D1 migration 033、内部 API 与 `manual-news-lead-workflow`；尚未迁移或部署，见「手工补录行业新闻线索」）
+最后更新：2026-08-13（手工补录行业新闻线索已全量上线 prod：PR #212 合并 + CI 部署，D1 migration 033-036 已执行，3 个新 secret（MANUAL_NEWS_RESEARCH_ORIGIN / MANUAL_NEWS_RESEARCH_TOKEN / MANUAL_NEWS_VERIFICATION_SECRET）已配置，端到端验证通过（工作台提交 → 202 受理 → 核验流水线）。修复 8/13 上午「提交补录 404 Not found」事故——根因是 HK 侧 8/11 先行部署而 CF 侧未发布。见「手工补录行业新闻线索」）
+
+历史：2026-08-11（手工补录行业新闻线索 vertical MVP 本地实现完成；当时尚未迁移或部署）
 
 历史：2026-07-23（admin analytics 统一非真人过滤已上线：声明式 crawler telemetry 200 no-op，历史 DAU/性能/错误查询排除 crawler 与未标记浏览器自动化；PR #209 / production `94946fc`）
 
