@@ -2629,7 +2629,9 @@ function promptEvidenceContainmentKey(value: string): string {
 
 function promptEvidenceDocument(item: ManualNewsEvidence) {
   let excerpt = normalizedPromptEvidenceText(item.excerpt);
-  const uniqueClaims = item.claims_supported
+  const signedNonArticleBody = item.fetch_audit?.protocol_version === 'article_text_v2'
+    && item.fetch_audit.extraction !== 'article_text';
+  const uniqueClaims = (signedNonArticleBody ? [] : item.claims_supported)
     .map(normalizedPromptEvidenceText)
     .filter((claim, index, all) => !!claim && all.indexOf(claim) === index);
   if (excerpt && uniqueClaims.some((claim) =>
@@ -5710,6 +5712,8 @@ const MANUAL_NEWS_ARTICLE_PROVENANCE_MAX_BYTES = 28_000;
 const MANUAL_NEWS_ARTICLE_PROVENANCE_MAX_CHARACTERS = 28_000;
 const MANUAL_NEWS_PROVENANCE_MAX_REDIRECTS = 3;
 const MANUAL_NEWS_PROVENANCE_MAX_EXTRACTION_DELAY_MS = 330_000;
+const MANUAL_NEWS_EVIDENCE_BODY_DERIVATION_CONTRACT = 'signed-body-to-proof-excerpt-v1';
+const MANUAL_NEWS_NON_ARTICLE_EXCERPT_MAX_CHARACTERS = 3_000;
 
 function invalidManualNewsEvidenceProvenance(): never {
   throw new Error('manual_news_evidence_provenance_invalid');
@@ -5907,19 +5911,39 @@ function normalizedSignedEvidenceProvenance(item: ManualNewsEvidence): DocumentF
 
 function canonicalProofEvidence(evidence: readonly ManualNewsEvidence[]) {
   if (!evidence.length) return invalidManualNewsEvidenceProvenance();
-  return [...evidence].sort((left, right) => left.id.localeCompare(right.id)).map((item) => ({
-    id: item.id,
-    url: item.url,
-    source_type: item.source_type,
-    publisher: item.publisher,
-    published_at: item.published_at,
-    retrieved_at: item.retrieved_at,
-    title: item.title,
-    excerpt: item.excerpt,
-    claims_supported: [...item.claims_supported].sort(),
-    reliable: item.reliable,
-    fetch_audit: normalizedSignedEvidenceProvenance(item),
-  }));
+  return [...evidence].sort((left, right) => left.id.localeCompare(right.id)).map((item) => {
+    const provenance = normalizedSignedEvidenceProvenance(item);
+    return {
+      id: item.id,
+      url: item.url,
+      source_type: item.source_type,
+      publisher: item.publisher,
+      published_at: item.published_at,
+      retrieved_at: item.retrieved_at,
+      title: item.title,
+      excerpt: item.excerpt,
+      claims_supported: [...item.claims_supported].sort(),
+      reliable: item.reliable,
+      fetch_audit: provenance,
+      body_derivation: {
+        contract: MANUAL_NEWS_EVIDENCE_BODY_DERIVATION_CONTRACT,
+        complete_body_sha256: provenance.body_sha256,
+        excerpt_derivation: provenance.extraction === 'article_text'
+          ? 'identity-v1'
+          : 'whitespace-normalized-unicode-prefix-3000-v1',
+      },
+    };
+  });
+}
+
+function derivedManualNewsEvidenceExcerpt(body: string, extraction: DocumentFetchAudit['extraction']): string {
+  return extraction === 'article_text'
+    ? body
+    : compact(body, MANUAL_NEWS_NON_ARTICLE_EXCERPT_MAX_CHARACTERS);
+}
+
+function invalidManualNewsEvidenceBodyDerivation(): never {
+  throw new Error('manual_news_evidence_body_derivation_invalid');
 }
 
 async function assertManualNewsEvidenceBodyDigests(
@@ -5931,12 +5955,21 @@ async function assertManualNewsEvidenceBodyDigests(
   }
   for (const item of evidence) {
     const provenance = normalizedSignedEvidenceProvenance(item);
-    if (provenance.extraction === 'article_text'
-      && await sha256Hex(item.excerpt) !== provenance.body_sha256) {
-      invalidManualNewsEvidenceProvenance();
-    }
     if (!await verifyDocumentFetchAuditResponseHmac(provenance, responseSecret)) {
       throw new Error('manual_news_evidence_response_hmac_invalid');
+    }
+    if (item.claims_supported.length !== 1 || typeof item.claims_supported[0] !== 'string') {
+      invalidManualNewsEvidenceBodyDerivation();
+    }
+    const completeBody = item.claims_supported[0];
+    const bodyBytes = new TextEncoder().encode(completeBody).byteLength;
+    const bodyCharacters = Array.from(completeBody).length;
+    if (!bodyCharacters
+      || await sha256Hex(completeBody) !== provenance.body_sha256
+      || bodyBytes !== provenance.actual_sizes.extracted_text_bytes
+      || bodyCharacters !== provenance.actual_sizes.extracted_text_characters
+      || item.excerpt !== derivedManualNewsEvidenceExcerpt(completeBody, provenance.extraction)) {
+      invalidManualNewsEvidenceBodyDerivation();
     }
   }
 }

@@ -34,9 +34,10 @@ async function createManualLeadVerificationProof(
   input: Parameters<typeof createManualLeadVerificationProofWithRawEvidence>[0],
   secret: string,
 ) {
-  for (const evidence of input.evidence) {
-    Object.assign(evidence, withSignedArticleTextV2Audit(evidence));
-  }
+  const mutableEvidence = input.evidence as ManualNewsEvidence[];
+  input.evidence.forEach((evidence, index) => {
+    mutableEvidence[index] = withSignedArticleTextV2Audit(evidence);
+  });
   return createManualLeadVerificationProofWithRawEvidence(
     input, secret, TEST_MANUAL_NEWS_RESPONSE_SECRET,
   );

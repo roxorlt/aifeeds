@@ -162,6 +162,30 @@ function documentFixture(
 
 const alibabaSupport = 'Alibaba reportedly bans employees from using Claude Code.';
 
+function longSignedBody(_extraction: 'text' | 'json' | 'pdf_text'): string {
+  const repeatedSupport = Array.from({ length: 64 }, () => alibabaSupport);
+  return repeatedSupport.join(' ');
+}
+
+// Valid v10 HMACs for the substituted inputs when the derivation equality check is absent.
+const substitutedExcerptProofs = {
+  text: {
+    policy_version: 'fact-evidence-projection-hmac-v10',
+    canonical_digest: 'b5be6cac8f7a811715d1d3f713f2ae5edb89a8d186f76f1d9bb311c57ce14dea',
+    hmac_sha256: '1a716208be296ad9f2f13550d083953ee839579be4b74edcaf4d0fc295e1dff9',
+  },
+  json: {
+    policy_version: 'fact-evidence-projection-hmac-v10',
+    canonical_digest: '88568370337686d3a31aacf22991784bd4d37e0c6541acbfb7b59a44129747b8',
+    hmac_sha256: '0111bf8e49cb45bcb66461c8a9702c6e511e0770f22ed747e134d4da7b30d61b',
+  },
+  pdf_text: {
+    policy_version: 'fact-evidence-projection-hmac-v10',
+    canonical_digest: '823aaeb41d1d7ac737e190756fcaa565787e6186029e7ce4edec5cdaf0c4dbac',
+    hmac_sha256: '243b08bdbd304e7ff1064fc564ec1e365f1f0afc2d3524c90d0323f3bbb31e3e',
+  },
+} as const;
+
 function alibabaGeneratedAssessment(evidenceId: string) {
   return {
     event_key: 'alibaba-claude-code-employee-ban-2026-07-04',
@@ -488,7 +512,7 @@ describe('manual lead evidence extraction', () => {
       .rejects.toThrow(/manual_news_evidence_provenance_invalid/);
     await expect(isCurrentManualLeadVerification(malformed, proof, secret)).resolves.toBe(false);
     await expect(createManualLeadVerificationProof(forgedBodyDigest, secret))
-      .rejects.toThrow(/manual_news_evidence_provenance_invalid/);
+      .rejects.toThrow(/manual_news_evidence_response_hmac_invalid/);
     await expect(isCurrentManualLeadVerification(forgedBodyDigest, proof, secret)).resolves.toBe(false);
     await expect(createManualLeadVerificationProof(impossiblePublishedAt, secret))
       .rejects.toThrow(/manual_news_evidence_provenance_invalid/);
@@ -553,6 +577,65 @@ describe('manual lead evidence extraction', () => {
     const { proofInput, proof, secret } = await createAlibabaProof(evidence!);
 
     await expect(isCurrentManualLeadVerification(proofInput, proof, secret)).resolves.toBe(true);
+  });
+
+  test.each([
+    ['text/plain', 'text'],
+    ['application/json', 'json'],
+    ['application/pdf', 'pdf_text'],
+  ] as const)('derives a bounded proof excerpt from a signed complete >3000-character %s body', async (
+    sourceType,
+    extraction,
+  ) => {
+    const body = longSignedBody(extraction);
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://techcrunch.com/2026/07/04/alibaba-claude-code/', body, extraction,
+    ), {
+      url: 'https://techcrunch.com/2026/07/04/alibaba-claude-code/',
+      title: 'Alibaba reportedly bans employees from using Claude Code',
+      snippet: alibabaSupport,
+      published_at: '2026-07-04T08:00:00.000Z',
+    }, Date.parse('2026-08-12T00:00:00.000Z'));
+
+    expect(evidence?.fetch_audit).toMatchObject({ source_content_type: sourceType, extraction });
+    expect(Array.from(evidence!.excerpt)).toHaveLength(3_000);
+    expect(evidence!.claims_supported).toEqual([body]);
+    const { proofInput, proof, secret } = await createAlibabaProof(evidence!);
+    const verificationPrompt = JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: proofInput.assessment, evidence: proofInput.evidence,
+    }).user) as { untrusted_evidence: Array<{ excerpt: string; claims_supported: string[] }> };
+    expect(verificationPrompt.untrusted_evidence[0]).toMatchObject({
+      excerpt: evidence!.excerpt, claims_supported: [],
+    });
+    await expect(isCurrentManualLeadVerification(proofInput, proof, secret)).resolves.toBe(true);
+  });
+
+  test.each([
+    ['text/plain', 'text'],
+    ['application/json', 'json'],
+    ['application/pdf', 'pdf_text'],
+  ] as const)('rejects substituted persisted excerpts for a valid signed complete %s body', async (
+    _sourceType,
+    extraction,
+  ) => {
+    const body = longSignedBody(extraction);
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://techcrunch.com/2026/07/04/alibaba-claude-code/', body, extraction,
+    ), {
+      url: 'https://techcrunch.com/2026/07/04/alibaba-claude-code/',
+      title: 'Alibaba reportedly bans employees from using Claude Code',
+      snippet: alibabaSupport,
+      published_at: '2026-07-04T08:00:00.000Z',
+    }, Date.parse('2026-08-12T00:00:00.000Z'));
+    const { proofInput, secret } = await createAlibabaProof(evidence!);
+    const substituted = structuredClone(proofInput);
+    substituted.evidence[0]!.excerpt = `${alibabaSupport} substituted persisted excerpt`;
+
+    await expect(createManualLeadVerificationProof(substituted, secret, responseSecret))
+      .rejects.toThrow(/manual_news_evidence_body_derivation_invalid/);
+    await expect(isCurrentManualLeadVerification(
+      substituted, substitutedExcerptProofs[extraction], secret,
+    )).resolves.toBe(false);
   });
 
   test('does not expire historically persisted signed evidence against the current wall clock', async () => {

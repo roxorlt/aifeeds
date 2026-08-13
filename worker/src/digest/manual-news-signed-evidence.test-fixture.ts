@@ -59,6 +59,7 @@ export function withSignedArticleTextV2Audit<T extends ManualNewsEvidence>(
   return {
     ...evidence,
     published_at: publishedAt,
+    claims_supported: [evidence.excerpt],
     fetch_audit: {
       ...unsignedAudit,
       response_hmac: createHmac('sha256', Buffer.from(TEST_MANUAL_NEWS_RESPONSE_SECRET, 'hex'))

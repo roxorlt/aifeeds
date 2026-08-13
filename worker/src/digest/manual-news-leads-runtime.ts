@@ -201,7 +201,7 @@ export async function extractManualNewsEvidence(
     retrieved_at: now,
     title,
     excerpt,
-    claims_supported: excerpt ? [excerpt] : [],
+    claims_supported: document.body ? [document.body] : [],
     reliable: identity.reliable,
     fetch_audit: document.fetch_audit,
   };
