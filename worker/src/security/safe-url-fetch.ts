@@ -100,7 +100,7 @@ export interface DocumentFetchAudit {
   proof_excerpt?: {
     contract: 'proof_excerpt_v1';
     algorithm: 'utf8-nfc-ws1-codepoint-prefix-v1';
-    max: 3000;
+    max_code_points: 3000;
     sha256: string;
     utf8_bytes: number;
     code_points: number;
@@ -432,11 +432,11 @@ function parseFetchAudit(
   if (raw.response_profile !== PROOF_EXCERPT_RESPONSE_PROFILE
     || raw.response_hmac_contract !== PROOF_EXCERPT_RESPONSE_HMAC_CONTRACT
     || !strictObject(raw.proof_excerpt, [
-      'contract', 'algorithm', 'max', 'sha256', 'utf8_bytes', 'code_points',
+      'contract', 'algorithm', 'max_code_points', 'sha256', 'utf8_bytes', 'code_points',
     ])
     || raw.proof_excerpt.contract !== PROOF_EXCERPT_CONTRACT
     || raw.proof_excerpt.algorithm !== PROOF_EXCERPT_ALGORITHM
-    || raw.proof_excerpt.max !== PROOF_EXCERPT_MAX_CODE_POINTS
+    || raw.proof_excerpt.max_code_points !== PROOF_EXCERPT_MAX_CODE_POINTS
     || typeof raw.proof_excerpt.sha256 !== 'string'
     || !/^[a-f0-9]{64}$/.test(raw.proof_excerpt.sha256)
     || !Number.isSafeInteger(raw.proof_excerpt.utf8_bytes)
@@ -546,7 +546,7 @@ function parseFetchAudit(
     proof_excerpt: {
       contract: PROOF_EXCERPT_CONTRACT,
       algorithm: PROOF_EXCERPT_ALGORITHM,
-      max: PROOF_EXCERPT_MAX_CODE_POINTS,
+      max_code_points: PROOF_EXCERPT_MAX_CODE_POINTS,
       sha256: raw.proof_excerpt.sha256,
       utf8_bytes: Number(raw.proof_excerpt.utf8_bytes),
       code_points: Number(raw.proof_excerpt.code_points),

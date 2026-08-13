@@ -82,7 +82,7 @@ export function withSignedArticleTextV2Audit<T extends ManualNewsEvidence>(
     proof_excerpt: {
       contract: 'proof_excerpt_v1' as const,
       algorithm: 'utf8-nfc-ws1-codepoint-prefix-v1' as const,
-      max: 3_000 as const,
+      max_code_points: 3_000 as const,
       sha256: createHash('sha256').update(evidence.excerpt).digest('hex'),
       utf8_bytes: excerptBytes,
       code_points: Array.from(evidence.excerpt).length,

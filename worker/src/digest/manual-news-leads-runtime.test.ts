@@ -54,7 +54,7 @@ function proofExcerptClaims(body: string) {
   return {
     contract: 'proof_excerpt_v1' as const,
     algorithm: 'utf8-nfc-ws1-codepoint-prefix-v1' as const,
-    max: 3_000 as const,
+    max_code_points: 3_000 as const,
     sha256: createHash('sha256').update(excerpt).digest('hex'),
     utf8_bytes: new TextEncoder().encode(excerpt).byteLength,
     code_points: Array.from(excerpt).length,
@@ -524,6 +524,18 @@ describe('manual lead evidence extraction', () => {
     const impossiblePublishedAt = structuredClone(proofInput);
     impossiblePublishedAt.evidence[0]!.published_at = '2026-02-31';
     impossiblePublishedAt.evidence[0]!.fetch_audit!.document!.published_at = '2026-02-31';
+    const legacyMax = structuredClone(proofInput);
+    const legacyClaims = legacyMax.evidence[0]!.fetch_audit!.proof_excerpt! as unknown as Record<string, unknown>;
+    delete legacyClaims.max_code_points;
+    legacyClaims.max = 3_000;
+    legacyMax.evidence[0]!.fetch_audit = withResponseHmac(legacyMax.evidence[0]!.fetch_audit!);
+    const wrongMax = structuredClone(proofInput);
+    (wrongMax.evidence[0]!.fetch_audit!.proof_excerpt! as unknown as Record<string, unknown>)
+      .max_code_points = 2_999;
+    wrongMax.evidence[0]!.fetch_audit = withResponseHmac(wrongMax.evidence[0]!.fetch_audit!);
+    const ambiguousMax = structuredClone(proofInput);
+    (ambiguousMax.evidence[0]!.fetch_audit!.proof_excerpt! as unknown as Record<string, unknown>).max = 3_000;
+    ambiguousMax.evidence[0]!.fetch_audit = withResponseHmac(ambiguousMax.evidence[0]!.fetch_audit!);
 
     await expect(createManualLeadVerificationProof(unsigned, secret))
       .rejects.toThrow(/manual_news_evidence_provenance_invalid/);
@@ -537,6 +549,37 @@ describe('manual lead evidence extraction', () => {
     await expect(createManualLeadVerificationProof(impossiblePublishedAt, secret))
       .rejects.toThrow(/manual_news_evidence_provenance_invalid/);
     await expect(isCurrentManualLeadVerification(impossiblePublishedAt, proof, secret)).resolves.toBe(false);
+    for (const malformedMax of [legacyMax, wrongMax, ambiguousMax]) {
+      await expect(createManualLeadVerificationProof(malformedMax, secret))
+        .rejects.toThrow(/manual_news_evidence_provenance_invalid/);
+      await expect(isCurrentManualLeadVerification(malformedMax, proof, secret)).resolves.toBe(false);
+    }
+  });
+
+  test('accepts the canonical HK max_code_points field at completeTrustedArticle', async () => {
+    const canonical = documentFixture(
+      'https://www.axios.com/canonical-proof-excerpt', alibabaSupport,
+      'article_text', { title: 'Canonical proof excerpt' },
+    );
+    expect(Object.keys(canonical.fetch_audit.proof_excerpt!)).toEqual([
+      'contract', 'algorithm', 'max_code_points', 'sha256', 'utf8_bytes', 'code_points',
+    ]);
+    await expect(extractManualNewsEvidence(canonical)).resolves.not.toBeNull();
+
+    for (const mutation of ['legacy', 'wrong', 'ambiguous'] as const) {
+      const malformed = structuredClone(canonical);
+      const claims = malformed.fetch_audit.proof_excerpt! as unknown as Record<string, unknown>;
+      if (mutation === 'legacy') {
+        delete claims.max_code_points;
+        claims.max = 3_000;
+      } else if (mutation === 'wrong') {
+        claims.max_code_points = 2_999;
+      } else {
+        claims.max = 3_000;
+      }
+      malformed.fetch_audit = withResponseHmac(malformed.fetch_audit);
+      await expect(extractManualNewsEvidence(malformed)).resolves.toBeNull();
+    }
   });
 
   test('v10 proof binds authenticated v2 body and response signature audit fields', async () => {

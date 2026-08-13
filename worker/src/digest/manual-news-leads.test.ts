@@ -533,6 +533,14 @@ async function createTitleOnlyScopeProof(
 }
 
 describe('manual news lead domain', () => {
+  test('signed evidence fixtures emit only canonical proof_excerpt max_code_points', () => {
+    const signed = withSignedArticleTextV2Audit(officialAnthropic);
+    expect(Object.keys(signed.fetch_audit.proof_excerpt!)).toEqual([
+      'contract', 'algorithm', 'max_code_points', 'sha256', 'utf8_bytes', 'code_points',
+    ]);
+    expect(signed.fetch_audit.proof_excerpt).toMatchObject({ max_code_points: 3_000 });
+    expect(signed.fetch_audit.proof_excerpt).not.toHaveProperty('max');
+  });
   test('requires exactly one bounded disposition for every allowed evidence id', () => {
     const missing = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
     delete missing.evidence_dispositions;
