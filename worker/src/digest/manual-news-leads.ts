@@ -66,6 +66,12 @@ interface ManualProductTargetTuple {
   components: ManualProductTargetComponent[];
 }
 
+interface ManualProductFeatureTuple {
+  feature: 'sheets_canvas';
+  host_product: 'google_sheets';
+  relation: 'feature_in_host_product';
+}
+
 type ManualBilingualParticipantRole =
   | 'employees'
   | 'customers'
@@ -89,6 +95,7 @@ interface ManualBilingualSemanticSlots {
   target_entities: string[];
   target_qualifiers: string[];
   product_targets: ManualProductTargetTuple[];
+  product_feature?: ManualProductFeatureTuple;
   concepts: string[];
   versions: string[];
   regions: string[];
@@ -455,6 +462,13 @@ function generatedFactSlot(
   const normalized = value.normalize('NFKC').replace(/\s+/gu, ' ').trim();
   if (!normalized || Array.from(normalized).length > limit) {
     throw generatedFactValidationError('invalid_claim_fact', context, field);
+  }
+  if (field === 'object') {
+    try {
+      assertProductFeatureLexemeContract(value, normalized);
+    } catch {
+      throw generatedFactValidationError('invalid_claim_object', context, field);
+    }
   }
   const boundary = new RegExp(
     `(?:${ATOMIC_HARD_PUNCTUATION_SOURCE}|[，,、]|${ATOMIC_COORDINATION_SOURCE})`,
@@ -1424,6 +1438,9 @@ function assertConsumedPredicateSemantics(
 function assertConsumedObjectSemantics(value: string): void {
   const normalized = value.normalize('NFKC');
   const mask = new Array<boolean>(normalized.length).fill(false);
+  if (directedProductFeatureTupleFromNormalized(normalized)) {
+    consumeSemanticSpan(mask, { start: 0, end: normalized.length });
+  }
   const patternGroups: ReadonlyArray<ReadonlyArray<RegExp>> = [
     BILINGUAL_PARTICIPANT_PATTERNS.map(([, pattern]) => pattern),
     BILINGUAL_OBJECT_RELATION_PATTERNS.map(([, pattern]) => pattern),
@@ -1496,7 +1513,11 @@ function bilingualSemanticSlots(fact: ManualAtomicFactSlots): ManualBilingualSem
     entity: target.entity,
     components: target.components,
   }));
-  const concepts = bilingualFactConcepts(reason.residual).sort();
+  const productFeature = directedProductFeatureTupleFromNormalized(reason.residual)?.tuple;
+  const concepts = [
+    ...bilingualFactConcepts(reason.residual),
+    ...(productFeature ? ['feature'] : []),
+  ].sort();
   const regions = bilingualFactRegions(reason.residual);
   const relativeTimes = [...new Set(relativeFactTimeSpans(reason.residual).map((span) => span.value))].sort();
   const action = predicateActions[0].action;
@@ -1523,6 +1544,7 @@ function bilingualSemanticSlots(fact: ManualAtomicFactSlots): ManualBilingualSem
     target_entities: targetEntities,
     target_qualifiers: targetQualifiers,
     product_targets: productTargets,
+    ...(productFeature ? { product_feature: productFeature } : {}),
     concepts,
     versions: bilingualFactVersions(reason.residual),
     regions,
@@ -1578,6 +1600,8 @@ function semanticProjectionContract(
     || canonicalJson(sourceSlots.target_entities) !== canonicalJson(projectionSlots.target_entities)
     || canonicalJson(sourceSlots.target_qualifiers) !== canonicalJson(projectionSlots.target_qualifiers)
     || canonicalJson(sourceSlots.product_targets) !== canonicalJson(projectionSlots.product_targets)
+    || canonicalJson(sourceSlots.product_feature || null)
+      !== canonicalJson(projectionSlots.product_feature || null)
     || canonicalJson(sourceSlots.concepts) !== canonicalJson(projectionSlots.concepts)
     || canonicalJson(sourceSlots.versions) !== canonicalJson(projectionSlots.versions)) {
     return 'invalid_editorial_projection_object';
@@ -1625,10 +1649,15 @@ function projectionContractError(
     BILINGUAL_PARTICIPANT_EMPLOYMENT_SCOPE.reduce(
       (result, [, pattern]) => result.replace(pattern, ' '), value,
     );
-  const sourceAnchors = highConfidenceLeadAnchors(withoutParticipantEmploymentScope(source.object))
-    .map((item) => item.toLowerCase()).sort();
-  const projectionAnchors = highConfidenceLeadAnchors(withoutParticipantEmploymentScope(projection.object))
-    .map((item) => item.toLowerCase()).sort();
+  const productFeatureAnchors = (value: string) => {
+    const exactProductFeature = directedProductFeatureTuple(value);
+    return highConfidenceLeadAnchors(withoutParticipantEmploymentScope(value))
+      .map((item) => item.toLowerCase())
+      .filter((item) => !exactProductFeature || !/^features?$/u.test(item))
+      .sort();
+  };
+  const sourceAnchors = productFeatureAnchors(source.object);
+  const projectionAnchors = productFeatureAnchors(projection.object);
   if (canonicalJson(sourceAnchors) !== canonicalJson(projectionAnchors)) {
     return 'invalid_editorial_projection_object';
   }
@@ -1978,6 +2007,7 @@ function sameStructuredEventTarget(fact: ManualSourceAtomicFact, clause: string)
   } catch {
     return false;
   }
+  if (!requiredProductFeatureMatches(source.product_feature, clause)) return false;
   const productTargets = productTargetTuples(clause).map((target) => ({
     entity: target.entity, components: target.components,
   }));
@@ -2011,6 +2041,7 @@ function sameStructuredEventTarget(fact: ManualSourceAtomicFact, clause: string)
 
 function sameCoreProductAndSubject(fact: ManualSourceAtomicFact, clause: string): boolean {
   if (!sourceFactSubjectMatchesClause(fact, clause)) return false;
+  if (!sourceFactProductFeatureMatchesClause(fact, clause)) return false;
   const expectedEntities = registeredEntityIdentities(fact.atomic_fact.object);
   const actualEntities = registeredEntityIdentities(clause);
   if (expectedEntities.size > 0
@@ -2046,6 +2077,7 @@ function sameCoreEventBlockingUncertainty(
 }
 
 function mentionsCoreSubjectAndProduct(fact: ManualSourceAtomicFact, clause: string): boolean {
+  if (!sourceFactProductFeatureMatchesClause(fact, clause)) return false;
   const expectedSubject = canonicalSubjectIdentity(fact.atomic_fact.subject)
     || canonicalEntityRoleKey(fact.atomic_fact.subject);
   if (!expectedSubject || !registeredEntityIdentities(clause).has(expectedSubject)) return false;
@@ -2160,6 +2192,7 @@ function relationSupportFallbackSafe(
   clause: AtomicEvidenceClause,
 ): boolean {
   if (!clause.reliable || relationClauseHasUnexpectedSignal(fact, clause.text)) return false;
+  if (!sourceFactProductFeatureMatchesClause(fact, clause.text)) return false;
   const parsed = splitAtomicFactClauses(clause.text);
   if (!parsed.reliable || parsed.has_unknown_compound || parsed.clauses.length !== 1) return false;
   const expectedPredicateActions = factActionOccurrences(fact.atomic_fact.predicate);
@@ -2181,6 +2214,7 @@ function evidenceClauseRelation(
   let relatedButUnresolved = false;
   const trustedRelationSource = evidence.reliable && evidence.source_type !== 'other';
   for (const fact of sourceFacts) {
+    if (!sourceFactProductFeatureMatchesClause(fact, clause.text)) continue;
     const subjectMatches = sourceFactSubjectMatchesClause(fact, clause.text);
     const targetMatches = subjectMatches && sameStructuredEventTarget(fact, clause.text);
     const productTargetMatches = sameCoreProductAndSubject(fact, clause.text);
@@ -3920,6 +3954,111 @@ function productComplementObjectLength(rawTail: string): number {
   return 0;
 }
 
+interface ParsedProductFeatureTuple {
+  tuple: ManualProductFeatureTuple;
+  feature_span: IndexedSemanticValue;
+}
+
+const PRODUCT_FEATURE_ZERO_WIDTH = /[\u200b\u200c\u200d\u2060\ufeff]/u;
+const ENGLISH_FEATURE_LEXEME = /(?<![a-z0-9_])features?(?![a-z0-9_])/giu;
+
+function productFeatureLexemeCount(normalized: string): number {
+  const english = [...normalized.matchAll(ENGLISH_FEATURE_LEXEME)].length;
+  let chinese = 0;
+  for (let index = normalized.indexOf('功能'); index >= 0; index = normalized.indexOf('功能', index + 2)) {
+    chinese += 1;
+  }
+  return english + chinese;
+}
+
+function directedProductFeatureTupleFromNormalized(
+  normalizedValue: string,
+): ParsedProductFeatureTuple | null {
+  const normalized = normalizedValue.trim();
+  const english = /^(sheets\s+canvas)\s+features?\s+in\s+google\s+sheets$/iu.exec(normalized);
+  if (english) {
+    return {
+      tuple: {
+        feature: 'sheets_canvas', host_product: 'google_sheets',
+        relation: 'feature_in_host_product',
+      },
+      feature_span: { value: 'sheets_canvas', start: 0, end: english[1].length },
+    };
+  }
+  const chinese = /^(google\s+sheets)\s*的\s*(sheets\s+canvas)\s*功能$/iu.exec(normalized);
+  if (!chinese) return null;
+  const featureStart = normalized.indexOf(chinese[2], chinese[1].length);
+  return {
+    tuple: {
+      feature: 'sheets_canvas', host_product: 'google_sheets',
+      relation: 'feature_in_host_product',
+    },
+    feature_span: {
+      value: 'sheets_canvas', start: featureStart, end: featureStart + chinese[2].length,
+    },
+  };
+}
+
+function directedProductFeatureTuple(value: string): ParsedProductFeatureTuple | null {
+  if (PRODUCT_FEATURE_ZERO_WIDTH.test(value)) return null;
+  return directedProductFeatureTupleFromNormalized(value.normalize('NFKC'));
+}
+
+function assertProductFeatureLexemeContract(raw: string, normalized: string): void {
+  if (PRODUCT_FEATURE_ZERO_WIDTH.test(raw)) throw new Error('invalid_claim_object');
+  const featureLikeToken = (normalized.match(/[a-z][a-z0-9_]*/giu) || [])
+    .map((token) => token.toLocaleLowerCase('en-US'))
+    .some((token) => token.startsWith('feature') && token !== 'feature' && token !== 'features');
+  if (featureLikeToken) {
+    throw new Error('invalid_claim_object');
+  }
+  const lexemeCount = productFeatureLexemeCount(normalized);
+  if (!lexemeCount) return;
+  if (lexemeCount !== 1 || !directedProductFeatureTupleFromNormalized(normalized)) {
+    throw new Error('invalid_claim_object');
+  }
+}
+
+function clauseProductFeatureTuple(value: string): ManualProductFeatureTuple | null {
+  if (PRODUCT_FEATURE_ZERO_WIDTH.test(value)) return null;
+  const normalized = value.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  if (productFeatureLexemeCount(normalized) !== 1) return null;
+  const matches: ManualProductFeatureTuple[] = [];
+  const english = /(?<![a-z0-9_])sheets\s+canvas\s+features?\s+in\s+google\s+sheets(?![a-z0-9_])/giu;
+  const chinese = /(?<![a-z0-9_])google\s+sheets\s*的\s*sheets\s+canvas\s*功能(?![a-z0-9_])/giu;
+  for (const pattern of [english, chinese]) {
+    for (const _match of normalized.matchAll(pattern)) {
+      matches.push({
+        feature: 'sheets_canvas', host_product: 'google_sheets',
+        relation: 'feature_in_host_product',
+      });
+    }
+  }
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function requiredProductFeatureMatches(
+  expected: ManualProductFeatureTuple | undefined,
+  clause: string,
+): boolean {
+  if (!expected) return true;
+  const actual = clauseProductFeatureTuple(clause);
+  return !!actual && canonicalJson(actual) === canonicalJson(expected);
+}
+
+function sourceFactProductFeatureMatchesClause(
+  fact: ManualSourceAtomicFact,
+  clause: string,
+): boolean {
+  let source: ManualBilingualSemanticSlots;
+  try {
+    source = bilingualSemanticSlots(fact.atomic_fact);
+  } catch {
+    return false;
+  }
+  return requiredProductFeatureMatches(source.product_feature, clause);
+}
+
 function controlComplementTailRemainder(
   value: string,
   action: FactActionOccurrence,
@@ -3931,6 +4070,7 @@ function controlComplementTailRemainder(
     .replace(/\b(?:on|at)\s*$/iu, '')
     .trim();
   if (strictObject) {
+    if (directedProductFeatureTuple(rawTail)) return '';
     const productLength = productComplementObjectLength(rawTail);
     if (productLength) return rawTail.slice(productLength).trim();
     if (/^[a-z]\d+(?:\.\d+)*(?:[-_][a-z0-9]+)?$/iu.test(rawTail)) return '';
@@ -3984,13 +4124,22 @@ function prefixContainsDetachedUnknownPredicate(value: string): boolean {
 
 function looksLikeDetachedEnglishPredicate(remainder: string): boolean {
   if (!remainder) return false;
-  const englishWords = remainder.match(/[A-Za-z][A-Za-z0-9._+-]*/gu) || [];
+  const englishWords = [...remainder.matchAll(/[A-Za-z][A-Za-z0-9._+-]*/gu)].map((match) => ({
+    raw: match[0],
+    start: match.index,
+    end: match.index + match[0].length,
+  }));
+  const productFeature = directedProductFeatureTuple(remainder);
   for (let index = 0; index + 2 < englishWords.length; index += 1) {
-    const rawSubject = englishWords[index];
-    const rawPredicate = englishWords[index + 1];
-    const object = englishWords[index + 2].toLowerCase();
+    const rawSubject = englishWords[index].raw;
+    const rawPredicate = englishWords[index + 1].raw;
+    const object = englishWords[index + 2].raw.toLowerCase();
     const subject = rawSubject.toLowerCase();
     const predicate = rawPredicate.toLowerCase();
+    const subjectPredicateInsideFeature = productFeature
+      && englishWords[index].start >= productFeature.feature_span.start
+      && englishWords[index + 1].end <= productFeature.feature_span.end;
+    if (subjectPredicateInsideFeature) continue;
     if (/^[A-Z]/u.test(rawSubject) && /^[A-Z]/u.test(rawPredicate)
       && /^(?:operations?|business|market|region)$/u.test(object)) continue;
     if (!LATIN_ENTITY_STOPWORDS.has(subject)
@@ -4754,8 +4903,13 @@ function structuredFactUnitVerificationError(candidate: string, quote: string): 
     return 'fact_verification_action_mismatch';
   }
   const candidateClause = expectedClauses.clauses[0];
+  const expectedProductFeature = clauseProductFeatureTuple(candidateClause);
   const expectedActions = factActionOccurrences(candidateClause);
   const actualClauses = splitAtomicFactClauses(quote);
+  if (expectedProductFeature && !actualClauses.clauses.some((clause) =>
+    requiredProductFeatureMatches(expectedProductFeature, clause))) {
+    return 'fact_verification_entity_slot_missing';
+  }
   if (!expectedActions.length) {
     return actualClauses.reliable && actualClauses.clauses.some((clause) =>
       canonicalUnknownClause(clause) === canonicalUnknownClause(candidateClause))
@@ -4781,12 +4935,17 @@ function structuredFactUnitVerificationError(candidate: string, quote: string): 
     }
     return 'fact_verification_action_mismatch';
   }
-  const errors = usableSourceClauses.map((clause) =>
-    occurredAtVerificationError(candidateClause, clause)
+  const errors = usableSourceClauses.map((clause) => {
+    if (expectedProductFeature
+      && !requiredProductFeatureMatches(expectedProductFeature, clause)) {
+      return 'fact_verification_entity_slot_missing';
+    }
+    return occurredAtVerificationError(candidateClause, clause)
       || compareAtomicKnownFact(
         stripFactTemporalText(candidateClause),
         stripFactTemporalText(clause),
-      ));
+      );
+  });
   if (errors.some((error) => error === null)) return null;
   for (const error of [
     'fact_verification_instant_precision_mismatch',

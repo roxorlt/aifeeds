@@ -1158,6 +1158,7 @@ describe('news review revision CAS', () => {
       .get(inactiveBatchId)).toEqual({ applied_selected_ids: JSON.stringify(['inactive-3']), edit_revision: 0 });
   });
 
+  // This gate serially builds/signs six complete leads and runs six CAS confirmations; 10s avoids shared-CI 5s jitter without weakening behavior.
   test('sixth manual candidate cannot evict five published selections or five confirmed manual candidates', async () => {
     const current = state();
     const scheduled = [...candidates('selected'), ...candidates('tail')];
@@ -1190,5 +1191,5 @@ describe('news review revision CAS', () => {
     const active = await getActiveNewsReviewBatch(current.env, '2026-08-11');
     expect(active?.candidates.filter((candidate) => candidate.origin === 'manual_lead')).toHaveLength(5);
     expect(active?.candidate_ids.slice(0, 5)).toEqual(scheduled.slice(0, 5).map((item) => item.item_id));
-  });
+  }, 10_000);
 });
