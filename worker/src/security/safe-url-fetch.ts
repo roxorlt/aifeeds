@@ -311,6 +311,16 @@ async function verifyResponseHmac(secret: string, unsigned: Record<string, unkno
   return constantTimeBytesEqual(signature, hexBytes(supplied));
 }
 
+export async function verifyDocumentFetchAuditResponseHmac(
+  audit: DocumentFetchAudit,
+  responseSecret: string,
+): Promise<boolean> {
+  if (!/^[a-f0-9]{64}$/.test(responseSecret)
+    || !/^[a-f0-9]{64}$/.test(audit.response_hmac || '')) return false;
+  const { response_hmac: suppliedHmac, ...unsignedAudit } = audit;
+  return verifyResponseHmac(responseSecret, unsignedAudit, suppliedHmac!);
+}
+
 function strictObject(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const actual = Object.keys(value as Record<string, unknown>);
@@ -669,8 +679,7 @@ export async function fetchPublicDocument(
     if (await sha256Hex(body.text) !== audit.body_sha256) {
       throw new Error('unsafe_gateway_audit:body_digest');
     }
-    const { response_hmac: suppliedHmac, ...unsignedAudit } = audit;
-    if (!await verifyResponseHmac(responseSecret!, unsignedAudit, suppliedHmac!)) {
+    if (!await verifyDocumentFetchAuditResponseHmac(audit, responseSecret!)) {
       throw new Error('unsafe_gateway_audit:response_hmac');
     }
     if (audit.extraction === 'article_text') validateCompleteArticleText(body.text, body.bytes);

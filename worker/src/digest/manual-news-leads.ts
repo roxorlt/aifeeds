@@ -1,6 +1,7 @@
 import {
   isPublicIpAddress,
   validatePublicHttpUrl,
+  verifyDocumentFetchAuditResponseHmac,
   type DocumentFetchAudit,
 } from '../security/safe-url-fetch';
 
@@ -5923,12 +5924,19 @@ function canonicalProofEvidence(evidence: readonly ManualNewsEvidence[]) {
 
 async function assertManualNewsEvidenceBodyDigests(
   evidence: readonly ManualNewsEvidence[],
+  responseSecret: string,
 ): Promise<void> {
+  if (!/^[a-f0-9]{64}$/.test(responseSecret)) {
+    throw new Error('manual_news_research_response_secret_invalid');
+  }
   for (const item of evidence) {
     const provenance = normalizedSignedEvidenceProvenance(item);
     if (provenance.extraction === 'article_text'
       && await sha256Hex(item.excerpt) !== provenance.body_sha256) {
       invalidManualNewsEvidenceProvenance();
+    }
+    if (!await verifyDocumentFetchAuditResponseHmac(provenance, responseSecret)) {
+      throw new Error('manual_news_evidence_response_hmac_invalid');
     }
   }
 }
@@ -5974,6 +5982,7 @@ export async function createManualLeadVerificationProof(
     verification: ManualLeadFactVerification;
   },
   secret: string,
+  responseSecret: string,
 ): Promise<ManualLeadVerificationProof> {
   assertVerificationSecret(secret);
   if (input.assessment.generated_claim_contract !== MANUAL_LEAD_GENERATED_CLAIM_CONTRACT
@@ -5988,7 +5997,7 @@ export async function createManualLeadVerificationProof(
     || !input.verification.completeness_results?.length) {
     throw new Error('manual_news_verification_contract_invalid');
   }
-  await assertManualNewsEvidenceBodyDigests(input.evidence);
+  await assertManualNewsEvidenceBodyDigests(input.evidence, responseSecret);
   const canonicalDigest = await sha256Hex(canonicalVerificationPayload(
     input.assessment, input.evidence, input.verification,
   ));
@@ -6021,6 +6030,7 @@ export async function isCurrentManualLeadVerification(
   },
   proof: unknown,
   secret: string,
+  responseSecret: string,
 ): Promise<boolean> {
   assertVerificationSecret(secret);
   if (!isPlainObject(proof)
@@ -6032,7 +6042,7 @@ export async function isCurrentManualLeadVerification(
     || !/^[a-f0-9]{64}$/.test(proof.hmac_sha256)) return false;
   let expected: ManualLeadVerificationProof;
   try {
-    expected = await createManualLeadVerificationProof(input, secret);
+    expected = await createManualLeadVerificationProof(input, secret, responseSecret);
   } catch {
     return false;
   }

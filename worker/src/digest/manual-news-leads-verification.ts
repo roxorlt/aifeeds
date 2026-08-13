@@ -189,7 +189,7 @@ export async function verifyPersistedManualAssessment(
       policy_version: verificationRow.policy_version,
       canonical_digest: verificationRow.canonical_digest,
       hmac_sha256: verificationRow.hmac_sha256,
-    }, env.MANUAL_NEWS_VERIFICATION_SECRET);
+    }, env.MANUAL_NEWS_VERIFICATION_SECRET, env.MANUAL_NEWS_RESEARCH_RESPONSE_SECRET || '');
     return current ? { assessment, verification, record: verificationRow, evidence: [...evidence] } : null;
   } catch {
     return null;

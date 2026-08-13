@@ -31,6 +31,7 @@ import {
 import { ManualNewsProviderError } from './manual-news-provider';
 import {
   proofForLegacyPolicy,
+  TEST_MANUAL_NEWS_RESPONSE_SECRET,
   withSignedArticleTextV2Audit,
 } from './manual-news-signed-evidence.test-fixture';
 
@@ -246,7 +247,11 @@ function fixture(status = 'verifying', version = 4, processingOwner: string | nu
   );
   return {
     db,
-    env: { DB: db as unknown as D1Database, MANUAL_NEWS_VERIFICATION_SECRET: VERIFICATION_SECRET } as Env,
+    env: {
+      DB: db as unknown as D1Database,
+      MANUAL_NEWS_VERIFICATION_SECRET: VERIFICATION_SECRET,
+      MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: TEST_MANUAL_NEWS_RESPONSE_SECRET,
+    } as Env,
     leadId,
   };
 }

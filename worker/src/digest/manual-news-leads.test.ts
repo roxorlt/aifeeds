@@ -8,7 +8,7 @@ import {
   buildManualLeadFactVerificationPrompt,
   classifyManualLeadDuplicate,
   createManualLeadVerificationProof as createManualLeadVerificationProofWithRawEvidence,
-  isCurrentManualLeadVerification,
+  isCurrentManualLeadVerification as isCurrentManualLeadVerificationWithResponseSecret,
   MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
   MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
   MANUAL_LEAD_SOURCE_FACT_CONTRACT,
@@ -25,7 +25,10 @@ import {
   type ManualNewsEvidence,
   type ManualNewsProcessedAssessment,
 } from './manual-news-leads';
-import { withSignedArticleTextV2Audit } from './manual-news-signed-evidence.test-fixture';
+import {
+  TEST_MANUAL_NEWS_RESPONSE_SECRET,
+  withSignedArticleTextV2Audit,
+} from './manual-news-signed-evidence.test-fixture';
 
 async function createManualLeadVerificationProof(
   input: Parameters<typeof createManualLeadVerificationProofWithRawEvidence>[0],
@@ -34,7 +37,19 @@ async function createManualLeadVerificationProof(
   for (const evidence of input.evidence) {
     Object.assign(evidence, withSignedArticleTextV2Audit(evidence));
   }
-  return createManualLeadVerificationProofWithRawEvidence(input, secret);
+  return createManualLeadVerificationProofWithRawEvidence(
+    input, secret, TEST_MANUAL_NEWS_RESPONSE_SECRET,
+  );
+}
+
+function isCurrentManualLeadVerification(
+  input: Parameters<typeof isCurrentManualLeadVerificationWithResponseSecret>[0],
+  proof: unknown,
+  secret: string,
+) {
+  return isCurrentManualLeadVerificationWithResponseSecret(
+    input, proof, secret, TEST_MANUAL_NEWS_RESPONSE_SECRET,
+  );
 }
 
 const officialAnthropic: ManualNewsEvidence = {

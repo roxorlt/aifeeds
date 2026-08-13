@@ -1420,7 +1420,7 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       assessment: validatedAssessment,
       evidence,
       verification,
-    }, this.env.MANUAL_NEWS_VERIFICATION_SECRET || '');
+    }, this.env.MANUAL_NEWS_VERIFICATION_SECRET || '', this.env.MANUAL_NEWS_RESEARCH_RESPONSE_SECRET || '');
     const now = Date.now();
     const invalidationNonce = createMutationNonce('assessment_invalidate');
     const creationNonce = createMutationNonce('verification_create');

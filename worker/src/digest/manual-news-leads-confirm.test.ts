@@ -31,6 +31,7 @@ vi.mock('./news-review', () => ({
 import { confirmManualNewsLeadCandidate } from './manual-news-leads-store';
 import {
   proofForLegacyPolicy,
+  TEST_MANUAL_NEWS_RESPONSE_SECRET,
   withSignedArticleTextV2Audit,
 } from './manual-news-signed-evidence.test-fixture';
 import {
@@ -155,7 +156,7 @@ async function fakeConfirmationEnv() {
   const proof = await createManualLeadVerificationProof({
     lead_id: row.id, assessment_version: assessmentVersion, assessment,
     evidence: [evidenceForMarker], verification: factVerification,
-  }, verificationSecret);
+  }, verificationSecret, TEST_MANUAL_NEWS_RESPONSE_SECRET);
   const verification: Record<string, any> = {
     verification_id: 'mav-confirm-7',
     lead_id: row.id,
@@ -239,6 +240,7 @@ async function fakeConfirmationEnv() {
       DB: db,
       DAILY_NEWS_REVIEW_SECRET: 'secret',
       MANUAL_NEWS_VERIFICATION_SECRET: verificationSecret,
+      MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: TEST_MANUAL_NEWS_RESPONSE_SECRET,
     } as never,
     row,
     evidence,

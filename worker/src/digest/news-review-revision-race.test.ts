@@ -26,6 +26,7 @@ import {
 } from './news-review';
 import {
   proofForLegacyPolicy,
+  TEST_MANUAL_NEWS_RESPONSE_SECRET,
   withSignedArticleTextV2Audit,
 } from './manual-news-signed-evidence.test-fixture';
 
@@ -127,6 +128,7 @@ function state() {
     DB: db as unknown as D1Database,
     DAILY_NEWS_REVIEW_SECRET: 'test-secret',
     MANUAL_NEWS_VERIFICATION_SECRET: 'b'.repeat(64),
+    MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: TEST_MANUAL_NEWS_RESPONSE_SECRET,
   } as Env;
   return { db, env };
 }
@@ -224,7 +226,7 @@ async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Pro
   }, assessment, [evidence]);
   const proof = await createManualLeadVerificationProof({
     lead_id: id, assessment_version: 7, assessment, evidence: [evidence], verification,
-  }, 'b'.repeat(64));
+  }, 'b'.repeat(64), TEST_MANUAL_NEWS_RESPONSE_SECRET);
   db.sqlite.prepare(`INSERT INTO manual_news_leads (
     id, review_date, input_type, input_text, input_url, note, status, version,
     submit_idempotency_key, processing_owner, processing_attempt, created_at, updated_at

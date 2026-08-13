@@ -4,8 +4,8 @@ import { createHash, createHmac } from 'node:crypto';
 import {
   applyManualLeadEvidencePolicy,
   buildManualLeadFactVerificationPrompt,
-  createManualLeadVerificationProof,
-  isCurrentManualLeadVerification,
+  createManualLeadVerificationProof as createManualLeadVerificationProofWithResponseSecret,
+  isCurrentManualLeadVerification as isCurrentManualLeadVerificationWithResponseSecret,
   type ManualNewsProcessedAssessment,
   validateManualLeadAssessment,
   validateManualLeadFactVerification,
@@ -31,6 +31,43 @@ vi.mock('../hf-paper/llm', async (importOriginal) => {
   return { ...actual, callDeepSeekJson: vi.fn() };
 });
 
+const responseSecret = '11'.repeat(32);
+
+function createManualLeadVerificationProof(
+  input: Parameters<typeof createManualLeadVerificationProofWithResponseSecret>[0],
+  secret: string,
+  evidenceResponseSecret = responseSecret,
+) {
+  return createManualLeadVerificationProofWithResponseSecret(input, secret, evidenceResponseSecret);
+}
+
+function isCurrentManualLeadVerification(
+  input: Parameters<typeof isCurrentManualLeadVerificationWithResponseSecret>[0],
+  proof: unknown,
+  secret: string,
+  evidenceResponseSecret = responseSecret,
+) {
+  return isCurrentManualLeadVerificationWithResponseSecret(
+    input, proof, secret, evidenceResponseSecret,
+  );
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(',')}}`;
+}
+
+function withResponseHmac(audit: PublicDocument['fetch_audit']): PublicDocument['fetch_audit'] {
+  const { response_hmac: _placeholder, ...unsigned } = audit;
+  return {
+    ...unsigned,
+    response_hmac: createHmac('sha256', Buffer.from(responseSecret, 'hex'))
+      .update(canonicalJson(unsigned)).digest('hex'),
+  };
+}
+
 function auditObject(
   url: string,
   sourceContentType: string,
@@ -40,7 +77,7 @@ function auditObject(
 ): PublicDocument['fetch_audit'] {
   const extractedBytes = new TextEncoder().encode(body).byteLength;
   const articleText = extraction === 'article_text';
-  return {
+  return withResponseHmac({
     hops: [{ url, validated_ip: '93.184.216.34', connected_ip: '93.184.216.34' }],
     source_content_type: sourceContentType, extraction,
     requested_limits: {
@@ -71,15 +108,8 @@ function auditObject(
     extracted_at: protocol.request_timestamp || '2026-08-12T00:00:00.000Z',
     final_url: url,
     body_sha256: createHash('sha256').update(body).digest('hex'),
-    response_hmac: '33'.repeat(32),
-  };
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  const object = value as Record<string, unknown>;
-  return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(',')}}`;
+    response_hmac: '',
+  });
 }
 
 function signedAudit(
@@ -90,10 +120,7 @@ function signedAudit(
   protocol: { request_nonce: string; request_timestamp: string },
 ): string {
   const auditValue = auditObject(url, sourceContentType, extraction, body, protocol);
-  const { response_hmac: _placeholder, ...unsigned } = auditValue;
-  const response_hmac = createHmac('sha256', Buffer.from('11'.repeat(32), 'hex'))
-    .update(canonicalJson(unsigned)).digest('hex');
-  return encodeURIComponent(JSON.stringify({ ...unsigned, response_hmac }));
+  return encodeURIComponent(JSON.stringify(auditValue));
 }
 
 function documentFixture(
@@ -102,7 +129,13 @@ function documentFixture(
   extraction: PublicDocument['extraction'] = 'article_text',
   metadata: { title?: string; published_at?: string | null; selection?: 'article' | 'main' } = {},
 ): PublicDocument {
-  const contentType = extraction === 'pdf_text' ? 'application/pdf' : 'text/html';
+  const contentType = {
+    article_text: 'text/html',
+    html: 'text/html',
+    text: 'text/plain',
+    json: 'application/json',
+    pdf_text: 'application/pdf',
+  }[extraction];
   const fetchAudit = auditObject(url, contentType, extraction, body);
   if (extraction === 'article_text' && fetchAudit.document) {
     fetchAudit.document = {
@@ -113,14 +146,15 @@ function documentFixture(
       content_complete: true,
     };
   }
+  const signedFetchAudit = withResponseHmac(fetchAudit);
   return {
     url, content_type: contentType, extraction, body, redirects: 0,
     bytes: new TextEncoder().encode(body).byteLength,
-    fetch_audit: fetchAudit,
+    fetch_audit: signedFetchAudit,
     ...(extraction === 'article_text' ? {
-      title: fetchAudit.document!.title,
-      published_at: fetchAudit.document!.published_at,
-      selection: fetchAudit.document!.selection,
+      title: signedFetchAudit.document!.title,
+      published_at: signedFetchAudit.document!.published_at,
+      selection: signedFetchAudit.document!.selection,
       content_complete: true as const,
     } : {}),
   };
@@ -209,7 +243,7 @@ async function createAlibabaProof(
     assessment: candidate, evidence: [evidence], verification,
   };
   const secret = 'a'.repeat(64);
-  const proof = await createManualLeadVerificationProof(proofInput, secret);
+  const proof = await createManualLeadVerificationProof(proofInput, secret, responseSecret);
   return { proofInput, proof, secret };
 }
 
@@ -477,21 +511,44 @@ describe('manual lead evidence extraction', () => {
     await expect(isCurrentManualLeadVerification(tampered, proof, secret)).resolves.toBe(false);
   });
 
+  test('v10 proof creation rejects a forged response HMAC before issuing a current proof', async () => {
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://techcrunch.com/2026/07/04/alibaba-claude-code/', alibabaSupport,
+    ));
+    const { proofInput, secret } = await createAlibabaProof(evidence!);
+    const forged = structuredClone(proofInput);
+    forged.evidence[0]!.fetch_audit!.response_hmac = '44'.repeat(32);
+
+    await expect(createManualLeadVerificationProof(forged, secret, responseSecret))
+      .rejects.toThrow(/manual_news_evidence_response_hmac_invalid/);
+    await expect(createManualLeadVerificationProof(proofInput, secret, '22'.repeat(32)))
+      .rejects.toThrow(/manual_news_evidence_response_hmac_invalid/);
+    const validProof = await createManualLeadVerificationProof(proofInput, secret, responseSecret);
+    await expect(isCurrentManualLeadVerification(
+      proofInput, validProof, secret, '22'.repeat(32),
+    )).resolves.toBe(false);
+  });
+
   test.each([
     ['text/plain', 'text'],
     ['application/json', 'json'],
     ['application/pdf', 'pdf_text'],
   ] as const)('keeps signed v2 %s extraction current with %s semantics', async (sourceType, extraction) => {
     const evidence = await extractManualNewsEvidence(documentFixture(
-      'https://techcrunch.com/2026/07/04/alibaba-claude-code/', alibabaSupport,
-    ));
-    const audit = evidence!.fetch_audit!;
-    audit.source_content_type = sourceType;
-    audit.extraction = extraction;
-    audit.applied_limits.extracted_text_bytes = 2_097_152;
-    audit.applied_limits.extracted_text_characters = 1_000_000;
-    audit.parser.version = 'research-gateway-parser/1.0.0';
-    delete audit.document;
+      'https://techcrunch.com/2026/07/04/alibaba-claude-code/', alibabaSupport, extraction,
+    ), {
+      url: 'https://techcrunch.com/2026/07/04/alibaba-claude-code/',
+      title: 'Alibaba reportedly bans employees from using Claude Code',
+      snippet: alibabaSupport,
+      published_at: '2026-07-04T08:00:00.000Z',
+    });
+
+    expect(evidence?.fetch_audit).toMatchObject({
+      source_content_type: sourceType,
+      extraction,
+      protocol_version: 'article_text_v2',
+      response_hmac: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
 
     const { proofInput, proof, secret } = await createAlibabaProof(evidence!);
 
