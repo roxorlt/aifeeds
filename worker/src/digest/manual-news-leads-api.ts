@@ -12,7 +12,6 @@ import {
 } from './manual-news-leads-store';
 import { newsReviewSecret } from './news-review';
 import {
-  assertManualNewsEvidenceSet,
   isManualNewsVerificationSecretConfigured,
   type ManualNewsEvidence,
 } from './manual-news-leads';
@@ -67,13 +66,23 @@ function manualNewsEvidenceDetail(item: ManualNewsEvidence) {
 }
 
 function manualNewsLeadDetail(lead: ManualNewsLeadRecord) {
-  assertManualNewsEvidenceSet(lead.evidence);
   return {
     ...manualNewsLeadBase(lead),
     ...(lead.assessment_generation ? { assessment_generation: lead.assessment_generation } : {}),
     ...(lead.provider_failure ? { provider_failure: lead.provider_failure } : {}),
     assessment: lead.assessment,
-    evidence: lead.evidence.map(manualNewsEvidenceDetail),
+    evidence: lead.evidence.slice(0, 8).filter((item) => {
+      const codePoints = Array.from(item.excerpt).length;
+      return codePoints > 0 && codePoints <= 3_000
+        && new TextEncoder().encode(item.excerpt).byteLength <= 12_000;
+    }).map(manualNewsEvidenceDetail),
+  };
+}
+
+function manualNewsMutationResult<T extends { lead?: ManualNewsLeadRecord }>(result: T) {
+  return {
+    ...result,
+    ...(result.lead ? { lead: manualNewsLeadDetail(result.lead) } : {}),
   };
 }
 
@@ -213,7 +222,9 @@ async function handleManualNewsLeadsApiInternal(
         note: body.note,
       }, key, now);
       if (result.created) scheduleLeadProcessing(env, ctx, result.lead);
-      return response({ ok: true, ...result }, result.created ? 202 : 200);
+      return response({
+        ok: true, created: result.created, lead: manualNewsLeadDetail(result.lead),
+      }, result.created ? 202 : 200);
     } catch (error) {
       return requestErrorResponse(error);
     }
@@ -245,9 +256,9 @@ async function handleManualNewsLeadsApiInternal(
   if (action === 'retry') {
     if (!processingDependenciesAvailable(env)) return response({ ok: false, error: 'dependency_unavailable' }, 503);
     const result = await retryManualNewsLead(env, leadId, expectedVersion, key, now);
-    if (!result.ok) return response(result, result.status);
+    if (!result.ok) return response(manualNewsMutationResult(result), result.status);
     if (result.changed) scheduleLeadProcessing(env, ctx, result.lead);
-    return response(result, result.changed ? 202 : 200);
+    return response(manualNewsMutationResult(result), result.changed ? 202 : 200);
   }
   const expectedBatchRevision = Number(body.expected_batch_revision);
   if (!Number.isInteger(expectedBatchRevision) || expectedBatchRevision < 0) {
@@ -256,7 +267,9 @@ async function handleManualNewsLeadsApiInternal(
   const result = await confirmManualNewsLeadCandidate(
     env, leadId, expectedVersion, expectedBatchRevision, key, now,
   );
-  return result.ok ? response(result) : response(result, result.status);
+  return result.ok
+    ? response(manualNewsMutationResult(result))
+    : response(manualNewsMutationResult(result), result.status);
 }
 
 export async function handleManualNewsLeadsApi(

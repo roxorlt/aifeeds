@@ -1,0 +1,53 @@
+{
+  "contract": "proof_excerpt_v1",
+  "algorithm": "utf8-nfc-ws1-codepoint-prefix-v1",
+  "max_code_points": 3000,
+  "response_hmac_contract": "hmac-sha256-canonical-json-all-fields-except-response_hmac-v1",
+  "whitespace_code_points": [
+    "0009", "000A", "000B", "000C", "000D", "0020", "0085", "00A0", "1680",
+    "2000", "2001", "2002", "2003", "2004", "2005", "2006", "2007", "2008",
+    "2009", "200A", "2028", "2029", "202F", "205F", "3000", "FEFF"
+  ],
+  "vectors": [
+    {
+      "name": "cjk-emoji-combining-crlf-nbsp-fullwidth-feff",
+      "input": { "text": "﻿ 你好\r\n世界 😀 é　ＡＢ ﻿" },
+      "expected": {
+        "excerpt": { "text": "你好 世界 😀 é ＡＢ" },
+        "code_points": 12,
+        "utf8_bytes": 28,
+        "sha256": "44b0f21ba5f9ed18c25ba9ee07e2dced0d978943f076027ee58b27e21b20b080"
+      }
+    },
+    {
+      "name": "entire-frozen-whitespace-set",
+      "input": { "code_points_between": ["0009", "000A", "000B", "000C", "000D", "0020", "0085", "00A0", "1680", "2000", "2001", "2002", "2003", "2004", "2005", "2006", "2007", "2008", "2009", "200A", "2028", "2029", "202F", "205F", "3000", "FEFF"], "left": "A", "right": "B" },
+      "expected": {
+        "excerpt": { "text": "A B" },
+        "code_points": 3,
+        "utf8_bytes": 3,
+        "sha256": "fea4c5ce720c1d6a1cbc47c1607cc4ea172a69de8948e76d67910120597950fc"
+      }
+    },
+    {
+      "name": "2999-code-point-boundary",
+      "input": { "text": "界", "repeat": 2999 },
+      "expected": { "excerpt": { "text": "界", "repeat": 2999 }, "code_points": 2999, "utf8_bytes": 8997, "sha256": "e021ef1abbc62f9309ab0433b69c18128dbf97d640c275536ca75f2b866e4fa8" }
+    },
+    {
+      "name": "3000-code-point-boundary",
+      "input": { "text": "界", "repeat": 3000 },
+      "expected": { "excerpt": { "text": "界", "repeat": 3000 }, "code_points": 3000, "utf8_bytes": 9000, "sha256": "dd9471208195ff19f656b8b8e066f354e6e79db4d4e94bb4af936b229a611cee" }
+    },
+    {
+      "name": "3001-code-point-prefix-without-ellipsis",
+      "input": { "text": "界", "repeat": 3001 },
+      "expected": { "excerpt": { "text": "界", "repeat": 3000 }, "code_points": 3000, "utf8_bytes": 9000, "sha256": "dd9471208195ff19f656b8b8e066f354e6e79db4d4e94bb4af936b229a611cee" }
+    },
+    {
+      "name": "prefix-trims-trailing-ascii-space",
+      "input": { "segments": [{ "text": "x", "repeat": 2999 }, { "text": " " }, { "text": "y" }] },
+      "expected": { "excerpt": { "text": "x", "repeat": 2999 }, "code_points": 2999, "utf8_bytes": 2999, "sha256": "043e5f028e0c782c40ddde04d3ee4957bd5c32ba58547bc53a705ca338cfe08a" }
+    }
+  ]
+}

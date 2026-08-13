@@ -155,7 +155,7 @@ async function completeTrustedArticle(document: PublicDocument): Promise<boolean
     || document.fetch_audit.extraction !== 'article_text'
     || document.fetch_audit.protocol_version !== 'article_text_v2'
     || document.fetch_audit.response_profile !== 'proof_excerpt_v1'
-    || document.fetch_audit.response_hmac_contract !== 'canonical-json-excluding-response_hmac-v1'
+    || document.fetch_audit.response_hmac_contract !== 'hmac-sha256-canonical-json-all-fields-except-response_hmac-v1'
     || document.fetch_audit.proof_excerpt?.contract !== 'proof_excerpt_v1'
     || document.fetch_audit.proof_excerpt?.algorithm !== 'utf8-nfc-ws1-codepoint-prefix-v1'
     || document.fetch_audit.proof_excerpt?.max !== 3_000

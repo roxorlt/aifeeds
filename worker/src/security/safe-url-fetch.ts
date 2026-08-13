@@ -8,7 +8,7 @@ const ARTICLE_TEXT_MAX_BYTES = 28_000;
 const ARTICLE_TEXT_MAX_CHARACTERS = 28_000;
 const ARTICLE_TEXT_PROTOCOL_V2 = 'article_text_v2';
 const PROOF_EXCERPT_RESPONSE_PROFILE = 'proof_excerpt_v1';
-const PROOF_EXCERPT_RESPONSE_HMAC_CONTRACT = 'canonical-json-excluding-response_hmac-v1';
+const PROOF_EXCERPT_RESPONSE_HMAC_CONTRACT = 'hmac-sha256-canonical-json-all-fields-except-response_hmac-v1';
 const PROOF_EXCERPT_CONTRACT = 'proof_excerpt_v1';
 const PROOF_EXCERPT_ALGORITHM = 'utf8-nfc-ws1-codepoint-prefix-v1';
 const PROOF_EXCERPT_MAX_CODE_POINTS = 3_000;
@@ -91,7 +91,7 @@ export interface DocumentFetchAudit {
   final_url?: string;
   body_sha256?: string;
   response_profile?: 'proof_excerpt_v1';
-  response_hmac_contract?: 'canonical-json-excluding-response_hmac-v1';
+  response_hmac_contract?: 'hmac-sha256-canonical-json-all-fields-except-response_hmac-v1';
   proof_excerpt?: {
     contract: 'proof_excerpt_v1';
     algorithm: 'utf8-nfc-ws1-codepoint-prefix-v1';
@@ -104,7 +104,7 @@ export interface DocumentFetchAudit {
 }
 
 const PROOF_EXCERPT_WHITESPACE =
-  /[\u0009-\u000d\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/gu;
+  /[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/gu;
 
 export function deriveManualNewsProofExcerpt(value: string): string {
   const normalized = value.normalize('NFC')
@@ -559,6 +559,7 @@ export function validateCompleteArticleText(value: string, bytes: number): void 
   let allowedIgnorables = 0;
   for (let index = 0; index < characters.length; index += 1) {
     const character = characters[index];
+    if (character === '\ufeff') continue;
     if (!/\p{Default_Ignorable_Code_Point}/u.test(character)) continue;
     const previous = characters[index - 1] || '';
     const next = characters[index + 1] || '';
@@ -611,7 +612,9 @@ async function readBoundedBody(
   if (Number.isFinite(declared) && declared > maxBytes) throw new Error('response_too_large');
   if (!response.body) return { text: '', bytes: 0 };
   const reader = response.body.getReader();
-  const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
+  // Preserve a decoded U+FEFF so the frozen proof-excerpt whitespace contract,
+  // signed code-point count, and body digest all see the same complete text.
+  const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
   let text = '';
   let bytes = 0;
   try {

@@ -116,7 +116,7 @@ test('workerd rejects unsupported redirect before outbound and accepts the produ
         final_url: 'https://example.com/',
         body_sha256: createHash('sha256').update(body).digest('hex'),
         response_profile: 'proof_excerpt_v1',
-        response_hmac_contract: 'canonical-json-excluding-response_hmac-v1',
+        response_hmac_contract: 'hmac-sha256-canonical-json-all-fields-except-response_hmac-v1',
         proof_excerpt: {
           contract: 'proof_excerpt_v1',
           algorithm: 'utf8-nfc-ws1-codepoint-prefix-v1',

@@ -58,7 +58,7 @@ export function withSignedArticleTextV2Audit<T extends ManualNewsEvidence>(
     final_url: evidence.url,
     body_sha256: createHash('sha256').update(completeBody).digest('hex'),
     response_profile: 'proof_excerpt_v1' as const,
-    response_hmac_contract: 'canonical-json-excluding-response_hmac-v1' as const,
+    response_hmac_contract: 'hmac-sha256-canonical-json-all-fields-except-response_hmac-v1' as const,
     proof_excerpt: {
       contract: 'proof_excerpt_v1' as const,
       algorithm: 'utf8-nfc-ws1-codepoint-prefix-v1' as const,

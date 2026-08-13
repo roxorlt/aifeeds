@@ -50,6 +50,17 @@ const boundedDetailEvidence = Array.from({ length: 8 }, (_, index) => ({
   body: 'COMPLETE-BODY-TAIL-SENTINEL',
 }));
 
+const legacyMutationRecord = {
+  ...record,
+  evidence: [{
+    ...boundedDetailEvidence[0],
+    excerpt: 'Bounded persisted excerpt.',
+    claims_supported: ['COMPLETE-BODY-TAIL-SENTINEL'],
+    fetch_audit: { final_url: boundedDetailEvidence[0].url, legacy_tail: 'COMPLETE-BODY-TAIL-SENTINEL' },
+  }],
+  complete_body: 'COMPLETE-BODY-TAIL-SENTINEL',
+};
+
 const workflowCreate = vi.fn(async () => ({ id: 'manual-news-lead-workflow-instance' }));
 
 function env(overrides: Record<string, unknown> = {}) {
@@ -136,6 +147,91 @@ describe('manual daily news leads API', () => {
     });
     expect(processManualNewsLeadWithEnv).not.toHaveBeenCalled();
     expect(queued).toHaveLength(1);
+  });
+
+  test('uses one bounded lead DTO for submit replay and retry/confirm success or conflict', async () => {
+    const cases = [
+      {
+        name: 'submit replay',
+        prepare: () => vi.mocked(submitManualNewsLead).mockResolvedValueOnce({
+          lead: legacyMutationRecord, created: false,
+        } as never),
+        path: '/api/digest/daily-news-leads',
+        init: {
+          method: 'POST', headers: { 'Idempotency-Key': 'submit-bounded-replay' },
+          body: JSON.stringify({ date: '2026-08-11', text: 'Anthropic 输出水印' }),
+        },
+        status: 200,
+      },
+      {
+        name: 'retry success',
+        prepare: () => vi.mocked(retryManualNewsLead).mockResolvedValueOnce({
+          ok: true, changed: true,
+          lead: {
+            ...legacyMutationRecord, version: 2, status: 'validating',
+            processing_owner: `manual-news-${record.id}-v2`,
+          },
+        } as never),
+        path: `/api/digest/daily-news-leads/${record.id}/retry`,
+        init: {
+          method: 'POST', headers: { 'Idempotency-Key': 'retry-bounded-success' },
+          body: JSON.stringify({ expected_version: 1 }),
+        },
+        status: 202,
+      },
+      {
+        name: 'retry conflict',
+        prepare: () => vi.mocked(retryManualNewsLead).mockResolvedValueOnce({
+          ok: false, status: 409, error: 'lead_version_conflict', lead: legacyMutationRecord,
+        } as never),
+        path: `/api/digest/daily-news-leads/${record.id}/retry`,
+        init: {
+          method: 'POST', headers: { 'Idempotency-Key': 'retry-bounded-conflict' },
+          body: JSON.stringify({ expected_version: 0 }),
+        },
+        status: 409,
+      },
+      {
+        name: 'confirm success',
+        prepare: () => vi.mocked(confirmManualNewsLeadCandidate).mockResolvedValueOnce({
+          ok: true, changed: true, lead: { ...legacyMutationRecord, status: 'recommended' },
+          batch: null, pending_initial_freeze: true, rerender_enqueued: false,
+        } as never),
+        path: `/api/digest/daily-news-leads/${record.id}/confirm-candidate`,
+        init: {
+          method: 'POST', headers: { 'Idempotency-Key': 'confirm-bounded-success' },
+          body: JSON.stringify({ expected_version: 1, expected_batch_revision: 0 }),
+        },
+        status: 200,
+      },
+      {
+        name: 'confirm conflict',
+        prepare: () => vi.mocked(confirmManualNewsLeadCandidate).mockResolvedValueOnce({
+          ok: false, status: 409, error: 'lead_version_conflict', lead: legacyMutationRecord,
+        } as never),
+        path: `/api/digest/daily-news-leads/${record.id}/confirm-candidate`,
+        init: {
+          method: 'POST', headers: { 'Idempotency-Key': 'confirm-bounded-conflict' },
+          body: JSON.stringify({ expected_version: 0, expected_batch_revision: 0 }),
+        },
+        status: 409,
+      },
+    ];
+
+    for (const scenario of cases) {
+      scenario.prepare();
+      const result = await handleManualNewsLeadsApi(
+        request(scenario.path, scenario.init), env(), { waitUntil() {} } as never,
+      );
+      const payload = await result.json<{ lead: { evidence: Array<Record<string, unknown>> } }>();
+      expect(result.status, scenario.name).toBe(scenario.status);
+      expect(payload.lead.evidence, scenario.name).toEqual([expect.objectContaining({
+        excerpt: 'Bounded persisted excerpt.',
+      })]);
+      expect(JSON.stringify(payload), scenario.name).not.toContain('COMPLETE-BODY-TAIL-SENTINEL');
+      expect(JSON.stringify(payload), scenario.name).not.toContain('claims_supported');
+      expect(JSON.stringify(payload), scenario.name).not.toContain('fetch_audit');
+    }
   });
 
   test('uses the durable lead workflow when its binding is configured', async () => {

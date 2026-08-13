@@ -276,6 +276,24 @@ function stripActiveEvidenceProvenance(db: SerialSqliteD1, leadId: string): void
     .run(leadId);
 }
 
+function oversizePersistedEvidence(db: SerialSqliteD1, leadId: string, excerpt: string): void {
+  db.sqlite.prepare(`UPDATE manual_news_evidence SET excerpt = ?, claims_supported_json = ?
+    WHERE lead_id = ?`).run(excerpt, JSON.stringify([excerpt]), leadId);
+}
+
+function appendPersistedEvidenceToNine(db: SerialSqliteD1, leadId: string): void {
+  for (let index = 2; index <= 9; index += 1) {
+    db.sqlite.prepare(`INSERT INTO manual_news_evidence (
+      lead_id, evidence_id, url, source_type, publisher, published_at, retrieved_at,
+      title, excerpt, claims_supported_json, reliable, fetch_audit_json
+    ) SELECT lead_id, ?, ?, source_type, publisher, published_at, retrieved_at,
+      title, excerpt, claims_supported_json, reliable, fetch_audit_json
+      FROM manual_news_evidence WHERE lead_id = ? LIMIT 1`).run(
+      `ev-${leadId}-${index}`, `https://www.anthropic.com/news/${leadId}-${index}`, leadId,
+    );
+  }
+}
+
 function activeCount(db: SerialSqliteD1): number {
   return Number((db.sqlite.prepare(`SELECT COUNT(*) AS count FROM daily_news_review_batches
     WHERE review_date = '2026-08-11' AND lineage_id = '2026-08-11' AND is_current = 1`).get() as { count: number }).count);
@@ -371,6 +389,31 @@ describe('news review revision CAS', () => {
     expect(sanitized.batch.candidates.some((candidate) => candidate.lead_id === leadId)).toBe(false);
   });
 
+  test('candidate reconstruction quarantines and drops a manual proof over a 3001-code-point excerpt', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-boundedcand1';
+    await insertLead(current.db, leadId, 'event-bounded-candidate');
+    const frozen = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('bounded-candidate'),
+      candidates('bounded-candidate').map((item) => item.item_id), 100,
+    );
+    await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, frozen.batch.batch_revision, 'confirm-bounded-candidate', 110,
+    );
+    oversizePersistedEvidence(current.db, leadId, 'x'.repeat(3_001));
+
+    const sanitized = await sanitizeCurrentNewsReviewBatch(current.env, '2026-08-11', 120);
+
+    expect(sanitized.dropped_ids).toContain(`blog:manual:${leadId}`);
+    expect(sanitized.batch.candidates.some((candidate) => candidate.lead_id === leadId)).toBe(false);
+    expect(current.db.sqlite.prepare(`SELECT status, reason FROM manual_news_assessment_verifications
+      WHERE lead_id = ?`).get(leadId)).toEqual({
+      status: 'invalidated', reason: 'verification_integrity_invalid',
+    });
+    expect(current.db.sqlite.prepare('SELECT deleted_at FROM items WHERE id = ?')
+      .get(`blog:manual:${leadId}`)).toEqual({ deleted_at: expect.any(String) });
+  });
+
   test('finalize snapshot excludes a selected manual item after its proof is downgraded to v9', async () => {
     const current = state();
     const leadId = 'ml-20260811-v9finalize01';
@@ -421,6 +464,41 @@ describe('news review revision CAS', () => {
     const snapshot = await getVerifiedNewsReviewSelectionSnapshot(current.env, '2026-08-11', 120);
     expect(snapshot?.selected_ids).not.toContain(`blog:manual:${leadId}`);
     expect(snapshot?.manual_verifications).toEqual([]);
+  });
+
+  test('finalize snapshot quarantines and excludes a selected manual item with a 12001-byte excerpt', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-boundedfinal';
+    const scheduled = candidates('bounded-finalize');
+    const itemInsert = current.db.sqlite.prepare('INSERT INTO items (id, deleted_at) VALUES (?, NULL)');
+    for (const candidate of scheduled) itemInsert.run(candidate.item_id);
+    await insertLead(current.db, leadId, 'event-bounded-finalize');
+    const frozen = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', scheduled, scheduled.map((item) => item.item_id), 100,
+    );
+    await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, frozen.batch.batch_revision, 'confirm-bounded-finalize', 110,
+    );
+    const active = await getActiveNewsReviewBatch(current.env, '2026-08-11');
+    const token = await createNewsReviewToken('test-secret', '2026-08-11', active!.batch_id);
+    await submitNewsReviewSelection(current.env, {
+      date: '2026-08-11', batch_id: active!.batch_id, token,
+      selected_ids: [`blog:manual:${leadId}`, ...scheduled.slice(0, 4).map((item) => item.item_id)],
+    }, 115);
+    const oversized = `${'😀'.repeat(3_000)}x`;
+    expect(Buffer.byteLength(oversized, 'utf8')).toBe(12_001);
+    oversizePersistedEvidence(current.db, leadId, oversized);
+
+    const snapshot = await getVerifiedNewsReviewSelectionSnapshot(current.env, '2026-08-11', 120);
+
+    expect(snapshot?.selected_ids).not.toContain(`blog:manual:${leadId}`);
+    expect(snapshot?.manual_verifications).toEqual([]);
+    expect(current.db.sqlite.prepare(`SELECT status, reason FROM manual_news_assessment_verifications
+      WHERE lead_id = ?`).get(leadId)).toEqual({
+      status: 'invalidated', reason: 'verification_integrity_invalid',
+    });
+    expect(current.db.sqlite.prepare('SELECT deleted_at FROM items WHERE id = ?')
+      .get(`blog:manual:${leadId}`)).toEqual({ deleted_at: expect.any(String) });
   });
 
   test('rejects selection of a just-invalidated manual candidate as stale without publishing', async () => {
@@ -971,6 +1049,33 @@ describe('news review revision CAS', () => {
     );
 
     expect(refreshed.batch.candidates.some((candidate) => candidate.lead_id === leadId)).toBe(false);
+  });
+
+  test('scheduled freeze quarantines and drops a manual candidate with nine persisted sources', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-boundedfreeze';
+    await insertLead(current.db, leadId, 'event-bounded-freeze');
+    await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('bounded-freeze-v1'),
+      candidates('bounded-freeze-v1').map((item) => item.item_id), 100,
+    );
+    await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, 1, 'confirm-bounded-freeze', 110,
+    );
+    appendPersistedEvidenceToNine(current.db, leadId);
+
+    const refreshed = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('bounded-freeze-v2'),
+      candidates('bounded-freeze-v2').map((item) => item.item_id), 120,
+    );
+
+    expect(refreshed.batch.candidates.some((candidate) => candidate.lead_id === leadId)).toBe(false);
+    expect(current.db.sqlite.prepare(`SELECT status, reason FROM manual_news_assessment_verifications
+      WHERE lead_id = ?`).get(leadId)).toEqual({
+      status: 'invalidated', reason: 'verification_integrity_invalid',
+    });
+    expect(current.db.sqlite.prepare('SELECT deleted_at FROM items WHERE id = ?')
+      .get(`blog:manual:${leadId}`)).toEqual({ deleted_at: expect.any(String) });
   });
 
   test('scheduled freeze cannot preserve a manual-looking snapshot without a verified durable lead', async () => {

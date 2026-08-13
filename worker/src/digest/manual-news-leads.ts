@@ -5716,7 +5716,7 @@ const MANUAL_NEWS_EVIDENCE_MAX_COUNT = 8;
 const MANUAL_NEWS_EXCERPT_MAX_CODE_POINTS = 3_000;
 const MANUAL_NEWS_EXCERPT_MAX_UTF8_BYTES = 12_000;
 const MANUAL_NEWS_RESPONSE_PROFILE = 'proof_excerpt_v1';
-const MANUAL_NEWS_RESPONSE_HMAC_CONTRACT = 'canonical-json-excluding-response_hmac-v1';
+const MANUAL_NEWS_RESPONSE_HMAC_CONTRACT = 'hmac-sha256-canonical-json-all-fields-except-response_hmac-v1';
 const MANUAL_NEWS_PROOF_EXCERPT_ALGORITHM = 'utf8-nfc-ws1-codepoint-prefix-v1';
 
 function invalidManualNewsEvidenceProvenance(): never {
@@ -5970,28 +5970,6 @@ export function assertManualNewsEvidenceSet(evidence: readonly ManualNewsEvidenc
       || excerptBytes > MANUAL_NEWS_EXCERPT_MAX_UTF8_BYTES
       || item.claims_supported.length !== 1
       || item.claims_supported[0] !== item.excerpt) {
-      throw new Error('manual_news_evidence_set_invalid');
-    }
-    ids.add(item.id);
-    finalUrls.add(finalUrl);
-  }
-}
-
-export function assertManualNewsEvidenceLoadBounds(evidence: readonly ManualNewsEvidence[]): void {
-  if (evidence.length > MANUAL_NEWS_EVIDENCE_MAX_COUNT) {
-    throw new Error('manual_news_evidence_set_invalid');
-  }
-  const ids = new Set<string>();
-  const finalUrls = new Set<string>();
-  for (const item of evidence) {
-    const excerptBytes = new TextEncoder().encode(item.excerpt).byteLength;
-    const excerptCodePoints = Array.from(item.excerpt).length;
-    let finalUrl = item.url;
-    try { finalUrl = validatePublicHttpUrl(item.url).toString(); } catch { /* current-proof validation rejects it */ }
-    if (!item.id || ids.has(item.id)
-      || !item.url || finalUrls.has(finalUrl)
-      || excerptCodePoints > MANUAL_NEWS_EXCERPT_MAX_CODE_POINTS
-      || excerptBytes > MANUAL_NEWS_EXCERPT_MAX_UTF8_BYTES) {
       throw new Error('manual_news_evidence_set_invalid');
     }
     ids.add(item.id);

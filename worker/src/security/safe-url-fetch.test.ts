@@ -1,5 +1,8 @@
 import { describe, expect, test, vi } from 'vitest';
 import { createHash, createHmac } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 
 import {
   fetchPublicDocument,
@@ -14,16 +17,58 @@ const requestNonce = '22'.repeat(16);
 const protocolNow = Date.parse('2026-08-12T00:00:00.000Z');
 const requestTimestamp = new Date(protocolNow).toISOString();
 const responseProfile = 'proof_excerpt_v1';
-const responseHmacContract = 'canonical-json-excluding-response_hmac-v1';
+const responseHmacContract = 'hmac-sha256-canonical-json-all-fields-except-response_hmac-v1';
 const proofExcerptAlgorithm = 'utf8-nfc-ws1-codepoint-prefix-v1';
+const goldenFixtureSha256 = 'c576f24f0e1c22b8b828c3bbd0bd7157721768197aa279a911050e475bb87c8a';
+const goldenFixturePath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '../../../workflows/aifeeds-daily/fixtures/proof-excerpt-v1-golden.json',
+);
+const goldenFixtureRaw = readFileSync(goldenFixturePath);
+const goldenFixture = JSON.parse(goldenFixtureRaw.toString('utf8')) as {
+  contract: string;
+  algorithm: string;
+  max_code_points: number;
+  response_hmac_contract: string;
+  whitespace_code_points: string[];
+  vectors: Array<{
+    name: string;
+    input: {
+      text?: string; repeat?: number; left?: string; right?: string;
+      code_points_between?: string[];
+      segments?: Array<{ text: string; repeat?: number }>;
+    };
+    expected: {
+      excerpt: { text: string; repeat?: number };
+      code_points: number;
+      utf8_bytes: number;
+      sha256: string;
+    };
+  }>;
+};
 
 function referenceProofExcerpt(value: string): string {
   return Array.from(value.normalize('NFC')
-    .replace(/[\u0009-\u000d\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/gu, ' ')
+    .replace(/[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/gu, ' ')
     .replace(/^ +| +$/gu, ''))
     .slice(0, 3_000)
     .join('')
     .replace(/ +$/gu, '');
+}
+
+function expandGoldenText(value: {
+  text?: string; repeat?: number; left?: string; right?: string;
+  code_points_between?: string[];
+  segments?: Array<{ text: string; repeat?: number }>;
+}): string {
+  if (value.segments) {
+    return value.segments.map((segment) => segment.text.repeat(segment.repeat || 1)).join('');
+  }
+  if (value.code_points_between) {
+    return `${value.left || ''}${value.code_points_between
+      .map((codePoint) => String.fromCodePoint(Number.parseInt(codePoint, 16))).join('')}${value.right || ''}`;
+  }
+  return String(value.text || '').repeat(value.repeat || 1);
 }
 
 function proofExcerptClaims(body: string) {
@@ -313,25 +358,69 @@ describe('trusted manual-news research boundary', () => {
     expect(JSON.stringify(document)).not.toContain('COMPLETE-BODY-TAIL-SENTINEL');
   });
 
-  test.each([
-    ['CJK', '　你好\t世界\n再见　', '你好 世界 再见'],
-    ['emoji', '😀\t👩‍💻', '😀 👩‍💻'],
-    ['combining NFC', ' Cafe\u0301 ', 'Café'],
-    ['CRLF', 'alpha\r\nbeta', 'alpha beta'],
-    ['NBSP/fullwidth/FEFF', 'a\u00a0b\u3000c\ufeffd', 'a b c d'],
-    ['2999 code points', '界'.repeat(2_999), '界'.repeat(2_999)],
-    ['3000 code points', '界'.repeat(3_000), '界'.repeat(3_000)],
-    ['3001 code points', '界'.repeat(3_001), '界'.repeat(3_000)],
-    ['trailing trim after prefix', `${'x'.repeat(2_999)} tail`, 'x'.repeat(2_999)],
-  ])('matches the shared proof_excerpt_v1 golden vector: %s', async (_name, body, expected) => {
-    const document = await fetchPublicDocument('https://example.com/story', {
-      service: service(async () => gatewayResponse(body, {
-        hops: [publicHop()], source_content_type: 'text/plain', extraction: 'text', profile: {},
-      }) as never),
+  test('pins the byte-identical HK proof_excerpt_v1 golden artifact and checksum', () => {
+    expect(createHash('sha256').update(goldenFixtureRaw).digest('hex')).toBe(goldenFixtureSha256);
+    expect(goldenFixture).toMatchObject({
+      contract: responseProfile,
+      algorithm: proofExcerptAlgorithm,
+      max_code_points: 3_000,
+      response_hmac_contract: responseHmacContract,
     });
-    expect(document).toMatchObject({ excerpt: expected });
-    expect(document.fetch_audit.proof_excerpt).toEqual(proofExcerptClaims(body));
   });
+
+  test.each(['article_text', 'text', 'json', 'pdf_text'] as const)(
+    'matches every pinned proof_excerpt_v1 golden vector for %s', async (extraction) => {
+      const sourceContentType = {
+        article_text: 'text/html', text: 'text/plain', json: 'application/json', pdf_text: 'application/pdf',
+      }[extraction];
+      for (const vector of goldenFixture.vectors) {
+        const body = expandGoldenText(vector.input);
+        const expected = expandGoldenText(vector.expected.excerpt);
+        const document = await fetchPublicDocument('https://example.com/story', {
+          service: service(async () => gatewayResponse(body, {
+            hops: [publicHop()], source_content_type: sourceContentType, extraction, profile: {},
+            ...(extraction === 'article_text' ? {
+              document: {
+                title: 'Golden vector', published_at: null,
+                selection: 'article' as const, content_complete: true as const,
+              },
+            } : {}),
+          }) as never),
+        });
+        expect(document.excerpt, vector.name).toBe(expected);
+        expect(document.fetch_audit.proof_excerpt, vector.name).toEqual({
+          contract: goldenFixture.contract,
+          algorithm: goldenFixture.algorithm,
+          max: goldenFixture.max_code_points,
+          sha256: vector.expected.sha256,
+          utf8_bytes: vector.expected.utf8_bytes,
+          code_points: vector.expected.code_points,
+        });
+      }
+    },
+  );
+
+  test.each(['article_text', 'text', 'json', 'pdf_text'] as const)(
+    'preserves a contextual emoji ZWJ sequence under the pinned algorithm for %s', async (extraction) => {
+      const body = '你好 👩‍💻 world';
+      const sourceContentType = {
+        article_text: 'text/html', text: 'text/plain', json: 'application/json', pdf_text: 'application/pdf',
+      }[extraction];
+      const document = await fetchPublicDocument('https://example.com/story', {
+        service: service(async () => gatewayResponse(body, {
+          hops: [publicHop()], source_content_type: sourceContentType, extraction, profile: {},
+          ...(extraction === 'article_text' ? {
+            document: {
+              title: 'ZWJ vector', published_at: null,
+              selection: 'article' as const, content_complete: true as const,
+            },
+          } : {}),
+        }) as never),
+      });
+      expect(document.excerpt).toBe(body);
+      expect(document.fetch_audit.proof_excerpt).toEqual(proofExcerptClaims(body));
+    },
+  );
 
   test('fails closed when the negotiated profile is absent or its signed excerpt claims are substituted', async () => {
     const body = 'Signed complete body.';

@@ -27,9 +27,9 @@
 - **ARCH-02（CF 阻断）**：完整网关正文若进入 `ManualNewsEvidence`、`claims_supported`、D1、Workflow step output、API DTO、日志/错误 metadata 或 proof canonical payload，会造成持久化泄露、响应放大和不同边界对正文/摘要关系的重新解释。完整正文只能在 `/v1/document` transport 函数局部存活；认证 HMAC、完整正文 SHA-256/UTF-8 byte/Unicode code-point size 后，CF 按冻结算法派生 excerpt，并在返回 transport DTO 前解除完整正文引用。任何后续层都不得接收完整正文参数。
 - **ARCH-03（跨 HK/CF 阻断）**：只有请求显式协商 `response_profile='proof_excerpt_v1'` 时，HK 才增加已签名的 `response_profile`、`response_hmac_contract` 与 `proof_excerpt`。CF v10 每次 document 请求都必须显式发送该 profile，并对缺失、未知或结构不精确的 profile 失败关闭；旧 v2 兼容只属于 HK，不属于 CF v10 consumer。
 
-`proof_excerpt_v1` 的冻结字段为：`contract='proof_excerpt_v1'`、`algorithm='utf8-nfc-ws1-codepoint-prefix-v1'`、`max=3000`、`sha256`（64 位小写 hex）、`utf8_bytes`、`code_points`。`response_hmac_contract='canonical-json-excluding-response_hmac-v1'`；response HMAC 覆盖 audit 中除 `response_hmac` 外的全部字段，header 不携带 excerpt 文本。
+`proof_excerpt_v1` 的冻结字段为：`contract='proof_excerpt_v1'`、`algorithm='utf8-nfc-ws1-codepoint-prefix-v1'`、`max=3000`、`sha256`（64 位小写 hex）、`utf8_bytes`、`code_points`。`response_hmac_contract='hmac-sha256-canonical-json-all-fields-except-response_hmac-v1'`；response HMAC 覆盖 audit 中除 `response_hmac` 外的全部字段，header 不携带 excerpt 文本。CF/HK 共同 golden artifact 固定为 `workflows/aifeeds-daily/fixtures/proof-excerpt-v1-golden.json`，canonical file SHA-256 固定为 `c576f24f0e1c22b8b828c3bbd0bd7157721768197aa279a911050e475bb87c8a`；任一仓内容或 checksum 漂移都阻断。
 
-冻结派生算法按以下顺序执行且不得使用运行时 `\s`、locale 或 grapheme segmentation：正文 NFC；把连续的显式 whitespace code point 集合折叠为一个 ASCII space U+0020；去除首尾 ASCII space；取前 3000 个 Unicode code points；再次只去除尾部 ASCII space；不加省略号。冻结集合为 U+0009–U+000D、U+0020、U+00A0、U+1680、U+2000–U+200A、U+2028、U+2029、U+202F、U+205F、U+3000、U+FEFF。CJK、emoji、combining sequence、CRLF、NBSP、全角空格、FEFF 与 2999/3000/3001 边界必须共享 golden vectors。
+冻结派生算法按以下顺序执行且不得使用运行时 `\s`、locale 或 grapheme segmentation：正文 NFC；把连续的显式 whitespace code point 集合折叠为一个 ASCII space U+0020；去除首尾 ASCII space；取前 3000 个 Unicode code points；再次只去除尾部 ASCII space；不加省略号。冻结集合为 U+0009–U+000D、U+0020、U+0085、U+00A0、U+1680、U+2000–U+200A、U+2028、U+2029、U+202F、U+205F、U+3000、U+FEFF。CJK、emoji/ZWJ、combining sequence、CRLF、NBSP、全角空格、FEFF 与 2999/3000/3001 边界必须共享 golden vectors。
 
 CF bounded API/persistence 不变量：
 

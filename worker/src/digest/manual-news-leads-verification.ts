@@ -1,6 +1,6 @@
 import type { Env } from '../index';
 import {
-  assertManualNewsEvidenceLoadBounds,
+  assertManualNewsEvidenceSet,
   isCurrentManualLeadVerification,
   isManualNewsVerificationSecretConfigured,
   validateManualLeadFactVerification,
@@ -161,7 +161,23 @@ export async function loadManualNewsEvidence(env: Env, leadId: string): Promise<
     `/* manual_evidence:list */ SELECT * FROM manual_news_evidence WHERE lead_id = ? ORDER BY evidence_id`,
   ).bind(leadId).all<ManualEvidenceRow>();
   const evidence = (result.results || []).map(evidenceFromRow);
-  assertManualNewsEvidenceLoadBounds(evidence);
+  try {
+    assertManualNewsEvidenceSet(evidence);
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== 'manual_news_evidence_set_invalid') throw error;
+    const verification = await env.DB.prepare(
+      `/* manual_verification:active_for_malformed_evidence */ SELECT
+         verification_id, lead_id, assessment_version, policy_version, canonical_digest,
+         hmac_sha256, verification_json, processing_owner, processing_attempt,
+         creation_nonce, status, reason, created_at, invalidated_at
+       FROM manual_news_assessment_verifications
+       WHERE lead_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1`,
+    ).bind(leadId).first<PersistedManualVerificationRow>();
+    if (verification) {
+      await quarantineInvalidManualAssessment(env, verification, 'verification_integrity_invalid');
+    }
+    return [];
+  }
   return evidence;
 }
 

@@ -33,12 +33,12 @@ vi.mock('../hf-paper/llm', async (importOriginal) => {
 
 const responseSecret = '11'.repeat(32);
 const responseProfile = 'proof_excerpt_v1';
-const responseHmacContract = 'canonical-json-excluding-response_hmac-v1';
+const responseHmacContract = 'hmac-sha256-canonical-json-all-fields-except-response_hmac-v1';
 const proofExcerptAlgorithm = 'utf8-nfc-ws1-codepoint-prefix-v1';
 
 function referenceProofExcerpt(value: string): string {
   return Array.from(value.normalize('NFC')
-    .replace(/[\u0009-\u000d\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/gu, ' ')
+    .replace(/[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/gu, ' ')
     .replace(/^ +| +$/gu, ''))
     .slice(0, 3_000)
     .join('')
