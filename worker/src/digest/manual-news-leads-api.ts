@@ -1,5 +1,9 @@
 import type { Env } from '../index';
 import {
+  manualNewsResponseKeyring,
+  manualNewsVerificationKeyring,
+} from '../security/manual-news-keyring';
+import {
   confirmManualNewsLeadCandidate,
   getManualNewsLead,
   getManualNewsLeadCandidateState,
@@ -11,10 +15,79 @@ import {
   submitManualNewsLead,
 } from './manual-news-leads-store';
 import { newsReviewSecret } from './news-review';
-import { isManualNewsVerificationSecretConfigured } from './manual-news-leads';
+import type { ManualNewsEvidence } from './manual-news-leads';
+import type { ManualNewsLeadRecord, ManualNewsLeadSummary } from './manual-news-leads-pipeline';
 
 const MAX_BODY_BYTES = 16 * 1024;
 const BASE_PATH = '/api/digest/daily-news-leads';
+
+type ManualNewsListInput = ManualNewsLeadSummary | ManualNewsLeadRecord;
+
+function manualNewsLeadBase(lead: ManualNewsListInput) {
+  return {
+    id: lead.id,
+    review_date: lead.review_date,
+    input_type: lead.input_type,
+    input_text: lead.input_text,
+    input_url: lead.input_url,
+    note: lead.note,
+    status: lead.status,
+    version: lead.version,
+    error_code: lead.error_code,
+    error_message: lead.error_message,
+    processing_owner: lead.processing_owner,
+    processing_attempt: lead.processing_attempt,
+    processing_lease_until: lead.processing_lease_until,
+    confirmed_batch_id: lead.confirmed_batch_id,
+    confirmed_at: lead.confirmed_at,
+    created_at: lead.created_at,
+    updated_at: lead.updated_at,
+  };
+}
+
+function manualNewsLeadSummary(lead: ManualNewsListInput) {
+  return {
+    ...manualNewsLeadBase(lead),
+    evidence_count: 'evidence_count' in lead ? lead.evidence_count : lead.evidence.length,
+  };
+}
+
+function manualNewsEvidenceDetail(item: ManualNewsEvidence) {
+  return {
+    id: item.id,
+    url: item.url,
+    source_type: item.source_type,
+    publisher: item.publisher,
+    published_at: item.published_at,
+    retrieved_at: item.retrieved_at,
+    title: item.title,
+    excerpt: item.excerpt,
+    reliable: item.reliable,
+  };
+}
+
+function manualNewsLeadDetail(lead: ManualNewsLeadRecord) {
+  return {
+    response_profile: 'manual_news_lead_detail_v1' as const,
+    schema_version: 1 as const,
+    ...manualNewsLeadBase(lead),
+    ...(lead.assessment_generation ? { assessment_generation: lead.assessment_generation } : {}),
+    ...(lead.provider_failure ? { provider_failure: lead.provider_failure } : {}),
+    assessment: lead.assessment,
+    evidence: lead.evidence.slice(0, 8).filter((item) => {
+      const codePoints = Array.from(item.excerpt).length;
+      return codePoints > 0 && codePoints <= 3_000
+        && new TextEncoder().encode(item.excerpt).byteLength <= 12_000;
+    }).map(manualNewsEvidenceDetail),
+  };
+}
+
+function manualNewsMutationResult<T extends { lead?: ManualNewsLeadRecord }>(result: T) {
+  return {
+    ...result,
+    ...(result.lead ? { lead: manualNewsLeadDetail(result.lead) } : {}),
+  };
+}
 
 function scheduleLeadProcessing(
   env: Env,
@@ -34,14 +107,19 @@ function scheduleLeadProcessing(
 }
 
 function processingDependenciesAvailable(env: Env): boolean {
-  return Boolean(
+  if (!(
     env.MANUAL_NEWS_LEAD_WORKFLOW
     && env.MANUAL_NEWS_RESEARCH_ORIGIN
     && env.MANUAL_NEWS_RESEARCH_TOKEN
-    && /^[a-f0-9]{64}$/.test(env.MANUAL_NEWS_RESEARCH_RESPONSE_SECRET || '')
     && env.DEEPSEEK_API_KEY
-    && isManualNewsVerificationSecretConfigured(env.MANUAL_NEWS_VERIFICATION_SECRET),
-  );
+  )) return false;
+  try {
+    manualNewsResponseKeyring(env);
+    manualNewsVerificationKeyring(env);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function response(payload: unknown, status = 200): Response {
@@ -135,7 +213,14 @@ async function handleManualNewsLeadsApiInternal(
         listManualNewsLeads(env, date),
         getManualNewsLeadCandidateState(env, date),
       ]);
-      return response({ ok: true, date, leads, candidate_batch: candidateBatch });
+      return response({
+        ok: true,
+        response_profile: 'manual_news_leads_summary_v1',
+        schema_version: 1,
+        date,
+        leads: leads.slice(0, 50).map(manualNewsLeadSummary),
+        candidate_batch: candidateBatch,
+      });
     }
     if (request.method !== 'POST') return response({ ok: false, error: 'method_not_allowed' }, 405);
     if (!processingDependenciesAvailable(env)) return response({ ok: false, error: 'dependency_unavailable' }, 503);
@@ -150,7 +235,9 @@ async function handleManualNewsLeadsApiInternal(
         note: body.note,
       }, key, now);
       if (result.created) scheduleLeadProcessing(env, ctx, result.lead);
-      return response({ ok: true, ...result }, result.created ? 202 : 200);
+      return response({
+        ok: true, created: result.created, lead: manualNewsLeadDetail(result.lead),
+      }, result.created ? 202 : 200);
     } catch (error) {
       return requestErrorResponse(error);
     }
@@ -162,7 +249,9 @@ async function handleManualNewsLeadsApiInternal(
   if (!action) {
     if (request.method !== 'GET') return response({ ok: false, error: 'method_not_allowed' }, 405);
     const lead = await getManualNewsLead(env, leadId);
-    return lead ? response({ ok: true, lead }) : response({ ok: false, error: 'manual_news_lead_not_found' }, 404);
+    return lead
+      ? response({ ok: true, lead: manualNewsLeadDetail(lead) })
+      : response({ ok: false, error: 'manual_news_lead_not_found' }, 404);
   }
   if (request.method !== 'POST') return response({ ok: false, error: 'method_not_allowed' }, 405);
   const key = idempotencyKey(request);
@@ -180,9 +269,9 @@ async function handleManualNewsLeadsApiInternal(
   if (action === 'retry') {
     if (!processingDependenciesAvailable(env)) return response({ ok: false, error: 'dependency_unavailable' }, 503);
     const result = await retryManualNewsLead(env, leadId, expectedVersion, key, now);
-    if (!result.ok) return response(result, result.status);
+    if (!result.ok) return response(manualNewsMutationResult(result), result.status);
     if (result.changed) scheduleLeadProcessing(env, ctx, result.lead);
-    return response(result, result.changed ? 202 : 200);
+    return response(manualNewsMutationResult(result), result.changed ? 202 : 200);
   }
   const expectedBatchRevision = Number(body.expected_batch_revision);
   if (!Number.isInteger(expectedBatchRevision) || expectedBatchRevision < 0) {
@@ -191,7 +280,9 @@ async function handleManualNewsLeadsApiInternal(
   const result = await confirmManualNewsLeadCandidate(
     env, leadId, expectedVersion, expectedBatchRevision, key, now,
   );
-  return result.ok ? response(result) : response(result, result.status);
+  return result.ok
+    ? response(manualNewsMutationResult(result))
+    : response(manualNewsMutationResult(result), result.status);
 }
 
 export async function handleManualNewsLeadsApi(

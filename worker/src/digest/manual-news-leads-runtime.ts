@@ -2,6 +2,7 @@ import type { Env } from '../index';
 import { callDeepSeekJson, DEEPSEEK_PRO } from '../hf-paper/llm';
 import {
   fetchPublicDocument,
+  validateCompleteArticleText,
   searchPublicWeb,
   type PublicDocument,
   type TrustedGatewayFetcher,
@@ -127,8 +128,8 @@ function sourceIdentity(urlValue: string): { source_type: ManualEvidenceSourceTy
   return { source_type: 'other', reliable: false, publisher: displayRegistrableDomain(host) };
 }
 
-const MANUAL_NEWS_ARTICLE_MAX_BYTES = 28_000;
-const MANUAL_NEWS_ARTICLE_MAX_CHARACTERS = 28_000;
+const MANUAL_NEWS_EXCERPT_MAX_BYTES = 12_000;
+const MANUAL_NEWS_EXCERPT_MAX_CHARACTERS = 3_000;
 
 function normalizedHintPublishedAt(value: string | null | undefined): string | null {
   if (!value) return null;
@@ -139,6 +140,8 @@ function normalizedHintPublishedAt(value: string | null | undefined): string | n
 }
 
 async function completeTrustedArticle(document: PublicDocument): Promise<boolean> {
+  const fullTextBytes = document.fetch_audit.actual_sizes.extracted_text_bytes;
+  const fullTextCodePoints = document.fetch_audit.actual_sizes.extracted_text_characters;
   if (document.extraction !== 'article_text'
     || !['text/html', 'application/xhtml+xml'].includes(document.content_type)
     || document.content_complete !== true
@@ -151,6 +154,11 @@ async function completeTrustedArticle(document: PublicDocument): Promise<boolean
     || document.fetch_audit.document.content_complete !== true
     || document.fetch_audit.extraction !== 'article_text'
     || document.fetch_audit.protocol_version !== 'article_text_v2'
+    || document.fetch_audit.response_profile !== 'proof_excerpt_v1'
+    || document.fetch_audit.response_hmac_contract !== 'hmac-sha256-canonical-json-all-fields-except-response_hmac-v1'
+    || document.fetch_audit.proof_excerpt?.contract !== 'proof_excerpt_v1'
+    || document.fetch_audit.proof_excerpt?.algorithm !== 'utf8-nfc-ws1-codepoint-prefix-v1'
+    || document.fetch_audit.proof_excerpt?.max !== 3_000
     || document.fetch_audit.final_url !== document.url
     || !/^(?:[a-f0-9]{32,128}|[A-Za-z0-9_-]{22,171})$/.test(document.fetch_audit.request_nonce || '')
     || !/^\d{4}-\d{2}-\d{2}T.*Z$/.test(document.fetch_audit.request_timestamp || '')
@@ -159,19 +167,26 @@ async function completeTrustedArticle(document: PublicDocument): Promise<boolean
     || !/^[a-f0-9]{64}$/.test(document.fetch_audit.response_hmac || '')
     || !/^chromium\/(\d+)\.\d+\.\d+\.\d+$/.test(document.fetch_audit.parser.version)
     || Number(/^chromium\/(\d+)/.exec(document.fetch_audit.parser.version)?.[1] || 0) < 149
+    || fullTextBytes <= 0 || fullTextBytes > 28_000
+    || fullTextCodePoints <= 0 || fullTextCodePoints > 28_000
+    || fullTextBytes > document.fetch_audit.applied_limits.extracted_text_bytes
+    || fullTextCodePoints > document.fetch_audit.applied_limits.extracted_text_characters
     || document.fetch_audit.truncation.source || document.fetch_audit.truncation.extracted_text) return false;
-  const bytes = new TextEncoder().encode(document.body).byteLength;
-  const characters = Array.from(document.body);
-  if (!characters.length || bytes !== document.bytes
-    || bytes > MANUAL_NEWS_ARTICLE_MAX_BYTES
-    || characters.length > MANUAL_NEWS_ARTICLE_MAX_CHARACTERS
-    || document.fetch_audit.actual_sizes.extracted_text_bytes !== bytes
-    || document.fetch_audit.actual_sizes.extracted_text_characters !== characters.length) return false;
-  if (characters.some((character) => /\p{Default_Ignorable_Code_Point}/u.test(character)
-    && character !== '\u200c' && character !== '\u200d' && !/^[\ufe00-\ufe0f]$/u.test(character))) return false;
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(document.body));
-  const bodyHash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-  return bodyHash === document.fetch_audit.body_sha256;
+  const bytes = new TextEncoder().encode(document.excerpt).byteLength;
+  const characters = Array.from(document.excerpt);
+  if (!characters.length
+    || bytes > MANUAL_NEWS_EXCERPT_MAX_BYTES
+    || characters.length > MANUAL_NEWS_EXCERPT_MAX_CHARACTERS
+    || document.fetch_audit.proof_excerpt.utf8_bytes !== bytes
+    || document.fetch_audit.proof_excerpt.code_points !== characters.length) return false;
+  try {
+    validateCompleteArticleText(document.excerpt, bytes);
+  } catch {
+    return false;
+  }
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(document.excerpt));
+  const excerptHash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return excerptHash === document.fetch_audit.proof_excerpt.sha256;
 }
 
 async function evidenceId(url: string): Promise<string> {
@@ -190,10 +205,11 @@ export async function extractManualNewsEvidence(
   if (document.extraction === 'article_text' && !await completeTrustedArticle(document)) return null;
   const articleText = document.extraction === 'article_text';
   const title = articleText ? document.title! : compact(hint?.title || '', 220);
-  const excerpt = articleText ? document.body : compact(document.body, 3_000);
+  const excerpt = document.excerpt;
   if (!title && !excerpt) return null;
   return {
     id: await evidenceId(document.url),
+    response_key_id: document.response_key_id,
     url: document.url,
     source_type: identity.source_type,
     publisher: compact(identity.publisher, 120),
@@ -234,11 +250,14 @@ async function searchExistingNews(env: Env, input: { text: string }): Promise<Ma
 
 function researchService(env: Env, fetcher?: TrustedGatewayFetcher): TrustedResearchService | undefined {
   if (!env.MANUAL_NEWS_RESEARCH_ORIGIN || !env.MANUAL_NEWS_RESEARCH_TOKEN
-    || !env.MANUAL_NEWS_RESEARCH_RESPONSE_SECRET) return undefined;
+    || !env.MANUAL_NEWS_RESEARCH_RESPONSE_SECRET
+    || !env.MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID) return undefined;
   return {
     origin: env.MANUAL_NEWS_RESEARCH_ORIGIN,
     token: env.MANUAL_NEWS_RESEARCH_TOKEN,
+    responseKeyId: env.MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID,
     responseSecret: env.MANUAL_NEWS_RESEARCH_RESPONSE_SECRET,
+    responseKeyringJson: env.MANUAL_NEWS_RESEARCH_RESPONSE_KEYRING_JSON,
     ...(fetcher ? { fetcher } : {}),
   };
 }

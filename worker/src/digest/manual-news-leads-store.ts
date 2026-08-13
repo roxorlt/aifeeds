@@ -1,5 +1,9 @@
 import type { Env } from '../index';
 import {
+  manualNewsResponseKeyring,
+  manualNewsVerificationKeyring,
+} from '../security/manual-news-keyring';
+import {
   assertManualLeadTransition,
   createManualEvidenceDigest,
   createManualLeadVerificationProof,
@@ -33,6 +37,7 @@ import type {
   ManualLeadProcessingStore,
   ManualLeadTransitionPatch,
   ManualNewsLeadRecord,
+  ManualNewsLeadSummary,
 } from './manual-news-leads-pipeline';
 import {
   isValidManualNewsProviderFailureAudit,
@@ -78,6 +83,7 @@ interface ManualLeadRow {
   confirmed_at: number | null;
   created_at: number;
   updated_at: number;
+  evidence_count?: number;
 }
 
 interface ManualAssessmentGenerationCycleRow {
@@ -359,12 +365,35 @@ export async function getManualNewsLead(env: Env, id: string): Promise<ManualNew
   return row ? leadFromRow(env, row) : null;
 }
 
-export async function listManualNewsLeads(env: Env, date: string): Promise<ManualNewsLeadRecord[]> {
+export async function listManualNewsLeads(env: Env, date: string): Promise<ManualNewsLeadSummary[]> {
   const result = await env.DB.prepare(
-    `/* manual_lead:list_date */ SELECT * FROM manual_news_leads
+    `/* manual_lead:list_date */ SELECT lead.*,
+       (SELECT COUNT(*) FROM manual_news_evidence evidence WHERE evidence.lead_id = lead.id) AS evidence_count
+     FROM manual_news_leads lead
      WHERE review_date = ? ORDER BY created_at DESC LIMIT 50`,
   ).bind(date).all<ManualLeadRow>();
-  return Promise.all((result.results || []).map((row) => leadFromRow(env, row)));
+  return (result.results || []).map((row): ManualNewsLeadSummary => ({
+    id: row.id,
+    review_date: row.review_date,
+    input_type: row.input_type,
+    input_text: row.input_text || '',
+    input_url: row.input_url || '',
+    note: row.note || '',
+    status: row.status,
+    version: Number(row.version),
+    error_code: row.error_code,
+    error_message: row.error_message,
+    processing_owner: row.processing_owner || null,
+    processing_attempt: Number(row.processing_attempt || 0),
+    processing_lease_until: row.processing_lease_until === null || row.processing_lease_until === undefined
+      ? null
+      : Number(row.processing_lease_until),
+    confirmed_batch_id: row.confirmed_batch_id,
+    confirmed_at: row.confirmed_at,
+    created_at: Number(row.created_at),
+    updated_at: Number(row.updated_at),
+    evidence_count: Number(row.evidence_count || 0),
+  }));
 }
 
 export async function getManualNewsLeadCandidateState(
@@ -1245,11 +1274,12 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       ).bind(id, id, expectedVersion, owner, attempt);
     const insertEvidenceStatements = evidence.map((item) => this.env.DB.prepare(
         `/* manual_evidence:insert */ INSERT INTO manual_news_evidence (
-           lead_id, evidence_id, url, source_type, publisher, published_at, retrieved_at,
+           lead_id, evidence_id, response_key_id, url, source_type, publisher, published_at, retrieved_at,
            title, excerpt, claims_supported_json, fetch_audit_json, reliable
-         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${leadGuard}`,
+         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${leadGuard}`,
       ).bind(
-        id, item.id, item.url, item.source_type, item.publisher, item.published_at, item.retrieved_at,
+        id, item.id, item.response_key_id || '', item.url, item.source_type, item.publisher,
+        item.published_at, item.retrieved_at,
         item.title, item.excerpt, JSON.stringify(item.claims_supported), JSON.stringify(item.fetch_audit || null),
         item.reliable ? 1 : 0, id, expectedVersion, owner, attempt,
       ));
@@ -1394,6 +1424,8 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     verificationRaw: unknown,
   ): Promise<{ assessment_version: number }> {
     const { owner, attempt } = this.fence();
+    const verificationKeys = manualNewsVerificationKeyring(this.env);
+    const responseKeys = manualNewsResponseKeyring(this.env);
     const evidence = await loadManualNewsEvidence(this.env, id);
     const priorEvents = assessment.matched_event_key
       ? await this.findPriorEventsByEventKey(assessment.matched_event_key, id)
@@ -1420,7 +1452,7 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       assessment: validatedAssessment,
       evidence,
       verification,
-    }, this.env.MANUAL_NEWS_VERIFICATION_SECRET || '');
+    }, verificationKeys, responseKeys);
     const now = Date.now();
     const invalidationNonce = createMutationNonce('assessment_invalidate');
     const creationNonce = createMutationNonce('verification_create');
@@ -1482,12 +1514,13 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       ),
       this.env.DB.prepare(
         `/* manual_verification:insert */ INSERT INTO manual_news_assessment_verifications (
-           verification_id, lead_id, assessment_version, policy_version, canonical_digest,
+           verification_id, lead_id, assessment_version, policy_version, verification_key_id, canonical_digest,
            hmac_sha256, verification_json, processing_owner, processing_attempt,
            creation_nonce, status, reason, created_at, invalidated_at
-         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?, NULL WHERE ${preSaveGuard}`,
+         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?, NULL WHERE ${preSaveGuard}`,
       ).bind(
-        verificationId, id, assessmentVersion, proof.policy_version, proof.canonical_digest,
+        verificationId, id, assessmentVersion, proof.policy_version, proof.verification_key_id,
+        proof.canonical_digest,
         proof.hmac_sha256, JSON.stringify(verification), owner, attempt, creationNonce, now,
         id, expectedVersion, owner, attempt, id, owner, attempt,
       ),
@@ -1507,6 +1540,7 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
           verification_id: verificationId,
           assessment_version: assessmentVersion,
           policy_version: proof.policy_version,
+          verification_key_id: proof.verification_key_id,
           canonical_digest: proof.canonical_digest,
           assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
           assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,

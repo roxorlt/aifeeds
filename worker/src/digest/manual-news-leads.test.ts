@@ -7,8 +7,8 @@ import {
   buildManualLeadAssessmentRegenerationPrompt,
   buildManualLeadFactVerificationPrompt,
   classifyManualLeadDuplicate,
-  createManualLeadVerificationProof,
-  isCurrentManualLeadVerification,
+  createManualLeadVerificationProof as createManualLeadVerificationProofWithRawEvidence,
+  isCurrentManualLeadVerification as isCurrentManualLeadVerificationWithResponseSecret,
   MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
   MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
   MANUAL_LEAD_SOURCE_FACT_CONTRACT,
@@ -25,6 +25,35 @@ import {
   type ManualNewsEvidence,
   type ManualNewsProcessedAssessment,
 } from './manual-news-leads';
+import {
+  TEST_MANUAL_NEWS_RESPONSE_SECRET,
+  testManualNewsResponseKeyring,
+  testManualNewsVerificationKeyring,
+  withSignedArticleTextV2Audit,
+} from './manual-news-signed-evidence.test-fixture';
+
+async function createManualLeadVerificationProof(
+  input: Parameters<typeof createManualLeadVerificationProofWithRawEvidence>[0],
+  secret: string,
+) {
+  const mutableEvidence = input.evidence as ManualNewsEvidence[];
+  input.evidence.forEach((evidence, index) => {
+    mutableEvidence[index] = withSignedArticleTextV2Audit(evidence);
+  });
+  return createManualLeadVerificationProofWithRawEvidence(
+    input, testManualNewsVerificationKeyring(secret), testManualNewsResponseKeyring(),
+  );
+}
+
+function isCurrentManualLeadVerification(
+  input: Parameters<typeof isCurrentManualLeadVerificationWithResponseSecret>[0],
+  proof: unknown,
+  secret: string,
+) {
+  return isCurrentManualLeadVerificationWithResponseSecret(
+    input, proof, testManualNewsVerificationKeyring(secret), testManualNewsResponseKeyring(),
+  );
+}
 
 const officialAnthropic: ManualNewsEvidence = {
   id: 'ev-official',
@@ -989,7 +1018,7 @@ describe('manual news lead domain', () => {
     'Alibaba said its Claude Code restriction covers only contractors.',
     '阿里巴巴表示Claude Code限制仅适用于承包商。',
     '阿里巴巴表示Claude Code限制仅限于承包商。',
-  ])('does not let a support title mint a current v9 proof over a different participant scope: %s', async (scopeClause) => {
+  ])('does not let a support title mint a current v10 proof over a different participant scope: %s', async (scopeClause) => {
     await expect(createTitleOnlyScopeProof(scopeClause))
       .rejects.toThrow(/evidence_disposition|verification_semantics/);
   });
@@ -1008,7 +1037,7 @@ describe('manual news lead domain', () => {
     '阿里巴巴表示Claude Code限制仅适用于中国员工。',
     '阿里巴巴表示Claude Code限制仅适用于全职员工。',
     '阿里巴巴表示Claude Code限制仅适用于部分员工。',
-  ])('blocks a current v9 proof when the same participant has an additional scope qualifier: %s', async (scopeClause) => {
+  ])('blocks a current v10 proof when the same participant has an additional scope qualifier: %s', async (scopeClause) => {
     await expect(createTitleOnlyScopeProof(scopeClause))
       .rejects.toThrow(/evidence_disposition|verification_semantics/);
   });
@@ -1092,7 +1121,7 @@ describe('manual news lead domain', () => {
       projectionObject: '全职员工使用Claude Code',
       scopeClause: 'Alibaba said its Claude Code restriction applies only to full-time employees.',
     },
-  ])('keeps a current v9 proof when the core fact has the same participant qualifier: $sourceObject', async (fixture) => {
+  ])('keeps a current v10 proof when the core fact has the same participant qualifier: $sourceObject', async (fixture) => {
     await expect(createTitleOnlyScopeProof(fixture.scopeClause, fixture)).resolves.toBe(true);
   });
 
@@ -1180,7 +1209,7 @@ describe('manual news lead domain', () => {
     'Alibaba reportedly bans employees from using Claude Code，尽管阿里巴巴否认相关报道。',
     'Alibaba reportedly bans employees from using Claude Code，虽然阿里巴巴否认相关报道。',
     'Alibaba reportedly bans employees from using Claude Code，以及客服仍可用。',
-  ])('blocks an additive or concessive support unit before a malicious verifier can mint a current v9 proof: %s', async (quote) => {
+  ])('blocks an additive or concessive support unit before a malicious verifier can mint a current v10 proof: %s', async (quote) => {
     await expect(createMaliciouslySupportedGeneratedProjectionProof(
       alibabaBanGeneratedAssessment(),
       quote,
@@ -2575,7 +2604,7 @@ describe('manual news lead domain', () => {
     [{ predicate: '据称禁止', object: '员工稍后使用Claude Code' }, { object: 'employees from using Claude Code later' }, 'Alibaba reportedly bans employees from using Claude Code later.'],
     [{ predicate: '据称禁止', object: '员工周一使用Claude Code' }, { object: 'employees from using Claude Code on Monday' }, 'Alibaba reportedly bans employees from using Claude Code on Monday.'],
     [{ predicate: '据称禁止', object: '员工下午5点使用Claude Code' }, { object: 'employees from using Claude Code at 5 pm' }, 'Alibaba reportedly bans employees from using Claude Code at 5 pm.'],
-  ])('creates a current v8 proof for an exactly equivalent bilingual semantic projection: %#', async (
+  ])('creates a current v10 proof for an exactly equivalent bilingual semantic projection: %#', async (
     projection,
     source,
     quote,
@@ -5063,9 +5092,16 @@ describe('manual news lead domain', () => {
     };
     const proof = await createManualLeadVerificationProof(input, secret);
 
-    expect(proof).toMatchObject({ canonical_digest: expect.stringMatching(/^[a-f0-9]{64}$/), hmac_sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(proof).toMatchObject({
+      verification_key_id: 'verification-key-2026-08-11',
+      canonical_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      hmac_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
     await expect(isCurrentManualLeadVerification(input, proof, secret)).resolves.toBe(true);
     await expect(isCurrentManualLeadVerification(input, proof, 'b'.repeat(64))).resolves.toBe(false);
+    await expect(isCurrentManualLeadVerification(input, {
+      ...proof, verification_key_id: 'verification-key-removed',
+    }, secret)).resolves.toBe(false);
     const assessmentMutations: ManualNewsProcessedAssessment[] = [
       { ...candidate, title: 'changed' },
       { ...candidate, summary: 'changed' },
@@ -5100,6 +5136,7 @@ describe('manual news lead domain', () => {
         .resolves.toBe(false);
     }
     const evidenceMutations: ManualNewsEvidence[] = [
+      { ...evidence[0], response_key_id: 'response-key-removed' },
       { ...evidence[0], id: 'changed-id' },
       { ...evidence[0], url: 'https://example.com/changed' },
       { ...evidence[0], source_type: 'other' },
@@ -5179,12 +5216,12 @@ describe('manual news lead domain', () => {
     await expect(isCurrentManualLeadVerification({
       ...input, assessment: legacyBilingualContract,
     }, proof, secret)).resolves.toBe(false);
-    await expect(createManualLeadVerificationProof(input, '')).rejects.toThrow(/manual_news_verification_secret_invalid/);
-    await expect(createManualLeadVerificationProof(input, 'too-short')).rejects.toThrow(/manual_news_verification_secret_invalid/);
+    await expect(createManualLeadVerificationProof(input, '')).rejects.toThrow(/manual_news_keys_unavailable/);
+    await expect(createManualLeadVerificationProof(input, 'too-short')).rejects.toThrow(/manual_news_keys_unavailable/);
     await expect(createManualLeadVerificationProof(input, 'verification-test-secret-32-bytes-minimum'))
-      .rejects.toThrow(/manual_news_verification_secret_invalid/);
+      .rejects.toThrow(/manual_news_keys_unavailable/);
     await expect(createManualLeadVerificationProof(input, 'A'.repeat(64)))
-      .rejects.toThrow(/manual_news_verification_secret_invalid/);
+      .rejects.toThrow(/manual_news_keys_unavailable/);
   });
 
   test('uses a conservative exact compound anchor for an ASCII entity plus standalone version', () => {

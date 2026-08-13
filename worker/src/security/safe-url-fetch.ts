@@ -1,3 +1,5 @@
+import { parseManualNewsKeyring } from './manual-news-keyring';
+
 const DEFAULT_TIMEOUT_MS = 12_000;
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MAX_SOURCE_BYTES = 8 * 1024 * 1024;
@@ -7,10 +9,15 @@ const DEFAULT_SEARCH_MAX_BYTES = 256 * 1024;
 const ARTICLE_TEXT_MAX_BYTES = 28_000;
 const ARTICLE_TEXT_MAX_CHARACTERS = 28_000;
 const ARTICLE_TEXT_PROTOCOL_V2 = 'article_text_v2';
+const PROOF_EXCERPT_RESPONSE_PROFILE = 'proof_excerpt_v1';
+const PROOF_EXCERPT_RESPONSE_HMAC_CONTRACT = 'hmac-sha256-canonical-json-all-fields-except-response_hmac-v1';
+const PROOF_EXCERPT_CONTRACT = 'proof_excerpt_v1';
+const PROOF_EXCERPT_ALGORITHM = 'utf8-nfc-ws1-codepoint-prefix-v1';
+const PROOF_EXCERPT_MAX_CODE_POINTS = 3_000;
+const PROOF_EXCERPT_MAX_UTF8_BYTES = 12_000;
 const ARTICLE_TEXT_V2_MAX_SKEW_MS = 5 * 60_000;
 const ARTICLE_TEXT_V2_MAX_FUTURE_MS = 30_000;
 const ARTICLE_TEXT_V2_MIN_CHROMIUM_MAJOR = 149;
-const RESPONSE_SECRET_RE = /^[a-f0-9]{64}$/;
 
 const ALLOWED_SOURCE_TYPES = new Set([
   'text/html', 'application/xhtml+xml', 'text/plain', 'application/json', 'application/pdf',
@@ -25,6 +32,9 @@ export interface TrustedResearchService {
   token: string;
   /** Independent 32-byte hex key used only to authenticate document responses. */
   responseSecret?: string;
+  /** Explicit ID for the current response key plus optional retained historical keys. */
+  responseKeyId?: string;
+  responseKeyringJson?: string;
   fetcher?: TrustedGatewayFetcher;
   /** Test seams; production callers leave these unset. */
   protocolNow?: () => number;
@@ -35,10 +45,10 @@ export interface PublicDocument {
   url: string;
   content_type: string;
   extraction: 'html' | 'article_text' | 'text' | 'json' | 'pdf_text';
-  body: string;
+  excerpt: string;
   redirects: number;
-  bytes: number;
   fetch_audit: DocumentFetchAudit;
+  response_key_id: string;
   title?: string;
   published_at?: string | null;
   selection?: 'article' | 'main';
@@ -85,7 +95,27 @@ export interface DocumentFetchAudit {
   extracted_at?: string;
   final_url?: string;
   body_sha256?: string;
+  response_profile?: 'proof_excerpt_v1';
+  response_hmac_contract?: 'hmac-sha256-canonical-json-all-fields-except-response_hmac-v1';
+  proof_excerpt?: {
+    contract: 'proof_excerpt_v1';
+    algorithm: 'utf8-nfc-ws1-codepoint-prefix-v1';
+    max: 3000;
+    sha256: string;
+    utf8_bytes: number;
+    code_points: number;
+  };
   response_hmac?: string;
+}
+
+const PROOF_EXCERPT_WHITESPACE =
+  /[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/gu;
+
+export function deriveManualNewsProofExcerpt(value: string): string {
+  const normalized = value.normalize('NFC')
+    .replace(PROOF_EXCERPT_WHITESPACE, ' ')
+    .replace(/^ +| +$/gu, '');
+  return Array.from(normalized).slice(0, PROOF_EXCERPT_MAX_CODE_POINTS).join('').replace(/ +$/gu, '');
 }
 
 function unsafe(reason: string): Error { return new Error(`unsafe_url:${reason}`); }
@@ -311,6 +341,16 @@ async function verifyResponseHmac(secret: string, unsigned: Record<string, unkno
   return constantTimeBytesEqual(signature, hexBytes(supplied));
 }
 
+export async function verifyDocumentFetchAuditResponseHmac(
+  audit: DocumentFetchAudit,
+  responseSecret: string,
+): Promise<boolean> {
+  if (!/^[a-f0-9]{64}$/.test(responseSecret)
+    || !/^[a-f0-9]{64}$/.test(audit.response_hmac || '')) return false;
+  const { response_hmac: suppliedHmac, ...unsignedAudit } = audit;
+  return verifyResponseHmac(responseSecret, unsignedAudit, suppliedHmac!);
+}
+
 function strictObject(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const actual = Object.keys(value as Record<string, unknown>);
@@ -352,7 +392,8 @@ function parseFetchAudit(
   const auditKeys = [
     'hops', 'source_content_type', 'extraction', 'requested_limits', 'applied_limits',
     'actual_sizes', 'truncation', 'parser', 'protocol_version', 'request_nonce',
-    'request_timestamp', 'extracted_at', 'final_url', 'body_sha256', 'response_hmac',
+    'request_timestamp', 'extracted_at', 'final_url', 'body_sha256', 'response_profile',
+    'response_hmac_contract', 'proof_excerpt', 'response_hmac',
   ];
   if ((raw as { extraction?: unknown })?.extraction === 'article_text') auditKeys.push('document');
   if (!strictObject(raw, auditKeys) || !Array.isArray(raw.hops)) {
@@ -387,6 +428,24 @@ function parseFetchAudit(
     || typeof raw.body_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(raw.body_sha256)
     || typeof raw.response_hmac !== 'string' || !/^[a-f0-9]{64}$/.test(raw.response_hmac)) {
     throw new Error('unsafe_gateway_audit:protocol');
+  }
+  if (raw.response_profile !== PROOF_EXCERPT_RESPONSE_PROFILE
+    || raw.response_hmac_contract !== PROOF_EXCERPT_RESPONSE_HMAC_CONTRACT
+    || !strictObject(raw.proof_excerpt, [
+      'contract', 'algorithm', 'max', 'sha256', 'utf8_bytes', 'code_points',
+    ])
+    || raw.proof_excerpt.contract !== PROOF_EXCERPT_CONTRACT
+    || raw.proof_excerpt.algorithm !== PROOF_EXCERPT_ALGORITHM
+    || raw.proof_excerpt.max !== PROOF_EXCERPT_MAX_CODE_POINTS
+    || typeof raw.proof_excerpt.sha256 !== 'string'
+    || !/^[a-f0-9]{64}$/.test(raw.proof_excerpt.sha256)
+    || !Number.isSafeInteger(raw.proof_excerpt.utf8_bytes)
+    || Number(raw.proof_excerpt.utf8_bytes) < 0
+    || Number(raw.proof_excerpt.utf8_bytes) > PROOF_EXCERPT_MAX_UTF8_BYTES
+    || !Number.isSafeInteger(raw.proof_excerpt.code_points)
+    || Number(raw.proof_excerpt.code_points) < 0
+    || Number(raw.proof_excerpt.code_points) > PROOF_EXCERPT_MAX_CODE_POINTS) {
+    throw new Error('unsafe_gateway_audit:proof_excerpt');
   }
   if (typeof raw.source_content_type !== 'string' || !ALLOWED_SOURCE_TYPES.has(raw.source_content_type)) {
     throw new Error('unsafe_gateway_audit:content_type');
@@ -482,11 +541,21 @@ function parseFetchAudit(
     extracted_at: extractedAt.value,
     final_url: finalUrl,
     body_sha256: raw.body_sha256,
+    response_profile: PROOF_EXCERPT_RESPONSE_PROFILE,
+    response_hmac_contract: PROOF_EXCERPT_RESPONSE_HMAC_CONTRACT,
+    proof_excerpt: {
+      contract: PROOF_EXCERPT_CONTRACT,
+      algorithm: PROOF_EXCERPT_ALGORITHM,
+      max: PROOF_EXCERPT_MAX_CODE_POINTS,
+      sha256: raw.proof_excerpt.sha256,
+      utf8_bytes: Number(raw.proof_excerpt.utf8_bytes),
+      code_points: Number(raw.proof_excerpt.code_points),
+    },
     response_hmac: raw.response_hmac,
   };
 }
 
-function validateCompleteArticleText(value: string, bytes: number): void {
+export function validateCompleteArticleText(value: string, bytes: number): void {
   const characters = Array.from(value);
   if (!characters.length) throw new Error('unsafe_gateway_article_text:empty');
   if (bytes > ARTICLE_TEXT_MAX_BYTES || characters.length > ARTICLE_TEXT_MAX_CHARACTERS) {
@@ -495,6 +564,7 @@ function validateCompleteArticleText(value: string, bytes: number): void {
   let allowedIgnorables = 0;
   for (let index = 0; index < characters.length; index += 1) {
     const character = characters[index];
+    if (character === '\ufeff') continue;
     if (!/\p{Default_Ignorable_Code_Point}/u.test(character)) continue;
     const previous = characters[index - 1] || '';
     const next = characters[index + 1] || '';
@@ -547,7 +617,9 @@ async function readBoundedBody(
   if (Number.isFinite(declared) && declared > maxBytes) throw new Error('response_too_large');
   if (!response.body) return { text: '', bytes: 0 };
   const reader = response.body.getReader();
-  const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
+  // Preserve a decoded U+FEFF so the frozen proof-excerpt whitespace contract,
+  // signed code-point count, and body digest all see the same complete text.
+  const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
   let text = '';
   let bytes = 0;
   try {
@@ -626,10 +698,11 @@ export async function fetchPublicDocument(
   // Preserve the base trusted-origin dependency/error contract before applying
   // the v2-only response-authentication dependency.
   trustedEndpoint(deps.service, '/v1/document');
-  const responseSecret = deps.service?.responseSecret;
-  if (!RESPONSE_SECRET_RE.test(responseSecret || '')) {
-    throw new Error('trusted_research_response_secret_required');
-  }
+  const responseKeys = parseManualNewsKeyring({
+    keyId: deps.service?.responseKeyId,
+    secret: deps.service?.responseSecret,
+    keyringJson: deps.service?.responseKeyringJson,
+  }, 'trusted_research_response_keys_unavailable');
   const protocolNow = deps.service?.protocolNow || Date.now;
   const requestNow = protocolNow();
   if (!Number.isFinite(requestNow)) throw new Error('invalid_trusted_research_clock');
@@ -648,6 +721,7 @@ export async function fetchPublicDocument(
     deps.service, '/v1/document', {
       url: target.toString(), limits: requestedLimits, max_redirects: maxRedirects,
       extraction_mode: ARTICLE_TEXT_PROTOCOL_V2,
+      response_profile: PROOF_EXCERPT_RESPONSE_PROFILE,
       request_nonce: requestNonce,
       request_timestamp: requestTimestamp,
     }, timeoutMs,
@@ -661,6 +735,16 @@ export async function fetchPublicDocument(
       now: protocolNow(),
     });
     const body = await readBoundedBody(response, maxBytes, deadline, controller);
+    let responseKeyId: string | null = null;
+    for (const [keyId, secret] of responseKeys.keys) {
+      if (await verifyDocumentFetchAuditResponseHmac(audit, secret)) {
+        responseKeyId = keyId;
+        break;
+      }
+    }
+    if (!responseKeyId) {
+      throw new Error('unsafe_gateway_audit:response_hmac');
+    }
     const bodyCharacters = Array.from(body.text).length;
     if (audit.actual_sizes.extracted_text_bytes !== body.bytes
       || audit.actual_sizes.extracted_text_characters !== bodyCharacters) {
@@ -669,19 +753,24 @@ export async function fetchPublicDocument(
     if (await sha256Hex(body.text) !== audit.body_sha256) {
       throw new Error('unsafe_gateway_audit:body_digest');
     }
-    const { response_hmac: suppliedHmac, ...unsignedAudit } = audit;
-    if (!await verifyResponseHmac(responseSecret!, unsignedAudit, suppliedHmac!)) {
-      throw new Error('unsafe_gateway_audit:response_hmac');
-    }
     if (audit.extraction === 'article_text') validateCompleteArticleText(body.text, body.bytes);
+    const excerpt = deriveManualNewsProofExcerpt(body.text);
+    body.text = '';
+    const excerptBytes = new TextEncoder().encode(excerpt).byteLength;
+    const excerptCodePoints = Array.from(excerpt).length;
+    if (await sha256Hex(excerpt) !== audit.proof_excerpt!.sha256
+      || excerptBytes !== audit.proof_excerpt!.utf8_bytes
+      || excerptCodePoints !== audit.proof_excerpt!.code_points) {
+      throw new Error('unsafe_gateway_audit:proof_excerpt');
+    }
     return {
       url: audit.hops.at(-1)!.url,
       content_type: audit.source_content_type,
       extraction: audit.extraction,
-      body: body.text,
+      excerpt,
       redirects: audit.hops.length - 1,
-      bytes: body.bytes,
       fetch_audit: audit,
+      response_key_id: responseKeyId,
       ...(audit.document ? {
         title: audit.document.title,
         published_at: audit.document.published_at,

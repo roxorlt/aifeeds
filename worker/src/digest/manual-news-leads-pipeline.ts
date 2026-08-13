@@ -63,6 +63,11 @@ export interface ManualNewsLeadRecord {
   updated_at: number;
 }
 
+export type ManualNewsLeadSummary = Omit<ManualNewsLeadRecord,
+  'assessment_generation' | 'provider_failure' | 'assessment' | 'evidence'> & {
+    evidence_count: number;
+  };
+
 export interface ManualSearchResult {
   url: string;
   title: string;

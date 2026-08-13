@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 vi.mock('./manual-news-leads-store', () => ({
   confirmManualNewsLeadCandidate: vi.fn(),
@@ -35,7 +38,41 @@ const record = {
   created_at: 1, updated_at: 1,
 };
 
+const boundedDetailEvidence = Array.from({ length: 8 }, (_, index) => ({
+  id: `ev-detail-${index + 1}`,
+  url: `https://example.com/detail-${index + 1}`,
+  source_type: 'independent_media',
+  publisher: 'example.com',
+  published_at: null,
+  retrieved_at: 1,
+  title: `Evidence ${index + 1}`,
+  excerpt: '😀'.repeat(3_000),
+  claims_supported: ['😀'.repeat(3_000)],
+  reliable: true,
+  fetch_audit: { final_url: `https://example.com/detail-${index + 1}` },
+  body: 'COMPLETE-BODY-TAIL-SENTINEL',
+}));
+
+const legacyMutationRecord = {
+  ...record,
+  evidence: [{
+    ...boundedDetailEvidence[0],
+    excerpt: 'Bounded persisted excerpt.',
+    claims_supported: ['COMPLETE-BODY-TAIL-SENTINEL'],
+    fetch_audit: { final_url: boundedDetailEvidence[0].url, legacy_tail: 'COMPLETE-BODY-TAIL-SENTINEL' },
+  }],
+  complete_body: 'COMPLETE-BODY-TAIL-SENTINEL',
+};
+
 const workflowCreate = vi.fn(async () => ({ id: 'manual-news-lead-workflow-instance' }));
+const apiContractPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '../../../workflows/aifeeds-daily/fixtures/manual-news-leads-api-v1-contract.json',
+);
+const apiContract = JSON.parse(readFileSync(apiContractPath, 'utf8')) as {
+  list: { top_level_fields: string[]; lead_fields: string[] };
+  detail: { top_level_fields: string[]; lead_required_fields: string[]; evidence_fields: string[] };
+};
 
 function env(overrides: Record<string, unknown> = {}) {
   return {
@@ -45,8 +82,10 @@ function env(overrides: Record<string, unknown> = {}) {
     MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
     MANUAL_NEWS_RESEARCH_TOKEN: 'test-research-token',
     MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
+    MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID: 'response-key-2026-08-11',
     DEEPSEEK_API_KEY: 'test-deepseek-key',
     MANUAL_NEWS_VERIFICATION_SECRET: 'a'.repeat(64),
+    MANUAL_NEWS_VERIFICATION_KEY_ID: 'verification-key-2026-08-11',
     ...overrides,
   } as never;
 }
@@ -63,6 +102,17 @@ function request(path: string, init: RequestInit = {}, auth = true): Request {
 }
 
 describe('manual daily news leads API', () => {
+  test('publishes the machine-readable HK client contract fixture', () => {
+    expect(existsSync(apiContractPath)).toBe(true);
+    const contract = JSON.parse(readFileSync(apiContractPath, 'utf8')) as Record<string, any>;
+    expect(contract).toMatchObject({
+      contract: 'manual_news_leads_api_v1',
+      list: { response_profile: 'manual_news_leads_summary_v1', schema_version: 1 },
+      detail: { response_profile: 'manual_news_lead_detail_v1', schema_version: 1 },
+      mutations: { lead_profile: 'manual_news_lead_detail_v1' },
+    });
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     workflowCreate.mockResolvedValue({ id: 'manual-news-lead-workflow-instance' });
@@ -123,6 +173,94 @@ describe('manual daily news leads API', () => {
     expect(queued).toHaveLength(1);
   });
 
+  test('uses one bounded lead DTO for submit replay and retry/confirm success or conflict', async () => {
+    const cases = [
+      {
+        name: 'submit replay',
+        prepare: () => vi.mocked(submitManualNewsLead).mockResolvedValueOnce({
+          lead: legacyMutationRecord, created: false,
+        } as never),
+        path: '/api/digest/daily-news-leads',
+        init: {
+          method: 'POST', headers: { 'Idempotency-Key': 'submit-bounded-replay' },
+          body: JSON.stringify({ date: '2026-08-11', text: 'Anthropic 输出水印' }),
+        },
+        status: 200,
+      },
+      {
+        name: 'retry success',
+        prepare: () => vi.mocked(retryManualNewsLead).mockResolvedValueOnce({
+          ok: true, changed: true,
+          lead: {
+            ...legacyMutationRecord, version: 2, status: 'validating',
+            processing_owner: `manual-news-${record.id}-v2`,
+          },
+        } as never),
+        path: `/api/digest/daily-news-leads/${record.id}/retry`,
+        init: {
+          method: 'POST', headers: { 'Idempotency-Key': 'retry-bounded-success' },
+          body: JSON.stringify({ expected_version: 1 }),
+        },
+        status: 202,
+      },
+      {
+        name: 'retry conflict',
+        prepare: () => vi.mocked(retryManualNewsLead).mockResolvedValueOnce({
+          ok: false, status: 409, error: 'lead_version_conflict', lead: legacyMutationRecord,
+        } as never),
+        path: `/api/digest/daily-news-leads/${record.id}/retry`,
+        init: {
+          method: 'POST', headers: { 'Idempotency-Key': 'retry-bounded-conflict' },
+          body: JSON.stringify({ expected_version: 0 }),
+        },
+        status: 409,
+      },
+      {
+        name: 'confirm success',
+        prepare: () => vi.mocked(confirmManualNewsLeadCandidate).mockResolvedValueOnce({
+          ok: true, changed: true, lead: { ...legacyMutationRecord, status: 'recommended' },
+          batch: null, pending_initial_freeze: true, rerender_enqueued: false,
+        } as never),
+        path: `/api/digest/daily-news-leads/${record.id}/confirm-candidate`,
+        init: {
+          method: 'POST', headers: { 'Idempotency-Key': 'confirm-bounded-success' },
+          body: JSON.stringify({ expected_version: 1, expected_batch_revision: 0 }),
+        },
+        status: 200,
+      },
+      {
+        name: 'confirm conflict',
+        prepare: () => vi.mocked(confirmManualNewsLeadCandidate).mockResolvedValueOnce({
+          ok: false, status: 409, error: 'lead_version_conflict', lead: legacyMutationRecord,
+        } as never),
+        path: `/api/digest/daily-news-leads/${record.id}/confirm-candidate`,
+        init: {
+          method: 'POST', headers: { 'Idempotency-Key': 'confirm-bounded-conflict' },
+          body: JSON.stringify({ expected_version: 0, expected_batch_revision: 0 }),
+        },
+        status: 409,
+      },
+    ];
+
+    for (const scenario of cases) {
+      scenario.prepare();
+      const result = await handleManualNewsLeadsApi(
+        request(scenario.path, scenario.init), env(), { waitUntil() {} } as never,
+      );
+      const payload = await result.json<{ lead: { evidence: Array<Record<string, unknown>> } }>();
+      expect(result.status, scenario.name).toBe(scenario.status);
+      expect(payload.lead, scenario.name).toMatchObject({
+        response_profile: 'manual_news_lead_detail_v1', schema_version: 1,
+      });
+      expect(payload.lead.evidence, scenario.name).toEqual([expect.objectContaining({
+        excerpt: 'Bounded persisted excerpt.',
+      })]);
+      expect(JSON.stringify(payload), scenario.name).not.toContain('COMPLETE-BODY-TAIL-SENTINEL');
+      expect(JSON.stringify(payload), scenario.name).not.toContain('claims_supported');
+      expect(JSON.stringify(payload), scenario.name).not.toContain('fetch_audit');
+    }
+  });
+
   test('uses the durable lead workflow when its binding is configured', async () => {
     const create = vi.fn(async () => ({ id: 'manual-news-lead-workflow-instance' }));
     const queued: Promise<unknown>[] = [];
@@ -169,15 +307,58 @@ describe('manual daily news leads API', () => {
     expect(processManualNewsLeadWithEnv).not.toHaveBeenCalled();
   });
 
-  test('lists date-scoped status and returns a single lead with evidence details', async () => {
+  test('keeps the workbench list bounded and fetches one bounded detail on demand', async () => {
+    const detailRecord = {
+      ...record,
+      evidence: boundedDetailEvidence,
+      complete_body: 'COMPLETE-BODY-TAIL-SENTINEL',
+    };
+    vi.mocked(listManualNewsLeads).mockResolvedValueOnce(Array.from(
+      { length: 51 }, (_, index) => ({ ...detailRecord, id: `${record.id}-${index}` }),
+    ) as never);
+    vi.mocked(getManualNewsLead).mockResolvedValueOnce(detailRecord as never);
     const listResponse = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads?date=2026-08-11'), env(), { waitUntil() {} } as never);
     expect(listResponse.status).toBe(200);
     expect(listManualNewsLeads).toHaveBeenCalledWith(expect.anything(), '2026-08-11');
-    await expect(listResponse.clone().json()).resolves.toMatchObject({ candidate_batch: { revision: 1 } });
+    const listPayload = await listResponse.clone().json<{
+      leads: Array<Record<string, unknown>>;
+      candidate_batch: { revision: number };
+    }>();
+    expect(listPayload.candidate_batch).toMatchObject({ revision: 1 });
+    expect(listPayload).toMatchObject({
+      response_profile: 'manual_news_leads_summary_v1', schema_version: 1,
+    });
+    expect(listPayload.leads).toHaveLength(50);
+    expect(Object.keys(listPayload).sort()).toEqual([...apiContract.list.top_level_fields].sort());
+    expect(Object.keys(listPayload.leads[0]).sort()).toEqual([...apiContract.list.lead_fields].sort());
+    expect(listPayload.leads[0]).toMatchObject({ status: record.status, evidence_count: 8 });
+    expect(listPayload.leads[0]).not.toHaveProperty('evidence');
+    expect(listPayload.leads[0]).not.toHaveProperty('assessment');
+    expect(JSON.stringify(listPayload)).not.toContain('COMPLETE-BODY-TAIL-SENTINEL');
 
     const detailResponse = await handleManualNewsLeadsApi(request(`/api/digest/daily-news-leads/${record.id}`), env(), { waitUntil() {} } as never);
     expect(detailResponse.status).toBe(200);
     expect(getManualNewsLead).toHaveBeenCalledWith(expect.anything(), record.id);
+    const detailPayload = await detailResponse.clone().json<{
+      lead: { evidence: Array<Record<string, unknown>> };
+    }>();
+    expect(detailPayload.lead).toMatchObject({
+      response_profile: 'manual_news_lead_detail_v1', schema_version: 1,
+    });
+    expect(detailPayload.lead.evidence).toHaveLength(8);
+    expect(Object.keys(detailPayload).sort()).toEqual([...apiContract.detail.top_level_fields].sort());
+    expect(Object.keys(detailPayload.lead)).toEqual(expect.arrayContaining(
+      apiContract.detail.lead_required_fields,
+    ));
+    for (const evidence of detailPayload.lead.evidence) {
+      expect(Object.keys(evidence).sort()).toEqual([...apiContract.detail.evidence_fields].sort());
+      expect(Array.from(String(evidence.excerpt))).toHaveLength(3_000);
+      expect(new TextEncoder().encode(String(evidence.excerpt)).byteLength).toBe(12_000);
+      expect(evidence).not.toHaveProperty('body');
+      expect(evidence).not.toHaveProperty('claims_supported');
+      expect(evidence).not.toHaveProperty('fetch_audit');
+    }
+    expect(JSON.stringify(detailPayload)).not.toContain('COMPLETE-BODY-TAIL-SENTINEL');
   });
 
   test.each(['assessment', 'verification'] as const)(
@@ -282,10 +463,16 @@ describe('manual daily news leads API', () => {
       { MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: undefined },
       { MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: 'too-short' },
       { MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: 'A'.repeat(64) },
+      { MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID: undefined },
+      { MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID: 'UPPERCASE' },
+      { MANUAL_NEWS_RESEARCH_RESPONSE_KEYRING_JSON: '{malformed' },
       { DEEPSEEK_API_KEY: undefined },
       { MANUAL_NEWS_VERIFICATION_SECRET: undefined },
       { MANUAL_NEWS_VERIFICATION_SECRET: 'too-short' },
       { MANUAL_NEWS_VERIFICATION_SECRET: 'A'.repeat(64) },
+      { MANUAL_NEWS_VERIFICATION_KEY_ID: undefined },
+      { MANUAL_NEWS_VERIFICATION_KEY_ID: 'UPPERCASE' },
+      { MANUAL_NEWS_VERIFICATION_KEYRING_JSON: '{malformed' },
     ]) {
       const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
         method: 'POST', headers: { 'Idempotency-Key': 'submit-missing-dependency' },
@@ -415,6 +602,7 @@ describe('manual daily news leads API', () => {
   });
 
   test('maps idempotency conflicts, validation, dependency, and internal errors without leaking raw exceptions', async () => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     vi.mocked(submitManualNewsLead).mockRejectedValueOnce(new Error('idempotency_key_reused_with_different_payload'));
     const conflict = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
       method: 'POST', headers: { 'Idempotency-Key': 'submit-conflict' },
@@ -438,6 +626,7 @@ describe('manual daily news leads API', () => {
     expect(internal.status).toBe(500);
     await expect(internal.clone().json()).resolves.toEqual({ ok: false, error: 'internal_error' });
     expect(await internal.clone().text()).not.toContain('SENTINEL');
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain('SENTINEL');
   });
 
   test('maps malformed and oversized bodies to client errors and catches internal failures on read routes', async () => {
