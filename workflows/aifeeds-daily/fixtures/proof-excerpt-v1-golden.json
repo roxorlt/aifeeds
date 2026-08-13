@@ -3,6 +3,7 @@
   "algorithm": "utf8-nfc-ws1-codepoint-prefix-v1",
   "max_code_points": 3000,
   "response_hmac_contract": "hmac-sha256-canonical-json-all-fields-except-response_hmac-v1",
+  "extraction_modes": ["article_text", "text", "json", "pdf_text"],
   "whitespace_code_points": [
     "0009", "000A", "000B", "000C", "000D", "0020", "0085", "00A0", "1680",
     "2000", "2001", "2002", "2003", "2004", "2005", "2006", "2007", "2008",
@@ -48,6 +49,11 @@
       "name": "prefix-trims-trailing-ascii-space",
       "input": { "segments": [{ "text": "x", "repeat": 2999 }, { "text": " " }, { "text": "y" }] },
       "expected": { "excerpt": { "text": "x", "repeat": 2999 }, "code_points": 2999, "utf8_bytes": 2999, "sha256": "043e5f028e0c782c40ddde04d3ee4957bd5c32ba58547bc53a705ca338cfe08a" }
+    },
+    {
+      "name": "emoji-zwj-sequence",
+      "input": { "text": "研究 👩‍💻 协作" },
+      "expected": { "excerpt": { "text": "研究 👩‍💻 协作" }, "code_points": 9, "utf8_bytes": 25, "sha256": "a741431324b910330a9abbcb136bca40bfdc1b621f700a06638ce25755b53b1b" }
     }
   ]
 }
