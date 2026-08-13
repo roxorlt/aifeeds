@@ -1026,6 +1026,46 @@ describe('manual lead D1-backed dedupe', () => {
       .resolves.toEqual([]);
   });
 
+  test('quarantines a historical generic-feature assessment without making a recommended lead retryable', async () => {
+    const state = fixture('verifying', 9);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    await saveFixtureAssessment(store, state.leadId, 9);
+    addPublishedManualItem(state);
+    state.db.sqlite.prepare("UPDATE manual_news_leads SET status = 'recommended' WHERE id = ?")
+      .run(state.leadId);
+    const row = state.db.sqlite.prepare(`SELECT assessment_json FROM manual_news_event_assessments
+      WHERE lead_id = ? ORDER BY assessment_version DESC LIMIT 1`).get(state.leadId) as { assessment_json: string };
+    const historical = JSON.parse(row.assessment_json) as Record<string, any>;
+    historical.source_facts[0].atomic_fact.object = 'feature in Google Sheets';
+    historical.source_facts[0].text = 'Anthropic has disclosed feature in Google Sheets.';
+    historical.editorial_projection.title.atomic_fact.object = 'Google Sheets功能';
+    historical.editorial_projection.title.text_zh = 'Anthropic已披露Google Sheets功能。';
+    historical.editorial_projection.summary[0].atomic_fact.object = 'Google Sheets功能';
+    historical.editorial_projection.summary[0].text_zh = 'Anthropic已披露Google Sheets功能。';
+    state.db.sqlite.prepare(`UPDATE manual_news_event_assessments SET assessment_json = ?
+      WHERE lead_id = ?`).run(JSON.stringify(historical), state.leadId);
+
+    const hidden = await getManualNewsLead(state.env, state.leadId);
+    expect(hidden).toMatchObject({ status: 'recommended', assessment: null });
+    expect(hidden?.evidence).toHaveLength(1);
+    await expect(store.findPriorEventsByEventKey(
+      processedAssessment().event_key, 'different-lead',
+    )).resolves.toEqual([]);
+    await expect(retryManualNewsLead(
+      state.env, state.leadId, hidden!.version, 'retry-quarantined-generic-feature', 100,
+    )).resolves.toMatchObject({ ok: false, status: 409, error: 'lead_not_retryable' });
+    expect(state.db.sqlite.prepare(`SELECT status, reason FROM manual_news_assessment_verifications
+      WHERE lead_id = ?`).get(state.leadId)).toEqual({
+      status: 'invalidated', reason: 'verification_integrity_invalid',
+    });
+    expect(state.db.sqlite.prepare('SELECT deleted_at FROM items WHERE id = ?')
+      .get(`blog:manual:${state.leadId}`)).toEqual({ deleted_at: expect.any(String) });
+    expect(state.db.sqlite.prepare(`SELECT from_status, to_status FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'verification_quarantine'`).get(state.leadId)).toEqual({
+      from_status: 'recommended', to_status: 'recommended',
+    });
+  });
+
   test.each([
     ['many rows', (state: ReturnType<typeof fixture>) => {
       for (let index = 2; index <= 64; index += 1) {

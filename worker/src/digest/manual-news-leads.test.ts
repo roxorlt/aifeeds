@@ -113,6 +113,19 @@ const techCrunchAlibabaBan: ManualNewsEvidence = {
   reliable: true,
 };
 
+const googleSheetsCanvasEvidence: ManualNewsEvidence = {
+  id: 'ev-google-sheets-canvas-production',
+  url: 'https://blog.google/products/workspace/build-mini-apps-gemini-sheets/',
+  source_type: 'official_primary',
+  publisher: 'Google Blog',
+  published_at: null,
+  retrieved_at: 2,
+  title: 'Build mini-apps with Gemini in Google Sheets',
+  excerpt: 'Google releases Sheets canvas feature in Google Sheets.',
+  claims_supported: ['Google releases Sheets canvas feature in Google Sheets.'],
+  reliable: true,
+};
+
 const officialAlibabaDenial: ManualNewsEvidence = {
   id: 'ev-alibaba-official-denial',
   url: 'https://alibaba.example/statement',
@@ -277,6 +290,126 @@ function alibabaBanGeneratedAssessment(
         },
       }],
     },
+  };
+}
+
+function googleSheetsCanvasGeneratedAssessment(input: {
+  sourceObject?: string;
+  projectionObject?: string;
+  evidence?: ManualNewsEvidence;
+} = {}) {
+  const evidence = input.evidence || googleSheetsCanvasEvidence;
+  return {
+    event_key: 'google-sheets-canvas-feature-2026-08-14',
+    event_type: 'product_release',
+    material_update: false,
+    score: 86,
+    recommendation: 'recommended',
+    occurred_at: null,
+    uncertainties: [],
+    matched_event_key: null,
+    source_facts: [{
+      fact_ref: 'fact-01',
+      source_language: 'en',
+      atomic_fact: {
+        subject: 'Google', subject_role: 'organization', predicate: 'releases',
+        object: input.sourceObject || 'Sheets canvas feature in Google Sheets',
+      },
+      evidence_ids: [evidence.id],
+    }],
+    evidence_dispositions: [{
+      evidence_id: evidence.id,
+      disposition: 'supports_core',
+      source_fact_refs: ['fact-01'],
+      reason_code: null,
+    }],
+    editorial_projection: {
+      title: {
+        projection_ref: 'title-01',
+        source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: 'Google', subject_role: 'organization', predicate: '发布',
+          object: input.projectionObject || 'Google Sheets 的 Sheets canvas 功能',
+        },
+      },
+      summary: [{
+        projection_ref: 'summary-01',
+        source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: 'Google', subject_role: 'organization', predicate: '发布',
+          object: input.projectionObject || 'Google Sheets 的 Sheets canvas 功能',
+        },
+      }],
+    },
+  };
+}
+
+function googleSheetsCanvasCandidate(
+  evidence: ManualNewsEvidence = googleSheetsCanvasEvidence,
+): ManualNewsProcessedAssessment {
+  const generated = validateManualLeadGeneratedAssessment(
+    googleSheetsCanvasGeneratedAssessment({ evidence }), [evidence],
+  );
+  return {
+    ...applyManualLeadEvidencePolicy(generated, [evidence]),
+    duplicate_scope: null,
+    matched_lead_id: null,
+  };
+}
+
+function googleSheetsCanvasVerificationRaw(input: {
+  candidate: ManualNewsProcessedAssessment;
+  evidence: ManualNewsEvidence;
+  factQuote?: string;
+  dispositionQuote?: string;
+  sourceVerificationQuote?: string;
+}) {
+  const exactQuote = googleSheetsCanvasEvidence.claims_supported[0];
+  const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({
+    assessment: input.candidate, evidence: [input.evidence],
+  }).user) as {
+    facts: Array<{ fact_id: string }>;
+    projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+    evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
+  };
+  return {
+    overall_verdict: 'supported',
+    fact_results: prompt.facts.map((fact) => {
+      const quote = fact.fact_id === 'source-ca81908a9bdc3696'
+        ? input.factQuote || exactQuote
+        : exactQuote;
+      const result = supportedFactResult(fact.fact_id, input.evidence.id, quote);
+      return fact.fact_id === 'source-ca81908a9bdc3696' && input.sourceVerificationQuote
+        ? {
+          ...result,
+          source_verifications: [{
+            evidence_id: input.evidence.id,
+            supported: true,
+            issue_code: 'none',
+            source_quotes: [{
+              evidence_id: input.evidence.id,
+              quote: input.sourceVerificationQuote,
+            }],
+          }],
+        }
+        : result;
+    }),
+    projection_results: prompt.projections.map((projection) => ({
+      projection_id: projection.projection_id,
+      source_fact_ids: projection.source_fact_ids,
+      supported: true,
+      issue_code: 'none',
+    })),
+    disposition_results: prompt.evidence_dispositions.map((disposition) => ({
+      evidence_id: disposition.evidence_id,
+      disposition: disposition.disposition,
+      supported: true,
+      issue_code: 'none',
+      source_quotes: [{
+        evidence_id: disposition.evidence_id,
+        quote: input.dispositionQuote || exactQuote,
+      }],
+    })),
   };
 }
 
@@ -2379,44 +2512,229 @@ describe('manual news lead domain', () => {
   });
 
   test('accepts the exact production Google Sheets canvas source fact as one atomic release', () => {
-    const evidence: ManualNewsEvidence = {
-      ...techCrunchAlibabaBan,
-      id: 'ev-google-sheets-canvas-production',
-      url: 'https://blog.google/products/workspace/build-mini-apps-gemini-sheets/',
-      source_type: 'official_primary',
-      publisher: 'Google Blog',
-      title: 'Build mini-apps with Gemini in Google Sheets',
-      excerpt: 'Google releases Sheets canvas feature in Google Sheets.',
-      claims_supported: ['Google releases Sheets canvas feature in Google Sheets.'],
-    };
-    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
-    raw.event_key = 'google-sheets-canvas-feature-2026-08-14';
-    raw.event_type = 'product_release';
-    raw.recommendation = 'recommended';
-    raw.source_facts[0].atomic_fact = {
-      subject: 'Google', subject_role: 'organization', predicate: 'releases',
-      object: 'Sheets canvas feature in Google Sheets',
-    };
-    raw.source_facts[0].evidence_ids = [evidence.id];
-    raw.evidence_dispositions[0].evidence_id = evidence.id;
-    raw.editorial_projection.title.atomic_fact = {
-      subject: 'Google', subject_role: 'organization', predicate: '发布',
-      object: 'Google Sheets 的 Sheets canvas 功能',
-    };
-    raw.editorial_projection.summary[0].atomic_fact = {
-      subject: 'Google', subject_role: 'organization', predicate: '发布',
-      object: 'Google Sheets 的 Sheets canvas 功能',
-    };
-
-    expect(validateManualLeadGeneratedAssessment(raw, [evidence])).toMatchObject({
+    const assessment = validateManualLeadGeneratedAssessment(
+      googleSheetsCanvasGeneratedAssessment(), [googleSheetsCanvasEvidence],
+    );
+    expect(assessment).toMatchObject({
       recommendation: 'recommended',
       source_facts: [{
+        fact_id: 'source-ca81908a9bdc3696',
         atomic_fact: {
           subject: 'Google', subject_role: 'organization', predicate: 'releases',
           object: 'Sheets canvas feature in Google Sheets',
         },
       }],
     });
+    const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment, evidence: [googleSheetsCanvasEvidence],
+    }).user) as Record<string, any>;
+    expect(prompt.projections[0].deterministic_source_semantic_slots).toEqual([{
+      action: 'release',
+      predicate_modality: {
+        attribution: [], epistemic: [], intent: [], aspect: [], tense: 'present',
+        deontic: [], voice: 'active',
+      },
+      predicate_negated: false,
+      predicate_residue: '',
+      predicate_residue_policy: 'consumed-semantic-spans-v1',
+      participant_roles: [],
+      participant_quantifier: 'unspecified',
+      object_relations: [],
+      object_polarity: 'positive',
+      object_modality: {
+        attribution: [], epistemic: [], intent: [], aspect: [], tense: 'not_applicable',
+        deontic: [], voice: 'not_applicable',
+      },
+      target_entities: ['google', 'google_sheets'],
+      target_qualifiers: [],
+      product_targets: [{ entity: 'google_sheets', components: [] }],
+      product_feature: {
+        feature: 'sheets_canvas', host_product: 'google_sheets',
+        relation: 'feature_in_host_product',
+      },
+      concepts: ['feature'],
+      versions: [],
+      regions: [],
+      reason: null,
+      scope: null,
+      dates: [],
+      instants: [],
+      relative_times: [],
+      object_residue: '',
+      residue_policy: 'consumed-semantic-spans-v1',
+    }]);
+  });
+
+  test.each([
+    ['feature in Google Sheets', 'Google Sheets功能'],
+    ['Gemini feature in Google Sheets', 'Gemini的Google Sheets功能'],
+  ])('rejects generic feature concepts outside a registered directed tuple: %s', (
+    sourceObject, projectionObject,
+  ) => {
+    const sentence = `Google releases ${sourceObject}.`;
+    const evidence = {
+      ...googleSheetsCanvasEvidence,
+      title: sentence,
+      excerpt: sentence,
+      claims_supported: [sentence],
+    };
+    expect(() => validateManualLeadGeneratedAssessment(
+      googleSheetsCanvasGeneratedAssessment({ sourceObject, projectionObject, evidence }), [evidence],
+    )).toThrow('invalid_claim_object:source_facts[0].atomic_fact.object');
+  });
+
+  test.each([
+    ['Sheets canvas FEATURE in Google Sheets', 'Google Sheets 的 Sheets canvas 功能'],
+    ['Sheets canvas features in Google Sheets', 'Google Sheets 的 Sheets canvas 功能'],
+    ['Sheets canvas ｆｅａｔｕｒｅ in Google Sheets', 'Google Sheets 的 Sheets canvas 功能'],
+  ])('derives the same directed tuple from the frozen English lexeme grammar: %s', (
+    sourceObject, projectionObject,
+  ) => {
+    const sentence = `Google releases ${sourceObject.normalize('NFKC')}.`;
+    const evidence = {
+      ...googleSheetsCanvasEvidence,
+      title: sentence,
+      excerpt: sentence,
+      claims_supported: [sentence],
+    };
+    const result = validateManualLeadGeneratedAssessment(
+      googleSheetsCanvasGeneratedAssessment({ sourceObject, projectionObject, evidence }), [evidence],
+    );
+    const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: result, evidence: [evidence],
+    }).user) as Record<string, any>;
+    expect(prompt.projections[0].deterministic_source_semantic_slots[0].product_feature).toEqual({
+      feature: 'sheets_canvas', host_product: 'google_sheets', relation: 'feature_in_host_product',
+    });
+  });
+
+  test.each([
+    'Sheets canvas feature，in Google Sheets',
+    'Sheets-canvas feature in Google Sheets',
+    'Sheets canvas feature-in Google Sheets',
+    'Featureform in Google Sheets',
+    'feature_flag in Google Sheets',
+    'features2 in Google Sheets',
+    '多功能 Google Sheets',
+    'Google Sheets 功能性',
+    'Google Sheets 功能键',
+    'Sheets canvas feature feature in Google Sheets',
+    'Sheets canvas feature in Google Sheets on 2026-08-14',
+    'Sheets canvas feature in Google Sheets because of performance',
+  ])('rejects a non-canonical product-feature lexeme form: %s', (sourceObject) => {
+    expect(() => validateManualLeadGeneratedAssessment(
+      googleSheetsCanvasGeneratedAssessment({ sourceObject }), [googleSheetsCanvasEvidence],
+    )).toThrow('invalid_claim_object:source_facts[0].atomic_fact.object');
+  });
+
+  test.each(['\u200b', '\u200c', '\u200d', '\u2060', '\ufeff'])(
+    'rejects a zero-width product-feature lexeme evasion: U+%s',
+    (character) => {
+      expect(() => validateManualLeadGeneratedAssessment(
+        googleSheetsCanvasGeneratedAssessment({
+          sourceObject: `Sheets canvas fea${character}ture in Google Sheets`,
+        }),
+        [googleSheetsCanvasEvidence],
+      )).toThrow('invalid_claim_object:source_facts[0].atomic_fact.object');
+    },
+  );
+
+  test.each([
+    'Google releases feature in Google Sheets.',
+    'Google releases Google Sheets feature in Sheets canvas.',
+  ])('does not classify evidence with a missing or reversed product-feature tuple as core support: %s', (
+    sentence,
+  ) => {
+    const evidence = {
+      ...googleSheetsCanvasEvidence,
+      title: sentence,
+      excerpt: sentence,
+      claims_supported: [sentence],
+    };
+    expect(() => validateManualLeadGeneratedAssessment(
+      googleSheetsCanvasGeneratedAssessment({ evidence }), [evidence],
+    )).toThrow('evidence_disposition_unrelated_misclassified');
+  });
+
+  test.each([
+    'Google releases feature in Google Sheets.',
+    'Google releases Google Sheets feature in Sheets canvas.',
+    'Google releases feature in Google Sheets. Microsoft discusses Sheets canvas feature in Google Sheets.',
+  ])('rejects a malicious supported fact quote without the same clause-local tuple: %s', (quote) => {
+    const exactQuote = googleSheetsCanvasEvidence.claims_supported[0];
+    const evidence = {
+      ...googleSheetsCanvasEvidence,
+      excerpt: `${exactQuote} ${quote}`,
+      claims_supported: [exactQuote, quote],
+    };
+    const candidate = googleSheetsCanvasCandidate();
+    expect(() => validateManualLeadFactVerification(
+      googleSheetsCanvasVerificationRaw({ candidate, evidence, factQuote: quote }),
+      candidate,
+      [evidence],
+    )).toThrow('fact_verification_entity_slot_missing');
+  });
+
+  test.each([
+    'Google releases feature in Google Sheets.',
+    'Google releases Google Sheets feature in Sheets canvas.',
+  ])('rejects a malicious supported source-verification quote with tuple drift: %s', (quote) => {
+    const exactQuote = googleSheetsCanvasEvidence.claims_supported[0];
+    const evidence = {
+      ...googleSheetsCanvasEvidence,
+      excerpt: `${exactQuote} ${quote}`,
+      claims_supported: [exactQuote, quote],
+    };
+    const candidate = googleSheetsCanvasCandidate();
+    expect(() => validateManualLeadFactVerification(
+      googleSheetsCanvasVerificationRaw({
+        candidate, evidence, factQuote: exactQuote, sourceVerificationQuote: quote,
+      }),
+      candidate,
+      [evidence],
+    )).toThrow('fact_verification_entity_slot_missing');
+  });
+
+  test.each([
+    'Google releases feature in Google Sheets.',
+    'Google releases Google Sheets feature in Sheets canvas.',
+  ])('rejects a malicious supported disposition quote with tuple drift: %s', (quote) => {
+    const exactQuote = googleSheetsCanvasEvidence.claims_supported[0];
+    const evidence = {
+      ...googleSheetsCanvasEvidence,
+      excerpt: `${exactQuote} ${quote}`,
+      claims_supported: [exactQuote, quote],
+    };
+    const candidate = googleSheetsCanvasCandidate();
+    expect(() => validateManualLeadFactVerification(
+      googleSheetsCanvasVerificationRaw({
+        candidate, evidence, factQuote: exactQuote, dispositionQuote: quote,
+      }),
+      candidate,
+      [evidence],
+    )).toThrow('invalid_disposition_verification_semantics');
+  });
+
+  test.each([
+    'Did Google release feature in Google Sheets?',
+    'Google denies releasing feature in Google Sheets.',
+    'Google later updates feature in Google Sheets.',
+    'Google releases feature only in Google Sheets.',
+  ])('does not let relation fallbacks recover a missing product-feature identity: %s', (quote) => {
+    const exactQuote = googleSheetsCanvasEvidence.claims_supported[0];
+    const evidence = {
+      ...googleSheetsCanvasEvidence,
+      excerpt: `${exactQuote} ${quote}`,
+      claims_supported: [exactQuote, quote],
+    };
+    const candidate = googleSheetsCanvasCandidate();
+    expect(() => validateManualLeadFactVerification(
+      googleSheetsCanvasVerificationRaw({
+        candidate, evidence, factQuote: exactQuote, dispositionQuote: quote,
+      }),
+      candidate,
+      [evidence],
+    )).toThrow('invalid_disposition_verification_semantics');
   });
 
   test('does not treat the Sheets canvas feature name as the Google Sheets product identity', () => {
@@ -2487,7 +2805,7 @@ describe('manual news lead domain', () => {
       object: 'Acme Sheets canvas feature',
     };
     expect(() => validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan]))
-      .toThrow(/non_atomic_source_assembled:source_facts\[0\]\.atomic_fact\.assembled/);
+      .toThrow(/(?:invalid_claim_object:source_facts\[0\]\.atomic_fact\.object|non_atomic_source_assembled:source_facts\[0\]\.atomic_fact\.assembled)/);
   });
 
   test.each([
@@ -2501,7 +2819,7 @@ describe('manual news lead domain', () => {
       subject: 'Google', subject_role: 'organization', predicate: 'releases', object,
     };
     expect(() => validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan]))
-      .toThrow(/non_atomic_source_(?:object|assembled)/);
+      .toThrow(/(?:invalid_claim_object|non_atomic_source_(?:object|assembled))/);
   });
 
   test.each(['publisher', 'model'])('does not normalize an unknown or contradictory role alias: %s', (role) => {

@@ -297,6 +297,88 @@ async function createAlibabaCurrentProof(
   return isCurrentManualLeadVerification(proofInput, proof, secret);
 }
 
+async function createGoogleSheetsCanvasProof(input: {
+  sourceObject?: string;
+  projectionObject?: string;
+} = {}) {
+  const sourceObject = input.sourceObject || 'Sheets canvas feature in Google Sheets';
+  const projectionObject = input.projectionObject || 'Google Sheets 的 Sheets canvas 功能';
+  const body = `Google releases ${sourceObject}.`;
+  const extracted = await extractManualNewsEvidence(documentFixture(
+    'https://blog.google/products/workspace/build-mini-apps-gemini-sheets/',
+    body,
+    'article_text',
+    { title: 'Build mini-apps with Gemini in Google Sheets', published_at: null },
+  ), undefined, 1_723_420_800_000);
+  if (!extracted) throw new Error('expected_google_sheets_canvas_evidence');
+  const raw = {
+    event_key: 'google-sheets-canvas-feature-2026-08-14',
+    event_type: 'product_release', material_update: false, score: 86,
+    recommendation: 'recommended', occurred_at: null, uncertainties: [], matched_event_key: null,
+    source_facts: [{
+      fact_ref: 'fact-01', source_language: 'en',
+      atomic_fact: {
+        subject: 'Google', subject_role: 'organization', predicate: 'releases',
+        object: sourceObject,
+      },
+      evidence_ids: [extracted.id],
+    }],
+    evidence_dispositions: [{
+      evidence_id: extracted.id, disposition: 'supports_core',
+      source_fact_refs: ['fact-01'], reason_code: null,
+    }],
+    editorial_projection: {
+      title: {
+        projection_ref: 'title-01', source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: 'Google', subject_role: 'organization', predicate: '发布',
+          object: projectionObject,
+        },
+      },
+      summary: [{
+        projection_ref: 'summary-01', source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: 'Google', subject_role: 'organization', predicate: '发布',
+          object: projectionObject,
+        },
+      }],
+    },
+  };
+  const generated = validateManualLeadGeneratedAssessment(raw, [extracted]);
+  const candidate: ManualNewsProcessedAssessment = {
+    ...applyManualLeadEvidencePolicy(generated, [extracted]),
+    duplicate_scope: null,
+    matched_lead_id: null,
+  };
+  const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({
+    assessment: candidate, evidence: [extracted],
+  }).user) as {
+    facts: Array<{ fact_id: string }>;
+    projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+    evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
+  };
+  const verification = validateManualLeadFactVerification({
+    overall_verdict: 'supported',
+    fact_results: prompt.facts.map((fact) => supportedFactResult(fact.fact_id, extracted.id, body)),
+    projection_results: prompt.projections.map((projection) => ({
+      projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
+      supported: true, issue_code: 'none',
+    })),
+    disposition_results: prompt.evidence_dispositions.map((disposition) => ({
+      evidence_id: disposition.evidence_id, disposition: disposition.disposition,
+      supported: true, issue_code: 'none',
+      source_quotes: [{ evidence_id: extracted.id, quote: body }],
+    })),
+  }, candidate, [extracted]);
+  const proofInput = {
+    lead_id: 'ml-runtime-google-sheets-canvas', assessment_version: 9,
+    assessment: candidate, evidence: [extracted], verification,
+  };
+  const secret = 'a'.repeat(64);
+  const proof = await createManualLeadVerificationProof(proofInput, secret, responseSecret);
+  return { proofInput, proof, secret };
+}
+
 describe('manual lead evidence extraction', () => {
   test('uses one 210-second provider call per assessment or verification invocation and records only safe metrics', async () => {
     const mockedCall = vi.mocked(callDeepSeekJson);
@@ -503,11 +585,50 @@ describe('manual lead evidence extraction', () => {
   test('rejects an otherwise active v9 proof at the direct current-proof boundary', async () => {
     const evidence = await extractManualNewsEvidence(documentFixture(
       'https://techcrunch.com/2026/07/04/alibaba-claude-code/', alibabaSupport,
-    ));
+    ), undefined, 1_723_420_800_000);
     const { proofInput, proof, secret } = await createAlibabaProof(evidence!);
     const legacy = proofForLegacyPolicy(proof, proofInput, secret);
 
     await expect(isCurrentManualLeadVerification(proofInput, legacy, secret)).resolves.toBe(false);
+  });
+
+  test('pins the exact Google Sheets canvas fact id and v10 proof bytes across scheme-A hardening', async () => {
+    const { proofInput, proof, secret } = await createGoogleSheetsCanvasProof();
+
+    expect(proofInput.assessment.source_facts?.[0]?.fact_id)
+      .toBe('source-ca81908a9bdc3696');
+    expect(proof).toEqual({
+      policy_version: 'fact-evidence-projection-hmac-v10',
+      verification_key_id: 'verification-key-2026-08-11',
+      canonical_digest: '6f39d20b60433c12ed2067481f94e08e4dab9f7522f0a673acf31b61c3ab1bd7',
+      hmac_sha256: '31621e51c405215c87308456303c6fbca76d7e71467120cd1c62edbabbd09053',
+    });
+    await expect(isCurrentManualLeadVerification(proofInput, proof, secret)).resolves.toBe(true);
+  });
+
+  test('keeps the non-feature Alibaba v10 proof byte-identical', async () => {
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://techcrunch.com/2026/07/04/alibaba-claude-code/', alibabaSupport,
+    ), undefined, 1_723_420_800_000);
+    const { proofInput, proof, secret } = await createAlibabaProof(evidence!);
+
+    expect(proof).toEqual({
+      policy_version: 'fact-evidence-projection-hmac-v10',
+      verification_key_id: 'verification-key-2026-08-11',
+      canonical_digest: 'c00b1ace8d30150d4ec7abbe55027aa6773e11883f56ab1cebd07aeb28c75746',
+      hmac_sha256: '11bb1746864847a96b27a4e6d05e2b18dc620eeb6eaa0db99a641e0faca23ff2',
+    });
+    await expect(isCurrentManualLeadVerification(proofInput, proof, secret)).resolves.toBe(true);
+  });
+
+  test.each([
+    ['feature in Google Sheets', 'Google Sheets功能'],
+    ['Gemini feature in Google Sheets', 'Gemini的Google Sheets功能'],
+  ])('does not issue a v10 proof over a generic feature concept: %s', async (
+    sourceObject, projectionObject,
+  ) => {
+    await expect(createGoogleSheetsCanvasProof({ sourceObject, projectionObject }))
+      .rejects.toThrow('invalid_claim_object:source_facts[0].atomic_fact.object');
   });
 
   test('v10 proof creation rejects unsigned and malformed gateway provenance', async () => {
