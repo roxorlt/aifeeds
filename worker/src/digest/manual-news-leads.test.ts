@@ -2419,6 +2419,67 @@ describe('manual news lead domain', () => {
     });
   });
 
+  test('does not treat the Sheets canvas feature name as the Google Sheets product identity', () => {
+    const evidence: ManualNewsEvidence = {
+      ...techCrunchAlibabaBan,
+      id: 'ev-sheets-canvas-identity-confusion',
+      title: 'Sheets canvas supports Gemini models',
+      excerpt: 'Sheets canvas supports Gemini models.',
+      claims_supported: ['Sheets canvas supports Gemini models.'],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.source_facts[0].atomic_fact = {
+      subject: 'Sheets canvas', subject_role: 'product', predicate: 'supports', object: 'Gemini models',
+    };
+    raw.source_facts[0].evidence_ids = [evidence.id];
+    raw.evidence_dispositions[0].evidence_id = evidence.id;
+    raw.editorial_projection.title.atomic_fact = {
+      subject: 'Google Sheets', subject_role: 'product', predicate: '支持', object: 'Gemini模型',
+    };
+    raw.editorial_projection.summary[0].atomic_fact = {
+      subject: 'Google Sheets', subject_role: 'product', predicate: '支持', object: 'Gemini模型',
+    };
+
+    expect(() => validateManualLeadGeneratedAssessment(raw, [evidence]))
+      .toThrow(/invalid_claim_subject_role|invalid_editorial_projection_subject/);
+  });
+
+  test.each([
+    'Sheets canvas 功能 的 Google Sheets',
+    'Google Sheets 由 Sheets canvas 功能',
+    'Sheets canvas 功能 被 Google Sheets',
+  ])('rejects a reversed or agentive Google Sheets feature tuple: %s', (projectionObject) => {
+    const evidence: ManualNewsEvidence = {
+      ...techCrunchAlibabaBan,
+      id: 'ev-google-sheets-canvas-direction',
+      url: 'https://blog.google/products/workspace/build-mini-apps-gemini-sheets/',
+      source_type: 'official_primary',
+      publisher: 'Google Blog',
+      title: 'Build mini-apps with Gemini in Google Sheets',
+      excerpt: 'Google releases Sheets canvas feature in Google Sheets.',
+      claims_supported: ['Google releases Sheets canvas feature in Google Sheets.'],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.event_key = 'google-sheets-canvas-feature-2026-08-14';
+    raw.event_type = 'product_release';
+    raw.recommendation = 'recommended';
+    raw.source_facts[0].atomic_fact = {
+      subject: 'Google', subject_role: 'organization', predicate: 'releases',
+      object: 'Sheets canvas feature in Google Sheets',
+    };
+    raw.source_facts[0].evidence_ids = [evidence.id];
+    raw.evidence_dispositions[0].evidence_id = evidence.id;
+    raw.editorial_projection.title.atomic_fact = {
+      subject: 'Google', subject_role: 'organization', predicate: '发布', object: projectionObject,
+    };
+    raw.editorial_projection.summary[0].atomic_fact = {
+      subject: 'Google', subject_role: 'organization', predicate: '发布', object: projectionObject,
+    };
+
+    expect(() => validateManualLeadGeneratedAssessment(raw, [evidence]))
+      .toThrow(/(?:invalid_(?:claim_object|editorial_projection_object)|non_atomic_editorial_assembled)/);
+  });
+
   test('does not exempt an unregistered two-word phrase from detached-predicate detection', () => {
     const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
     raw.source_facts[0].atomic_fact = {

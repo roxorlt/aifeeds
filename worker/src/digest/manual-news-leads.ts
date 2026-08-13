@@ -66,6 +66,12 @@ interface ManualProductTargetTuple {
   components: ManualProductTargetComponent[];
 }
 
+interface ManualProductFeatureTuple {
+  feature: 'sheets_canvas';
+  host_product: 'google_sheets';
+  relation: 'feature_in_host_product';
+}
+
 type ManualBilingualParticipantRole =
   | 'employees'
   | 'customers'
@@ -89,6 +95,7 @@ interface ManualBilingualSemanticSlots {
   target_entities: string[];
   target_qualifiers: string[];
   product_targets: ManualProductTargetTuple[];
+  product_feature?: ManualProductFeatureTuple;
   concepts: string[];
   versions: string[];
   regions: string[];
@@ -1332,21 +1339,14 @@ function consumeSemanticSpan(mask: boolean[], span: Pick<IndexedSemanticValue, '
 }
 
 function consumeAdjacentChineseFunctionWords(mask: boolean[], value: string): void {
-  const structural = new Set(['在', '于', '对', '向', '为', '由', '被', '从', '至', '的', '了', '该', '其']);
-  const adjacentSemanticIndex = (start: number, direction: -1 | 1): number => {
-    let cursor = start + direction;
-    while (cursor >= 0 && cursor < value.length && /\s/u.test(value[cursor])) cursor += direction;
-    return cursor;
-  };
+  const structural = new Set(['在', '于', '为', '从', '至', '的', '了', '该', '其']);
   let changed = true;
   while (changed) {
     changed = false;
     for (let index = 0; index < value.length; index += 1) {
       if (mask[index] || !structural.has(value[index])) continue;
-      const left = adjacentSemanticIndex(index, -1);
-      const right = adjacentSemanticIndex(index, 1);
       const adjacentConsumed = index === 0 || index === value.length - 1
-        || left < 0 || right >= value.length || mask[left] || mask[right];
+        || mask[index - 1] || mask[index + 1];
       if (adjacentConsumed) {
         mask[index] = true;
         changed = true;
@@ -1432,6 +1432,9 @@ function assertConsumedPredicateSemantics(
 function assertConsumedObjectSemantics(value: string): void {
   const normalized = value.normalize('NFKC');
   const mask = new Array<boolean>(normalized.length).fill(false);
+  if (directedProductFeatureTuple(normalized)) {
+    consumeSemanticSpan(mask, { start: 0, end: normalized.length });
+  }
   const patternGroups: ReadonlyArray<ReadonlyArray<RegExp>> = [
     BILINGUAL_PARTICIPANT_PATTERNS.map(([, pattern]) => pattern),
     BILINGUAL_OBJECT_RELATION_PATTERNS.map(([, pattern]) => pattern),
@@ -1504,6 +1507,7 @@ function bilingualSemanticSlots(fact: ManualAtomicFactSlots): ManualBilingualSem
     entity: target.entity,
     components: target.components,
   }));
+  const productFeature = directedProductFeatureTuple(reason.residual)?.tuple;
   const concepts = bilingualFactConcepts(reason.residual).sort();
   const regions = bilingualFactRegions(reason.residual);
   const relativeTimes = [...new Set(relativeFactTimeSpans(reason.residual).map((span) => span.value))].sort();
@@ -1531,6 +1535,7 @@ function bilingualSemanticSlots(fact: ManualAtomicFactSlots): ManualBilingualSem
     target_entities: targetEntities,
     target_qualifiers: targetQualifiers,
     product_targets: productTargets,
+    ...(productFeature ? { product_feature: productFeature } : {}),
     concepts,
     versions: bilingualFactVersions(reason.residual),
     regions,
@@ -1586,6 +1591,8 @@ function semanticProjectionContract(
     || canonicalJson(sourceSlots.target_entities) !== canonicalJson(projectionSlots.target_entities)
     || canonicalJson(sourceSlots.target_qualifiers) !== canonicalJson(projectionSlots.target_qualifiers)
     || canonicalJson(sourceSlots.product_targets) !== canonicalJson(projectionSlots.product_targets)
+    || canonicalJson(sourceSlots.product_feature || null)
+      !== canonicalJson(projectionSlots.product_feature || null)
     || canonicalJson(sourceSlots.concepts) !== canonicalJson(projectionSlots.concepts)
     || canonicalJson(sourceSlots.versions) !== canonicalJson(projectionSlots.versions)) {
     return 'invalid_editorial_projection_object';
@@ -3597,7 +3604,7 @@ const ORGANIZATION_ENTITY_REGISTRY: Readonly<Record<string, readonly string[]>> 
 };
 const PRODUCT_ENTITY_REGISTRY: Readonly<Record<string, readonly string[]>> = {
   gpt: ['gpt'], claude: ['claude'], kimi: ['kimi'], gemini: ['gemini'], codex: ['codex'],
-  google_sheets: ['google sheets', 'sheets canvas', '谷歌表格'],
+  google_sheets: ['google sheets', '谷歌表格'],
   chatgpt: ['chatgpt'], ernie: ['ernie', '文心', '文心一言'], qwen: ['qwen', '通义', '通义千问'],
   hunyuan: ['hunyuan', '混元'], doubao: ['doubao', '豆包'], pangu: ['pangu', '盘古'],
   deepseek: ['deepseek', '深度求索'], glm: ['glm'], minimax: ['minimax'], llama: ['llama'],
@@ -3928,19 +3935,35 @@ function productComplementObjectLength(rawTail: string): number {
   return 0;
 }
 
-function isRegisteredProductFeatureObject(value: string): boolean {
-  const normalized = value.normalize('NFKC');
-  const products = registeredEntityOccurrences(normalized, PRODUCT_ENTITY_REGISTRY);
-  const features = regexSemanticSpans(normalized, /(?:功能)|\bfeatures?\b/iu, 'feature');
-  if (!products.length || !features.length) return false;
-  const mask = new Array<boolean>(normalized.length).fill(false);
-  for (const product of products) consumeSemanticSpan(mask, product);
-  for (const feature of features) consumeSemanticSpan(mask, feature);
-  consumeSemanticPattern(mask, normalized, /\b(?:in|of|the)\b|的/iu);
-  consumeAdjacentChineseFunctionWords(mask, normalized);
-  const residue = normalized.split('').map((character, index) => mask[index] ? ' ' : character)
-    .join('').replace(/[\p{P}\p{S}\s]+/gu, '');
-  return !residue;
+interface ParsedProductFeatureTuple {
+  tuple: ManualProductFeatureTuple;
+  feature_span: IndexedSemanticValue;
+}
+
+function directedProductFeatureTuple(value: string): ParsedProductFeatureTuple | null {
+  const normalized = value.normalize('NFKC').trim();
+  const english = /^(sheets\s+canvas)\s+features?\s+in\s+google\s+sheets$/iu.exec(normalized);
+  if (english) {
+    return {
+      tuple: {
+        feature: 'sheets_canvas', host_product: 'google_sheets',
+        relation: 'feature_in_host_product',
+      },
+      feature_span: { value: 'sheets_canvas', start: 0, end: english[1].length },
+    };
+  }
+  const chinese = /^(google\s+sheets)\s*的\s*(sheets\s+canvas)\s*功能$/iu.exec(normalized);
+  if (!chinese) return null;
+  const featureStart = normalized.indexOf(chinese[2], chinese[1].length);
+  return {
+    tuple: {
+      feature: 'sheets_canvas', host_product: 'google_sheets',
+      relation: 'feature_in_host_product',
+    },
+    feature_span: {
+      value: 'sheets_canvas', start: featureStart, end: featureStart + chinese[2].length,
+    },
+  };
 }
 
 function controlComplementTailRemainder(
@@ -3954,7 +3977,7 @@ function controlComplementTailRemainder(
     .replace(/\b(?:on|at)\s*$/iu, '')
     .trim();
   if (strictObject) {
-    if (isRegisteredProductFeatureObject(rawTail)) return '';
+    if (directedProductFeatureTuple(rawTail)) return '';
     const productLength = productComplementObjectLength(rawTail);
     if (productLength) return rawTail.slice(productLength).trim();
     if (/^[a-z]\d+(?:\.\d+)*(?:[-_][a-z0-9]+)?$/iu.test(rawTail)) return '';
@@ -4013,16 +4036,17 @@ function looksLikeDetachedEnglishPredicate(remainder: string): boolean {
     start: match.index,
     end: match.index + match[0].length,
   }));
-  const productSpans = registeredEntityOccurrences(remainder, PRODUCT_ENTITY_REGISTRY);
+  const productFeature = directedProductFeatureTuple(remainder);
   for (let index = 0; index + 2 < englishWords.length; index += 1) {
     const rawSubject = englishWords[index].raw;
     const rawPredicate = englishWords[index + 1].raw;
     const object = englishWords[index + 2].raw.toLowerCase();
     const subject = rawSubject.toLowerCase();
     const predicate = rawPredicate.toLowerCase();
-    const subjectPredicateInsideProduct = productSpans.some((span) =>
-      englishWords[index].start >= span.start && englishWords[index + 1].end <= span.end);
-    if (subjectPredicateInsideProduct) continue;
+    const subjectPredicateInsideFeature = productFeature
+      && englishWords[index].start >= productFeature.feature_span.start
+      && englishWords[index + 1].end <= productFeature.feature_span.end;
+    if (subjectPredicateInsideFeature) continue;
     if (/^[A-Z]/u.test(rawSubject) && /^[A-Z]/u.test(rawPredicate)
       && /^(?:operations?|business|market|region)$/u.test(object)) continue;
     if (!LATIN_ENTITY_STOPWORDS.has(subject)
