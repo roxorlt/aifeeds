@@ -344,6 +344,52 @@ function googleSheetsCanvasGeneratedAssessment(input: {
   };
 }
 
+function chineseStructuralObjectGeneratedAssessment(
+  object: string,
+  evidence: ManualNewsEvidence,
+) {
+  return {
+    event_key: 'chinese-structural-object-2026-08-14',
+    event_type: 'industry_event',
+    material_update: false,
+    score: 80,
+    recommendation: 'recommended',
+    occurred_at: null,
+    uncertainties: [],
+    matched_event_key: null,
+    source_facts: [{
+      fact_ref: 'fact-01',
+      source_language: 'zh',
+      atomic_fact: {
+        subject: '阿里巴巴', subject_role: 'organization', predicate: '支持', object,
+      },
+      evidence_ids: [evidence.id],
+    }],
+    evidence_dispositions: [{
+      evidence_id: evidence.id,
+      disposition: 'supports_core',
+      source_fact_refs: ['fact-01'],
+      reason_code: null,
+    }],
+    editorial_projection: {
+      title: {
+        projection_ref: 'title-01',
+        source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: '阿里巴巴', subject_role: 'organization', predicate: '支持', object,
+        },
+      },
+      summary: [{
+        projection_ref: 'summary-01',
+        source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: '阿里巴巴', subject_role: 'organization', predicate: '支持', object,
+        },
+      }],
+    },
+  };
+}
+
 function googleSheetsCanvasCandidate(
   evidence: ManualNewsEvidence = googleSheetsCanvasEvidence,
 ): ManualNewsProcessedAssessment {
@@ -2563,6 +2609,48 @@ describe('manual news lead domain', () => {
       object_residue: '',
       residue_policy: 'consumed-semantic-spans-v1',
     }]);
+  });
+
+  test.each([
+    ['employee use target', '员工对Claude Code的使用', 'source-4ca14a3700e82fdb'],
+    ['use target', '对Claude Code的使用', 'source-ea86ea33934c6827'],
+    ['access target', '向Google Sheets的访问', 'source-19fb8981074de0ad'],
+    ['passive developer modifier', '由OpenAI开发的模型', 'source-1a1ee9eab8dfb79e'],
+    ['passive coverage modifier', '被Claude Code覆盖', 'source-49d279d7a3b888b3'],
+    ['organization development target', 'Google对AI的开发', 'source-7eeb574bf5ea785f'],
+  ])('preserves the base non-feature Chinese structural-object contract: %s', (
+    _label, object, expectedFactId,
+  ) => {
+    const sentence = `阿里巴巴支持${object}。`;
+    const evidence: ManualNewsEvidence = {
+      ...techCrunchAlibabaBan,
+      id: `ev-structural-${expectedFactId}`,
+      title: sentence,
+      excerpt: sentence,
+      claims_supported: [sentence],
+    };
+    const result = validateManualLeadGeneratedAssessment(
+      chineseStructuralObjectGeneratedAssessment(object, evidence), [evidence],
+    );
+    const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: result, evidence: [evidence],
+    }).user) as Record<string, any>;
+
+    expect(result.source_facts?.[0]).toMatchObject({
+      fact_id: expectedFactId,
+      source_language: 'zh',
+      atomic_fact: {
+        subject: '阿里巴巴', subject_role: 'organization', predicate: '支持', object,
+      },
+      text: sentence.replace(/。$/u, '.'),
+    });
+    expect(prompt.projections[0].deterministic_source_semantic_slots[0]).toMatchObject({
+      action: 'support',
+      object_residue: '',
+      residue_policy: 'consumed-semantic-spans-v1',
+    });
+    expect(prompt.projections[0].deterministic_source_semantic_slots[0])
+      .not.toHaveProperty('product_feature');
   });
 
   test.each([
