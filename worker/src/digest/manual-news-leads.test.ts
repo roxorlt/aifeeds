@@ -2264,6 +2264,127 @@ describe('manual news lead domain', () => {
     });
   });
 
+  test('canonicalizes the production-shaped company role alias without changing fact semantics', () => {
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.source_facts[0].atomic_fact.subject_role = 'company';
+    raw.editorial_projection.title.atomic_fact.subject_role = 'company';
+    raw.editorial_projection.summary[0].atomic_fact.subject_role = 'company';
+
+    const validated = validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan]);
+
+    expect(validated.source_facts?.[0].atomic_fact).toEqual({
+      subject: 'Alibaba', subject_role: 'organization', predicate: 'reportedly bans',
+      object: 'employees from using Claude Code',
+    });
+    expect(validated.editorial_projection?.title.atomic_fact).toEqual({
+      subject: '阿里巴巴', subject_role: 'organization', predicate: '据称禁止',
+      object: '员工使用Claude Code',
+    });
+    expect(raw.source_facts[0].atomic_fact.subject_role).toBe('company');
+  });
+
+  test('keeps the production Google Blog assembled output behind the atomic-fact boundary', () => {
+    const evidence: ManualNewsEvidence = {
+      ...techCrunchAlibabaBan,
+      id: 'ev-google-sheets-blog',
+      url: 'https://blog.google/products/workspace/build-mini-apps-gemini-sheets/',
+      source_type: 'official_primary',
+      publisher: 'Google Blog',
+      title: 'Build mini-apps with Gemini in Google Sheets',
+      excerpt: 'Google launched Gemini mini-apps in Google Sheets.',
+      claims_supported: ['Google launched Gemini mini-apps in Google Sheets.'],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.event_key = 'google-sheets-mini-apps-2026-08-14';
+    raw.source_facts[0].atomic_fact.subject = 'Google';
+    raw.source_facts[0].atomic_fact.predicate = 'launched';
+    raw.source_facts[0].atomic_fact.object = 'Gemini mini-apps in Google Sheets';
+    raw.source_facts[0].evidence_ids = [evidence.id];
+    raw.evidence_dispositions[0].evidence_id = evidence.id;
+    raw.editorial_projection.title.atomic_fact.subject = '谷歌';
+    raw.editorial_projection.title.atomic_fact.predicate = '推出';
+    raw.editorial_projection.title.atomic_fact.object = 'Google Sheets中的Gemini迷你应用';
+    raw.editorial_projection.summary[0].atomic_fact.subject = '谷歌';
+    raw.editorial_projection.summary[0].atomic_fact.predicate = '推出';
+    raw.editorial_projection.summary[0].atomic_fact.object = 'Google Sheets中的Gemini迷你应用';
+
+    expect(() => validateManualLeadGeneratedAssessment(raw, [evidence]))
+      .toThrow(/non_atomic_source_assembled:source_facts\[0\]\.atomic_fact\.assembled/);
+  });
+
+  test('accepts an atomic Google replacement across its Chinese editorial alias', () => {
+    const evidence: ManualNewsEvidence = {
+      ...techCrunchAlibabaBan,
+      id: 'ev-google-sheets-blog-atomic',
+      url: 'https://blog.google/products/workspace/build-mini-apps-gemini-sheets/',
+      source_type: 'official_primary',
+      publisher: 'Google Blog',
+      title: 'Build mini-apps with Gemini in Google Sheets',
+      excerpt: 'Google documented Claude watermark provenance on 2026-08-10.',
+      claims_supported: ['Google documented Claude watermark provenance on 2026-08-10.'],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.event_key = 'google-sheets-mini-apps-2026-08-14';
+    raw.source_facts[0].atomic_fact = {
+      subject: 'Google', subject_role: 'organization', predicate: 'documented',
+      object: 'Claude watermark provenance on 2026-08-10',
+    };
+    raw.source_facts[0].evidence_ids = [evidence.id];
+    raw.evidence_dispositions[0].evidence_id = evidence.id;
+    raw.editorial_projection.title.atomic_fact = {
+      subject: '谷歌', subject_role: 'organization', predicate: '已披露',
+      object: '2026年8月10日的Claude水印来源信息',
+    };
+    raw.editorial_projection.summary[0].atomic_fact = {
+      subject: '谷歌', subject_role: 'organization', predicate: '已披露',
+      object: '2026年8月10日的Claude水印来源信息',
+    };
+
+    expect(validateManualLeadGeneratedAssessment(raw, [evidence])).toMatchObject({
+      source_facts: [{ atomic_fact: { subject: 'Google', subject_role: 'organization' } }],
+      editorial_projection: {
+        title: { atomic_fact: { subject: '谷歌', subject_role: 'organization' } },
+      },
+    });
+  });
+
+  test('accepts Google Sheets as the product subject of an atomic regenerated fact', () => {
+    const evidence: ManualNewsEvidence = {
+      ...techCrunchAlibabaBan,
+      id: 'ev-google-sheets-product',
+      url: 'https://blog.google/products/workspace/build-mini-apps-gemini-sheets/',
+      source_type: 'official_primary',
+      publisher: 'Google Blog',
+      title: 'Build mini-apps with Gemini in Google Sheets',
+      excerpt: 'Google Sheets supports Gemini models.',
+      claims_supported: ['Google Sheets supports Gemini models.'],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.event_key = 'google-sheets-mini-apps-2026-08-14';
+    raw.source_facts[0].atomic_fact = {
+      subject: 'Google Sheets', subject_role: 'product', predicate: 'supports', object: 'Gemini models',
+    };
+    raw.source_facts[0].evidence_ids = [evidence.id];
+    raw.evidence_dispositions[0].evidence_id = evidence.id;
+    raw.editorial_projection.title.atomic_fact = {
+      subject: 'Google Sheets', subject_role: 'product', predicate: '支持', object: 'Gemini模型',
+    };
+    raw.editorial_projection.summary[0].atomic_fact = {
+      subject: 'Google Sheets', subject_role: 'product', predicate: '支持', object: 'Gemini模型',
+    };
+
+    expect(validateManualLeadGeneratedAssessment(raw, [evidence])).toMatchObject({
+      source_facts: [{ atomic_fact: { subject: 'Google Sheets', subject_role: 'product' } }],
+    });
+  });
+
+  test.each(['publisher', 'model'])('does not normalize an unknown or contradictory role alias: %s', (role) => {
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.source_facts[0].atomic_fact.subject_role = role;
+    expect(() => validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan]))
+      .toThrow(/invalid_claim_subject_role:source_facts\[0\]\.atomic_fact\.subject_role/);
+  });
+
   test.each([
     ['predicate modality reported to possible', { predicate: '可能禁止' }, {}, techCrunchAlibabaBan.claims_supported[0]],
     ['predicate modality alleged to reported', { predicate: '据称禁止' }, { predicate: 'allegedly bans' }, 'Alibaba allegedly bans employees from using Claude Code.'],

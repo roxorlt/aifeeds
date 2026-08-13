@@ -719,6 +719,86 @@ describe('manual lead processing pipeline', () => {
     }));
   });
 
+  test('normalizes corroborated company role drift before strict validation and reaches verification', async () => {
+    const memory = memoryStore();
+    let assessCalls = 0;
+    let verifyCalls = 0;
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(techCrunchAlibabaEvidence.url, 'doc'),
+      extract: async () => techCrunchAlibabaEvidence,
+      assess: async () => {
+        assessCalls += 1;
+        const raw = structuredClone(alibabaCoreAssessment()) as Record<string, any>;
+        raw.source_facts[0].atomic_fact.subject_role = 'company';
+        raw.editorial_projection.title.atomic_fact.subject_role = 'company';
+        raw.editorial_projection.summary[0].atomic_fact.subject_role = 'company';
+        return raw;
+      },
+      verify: async (prompt) => { verifyCalls += 1; return verifiedFromPrompt(prompt); },
+    });
+
+    expect(assessCalls).toBe(1);
+    expect(verifyCalls).toBe(1);
+    expect(memory.saveCalls()).toBe(1);
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review',
+      assessment: {
+        source_facts: [{ atomic_fact: { subject_role: 'organization' } }],
+        editorial_projection: { title: { atomic_fact: { subject_role: 'organization' } } },
+      },
+    });
+    expect(memory.transitionPatches).toContainEqual(expect.objectContaining({
+      audit_metadata: expect.objectContaining({
+        assessment_generation_attempts: 1,
+        assessment_first_validation_code: 'valid',
+        assessment_last_validation_code: 'valid',
+      }),
+    }));
+  });
+
+  test('keeps unknown subject-role failure code and both safe paths observable across regeneration', async () => {
+    const memory = memoryStore();
+    const prompts: Array<{ system: string; user: string }> = [];
+    let assessCalls = 0;
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(techCrunchAlibabaEvidence.url, 'doc'),
+      extract: async () => techCrunchAlibabaEvidence,
+      assess: async (prompt) => {
+        prompts.push(prompt);
+        assessCalls += 1;
+        const raw = structuredClone(alibabaCoreAssessment()) as Record<string, any>;
+        if (assessCalls === 1) raw.source_facts[0].atomic_fact.subject_role = 'publisher';
+        else raw.editorial_projection.title.atomic_fact.subject_role = 'publisher';
+        return raw;
+      },
+      verify: async () => { throw new Error('unexpected_verify'); },
+    });
+
+    const regeneration = JSON.parse(prompts[1].user) as {
+      regeneration: { failure_code: string; failure_path: string; mechanical_instruction: string };
+    };
+    expect(regeneration.regeneration).toMatchObject({
+      failure_code: 'invalid_claim_subject_role',
+      failure_path: 'source_facts[0].atomic_fact.subject_role',
+    });
+    expect(regeneration.regeneration.mechanical_instruction).toContain('subject_role');
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review', assessment: null,
+      error_code: 'assessment_validation_failed', error_message: 'invalid_claim_subject_role',
+    });
+    expect(memory.transitionPatches.at(-1)).toMatchObject({
+      audit_metadata: expect.objectContaining({
+        assessment_generation_attempts: 2,
+        assessment_first_validation_code: 'invalid_claim_subject_role',
+        assessment_first_validation_path: 'source_facts[0].atomic_fact.subject_role',
+        assessment_last_validation_code: 'invalid_claim_subject_role',
+        assessment_last_validation_path: 'editorial_projection.title.atomic_fact.subject_role',
+        assessment_regeneration_trigger_code: 'invalid_claim_subject_role',
+        assessment_regeneration_trigger_path: 'source_facts[0].atomic_fact.subject_role',
+      }),
+    });
+  });
+
   test('regenerates once after a non-atomic claim and keeps the TechCrunch-style control action atomic', async () => {
     const memory = memoryStore();
     let assessCalls = 0;

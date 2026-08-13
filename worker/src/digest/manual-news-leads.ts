@@ -519,18 +519,21 @@ function stableFactHash(value: string): string {
 }
 
 function generatedSubjectRole(value: unknown, subject: string): ManualFactSubjectRole {
-  if (!['authority', 'organization', 'person', 'product', 'other'].includes(String(value))) {
+  const rawRole = typeof value === 'string' ? value.normalize('NFKC').trim().toLowerCase() : '';
+  const deterministicRole = canonicalEntityRole(subject);
+  const role = rawRole === 'company' && deterministicRole === 'organization'
+    ? 'organization'
+    : rawRole;
+  if (!['authority', 'organization', 'person', 'product', 'other'].includes(role)) {
     throw new Error('invalid_claim_subject_role');
   }
-  const role = value as ManualFactSubjectRole;
-  const deterministicRole = canonicalEntityRole(subject);
   if (deterministicRole !== 'unknown' && deterministicRole !== role) {
     throw new Error('invalid_claim_subject_role');
   }
   if (deterministicRole === 'unknown' && role !== 'person' && role !== 'other') {
     throw new Error('invalid_claim_subject_role');
   }
-  return role;
+  return role as ManualFactSubjectRole;
 }
 
 function generatedObjectActionOccurrences(object: string): FactActionOccurrence[] {
@@ -2796,8 +2799,10 @@ export function buildManualLeadAssessmentRegenerationPrompt(
   const original = buildManualLeadAssessmentPrompt(input);
   const body = JSON.parse(original.user) as Record<string, unknown>;
   const slot = failureCode.match(/_(subject|predicate|object|assembled)$/u)?.[1];
-  const mechanicalInstruction = slot === 'subject'
-    ? '只纠正同类 subject 槽：每个 subject 只能是一个完整主体实体，不得包含并列主体、动作、原因或背景。整份 schema 仍须从原证据重新生成。'
+  const mechanicalInstruction = failureCode === 'invalid_claim_subject_role'
+    ? '只纠正 subject_role 槽：值只能是 authority、organization、person、product、other 之一，并且必须与同一 atomic_fact 的单一 subject 实体类型一致；不得改写 subject、predicate、object 或证据引用。整份 schema 仍须从原证据重新生成。'
+    : slot === 'subject'
+      ? '只纠正同类 subject 槽：每个 subject 只能是一个完整主体实体，不得包含并列主体、动作、原因或背景。整份 schema 仍须从原证据重新生成。'
     : slot === 'predicate'
       ? '只纠正同类 predicate 槽：每个 predicate 只能有一个动作及其紧邻时态、否定、情态标记；多个动作必须拆成必要且可核验的独立 fact，否则删除非核心背景。整份 schema 仍须从原证据重新生成。'
       : slot === 'object'
@@ -3576,7 +3581,7 @@ const AUTHORITY_ENTITY_REGISTRY: Readonly<Record<string, readonly string[]>> = {
   lawmaker: ['议员', '美国议员', 'lawmakers', 'senator'],
 };
 const ORGANIZATION_ENTITY_REGISTRY: Readonly<Record<string, readonly string[]>> = {
-  openai: ['openai'], anthropic: ['anthropic'], google: ['google', 'google deepmind'],
+  openai: ['openai'], anthropic: ['anthropic'], google: ['google', 'google deepmind', '谷歌'],
   meta: ['meta'], microsoft: ['microsoft'], nvidia: ['nvidia'], apple: ['apple'],
   amazon: ['amazon', 'aws'], xai: ['xai'], baidu: ['百度'], tencent: ['腾讯'],
   alibaba: ['alibaba', '阿里', '阿里巴巴'], bytedance: ['字节', '字节跳动'], huawei: ['华为'],
@@ -3584,6 +3589,7 @@ const ORGANIZATION_ENTITY_REGISTRY: Readonly<Record<string, readonly string[]>> 
 };
 const PRODUCT_ENTITY_REGISTRY: Readonly<Record<string, readonly string[]>> = {
   gpt: ['gpt'], claude: ['claude'], kimi: ['kimi'], gemini: ['gemini'], codex: ['codex'],
+  google_sheets: ['google sheets', '谷歌表格'],
   chatgpt: ['chatgpt'], ernie: ['ernie', '文心', '文心一言'], qwen: ['qwen', '通义', '通义千问'],
   hunyuan: ['hunyuan', '混元'], doubao: ['doubao', '豆包'], pangu: ['pangu', '盘古'],
   deepseek: ['deepseek', '深度求索'], glm: ['glm'], minimax: ['minimax'], llama: ['llama'],
