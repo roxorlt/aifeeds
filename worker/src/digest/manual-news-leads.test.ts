@@ -2654,6 +2654,28 @@ describe('manual news lead domain', () => {
   });
 
   test.each([
+    '员工 对 Claude Code 的 使用',
+    '对 Claude Code 的 使用',
+    '向 Google Sheets 的 访问',
+    '由 OpenAI 开发 的 模型',
+    '模型 被 Claude Code 覆盖',
+    'Google 对 AI 的 开发',
+  ])('rejects cross-whitespace Chinese structural-word consumption: %s', (object) => {
+    const sentence = `阿里巴巴支持${object}。`;
+    const evidence: ManualNewsEvidence = {
+      ...techCrunchAlibabaBan,
+      id: `ev-spaced-structural-${object}`,
+      title: sentence,
+      excerpt: sentence,
+      claims_supported: [sentence],
+    };
+
+    expect(() => validateManualLeadGeneratedAssessment(
+      chineseStructuralObjectGeneratedAssessment(object, evidence), [evidence],
+    )).toThrow('invalid_claim_object');
+  });
+
+  test.each([
     ['feature in Google Sheets', 'Google Sheets功能'],
     ['Gemini feature in Google Sheets', 'Gemini的Google Sheets功能'],
   ])('rejects generic feature concepts outside a registered directed tuple: %s', (

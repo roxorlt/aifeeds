@@ -1346,20 +1346,13 @@ function consumeSemanticSpan(mask: boolean[], span: Pick<IndexedSemanticValue, '
 
 function consumeAdjacentChineseFunctionWords(mask: boolean[], value: string): void {
   const structural = new Set(['在', '于', '对', '向', '为', '由', '被', '从', '至', '的', '了', '该', '其']);
-  const adjacentSemanticIndex = (start: number, direction: -1 | 1): number => {
-    let cursor = start + direction;
-    while (cursor >= 0 && cursor < value.length && /\s/u.test(value[cursor])) cursor += direction;
-    return cursor;
-  };
   let changed = true;
   while (changed) {
     changed = false;
     for (let index = 0; index < value.length; index += 1) {
       if (mask[index] || !structural.has(value[index])) continue;
-      const left = adjacentSemanticIndex(index, -1);
-      const right = adjacentSemanticIndex(index, 1);
       const adjacentConsumed = index === 0 || index === value.length - 1
-        || left < 0 || right >= value.length || mask[left] || mask[right];
+        || mask[index - 1] || mask[index + 1];
       if (adjacentConsumed) {
         mask[index] = true;
         changed = true;
