@@ -121,7 +121,7 @@ test('workerd rejects unsupported redirect before outbound and accepts the produ
         proof_excerpt: {
           contract: 'proof_excerpt_v1',
           algorithm: 'utf8-nfc-ws1-codepoint-prefix-v1',
-          max: 3_000,
+          max_code_points: 3_000,
           sha256: createHash('sha256').update(body).digest('hex'),
           utf8_bytes: bytes,
           code_points: Array.from(body).length,

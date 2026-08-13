@@ -80,7 +80,7 @@ function proofExcerptClaims(body: string) {
   return {
     contract: responseProfile,
     algorithm: proofExcerptAlgorithm,
-    max: 3_000,
+    max_code_points: 3_000,
     sha256: createHash('sha256').update(excerpt).digest('hex'),
     utf8_bytes: new TextEncoder().encode(excerpt).byteLength,
     code_points: Array.from(excerpt).length,
@@ -456,7 +456,7 @@ describe('trusted manual-news research boundary', () => {
         expect(document.fetch_audit.proof_excerpt, vector.name).toEqual({
           contract: goldenFixture.contract,
           algorithm: goldenFixture.algorithm,
-          max: goldenFixture.max_code_points,
+          max_code_points: goldenFixture.max_code_points,
           sha256: vector.expected.sha256,
           utf8_bytes: vector.expected.utf8_bytes,
           code_points: vector.expected.code_points,
@@ -475,6 +475,22 @@ describe('trusted manual-news research boundary', () => {
       service: service(async () => gatewayResponse(body, {
         hops: [publicHop()],
         profile: { proof_excerpt: { ...proofExcerptClaims(body), sha256: '00'.repeat(32) } },
+      }) as never),
+    })).rejects.toThrow(/unsafe_gateway_audit:proof_excerpt/);
+  });
+
+  test.each([
+    ['legacy max', { max: 3_000 }],
+    ['wrong max_code_points', { max_code_points: 2_999 }],
+    ['ambiguous max fields', { max_code_points: 3_000, max: 3_000 }],
+  ])('rejects a signed proof_excerpt_v1 with %s', async (_name, replacement) => {
+    const body = 'Signed complete body.';
+    const canonical = proofExcerptClaims(body);
+    const { max_code_points: _canonicalMax, ...claims } = canonical;
+    await expect(fetchPublicDocument('https://example.com/story', {
+      service: service(async () => gatewayResponse(body, {
+        hops: [publicHop()],
+        profile: { proof_excerpt: { ...claims, ...replacement } as typeof canonical },
       }) as never),
     })).rejects.toThrow(/unsafe_gateway_audit:proof_excerpt/);
   });

@@ -156,9 +156,14 @@ async function completeTrustedArticle(document: PublicDocument): Promise<boolean
     || document.fetch_audit.protocol_version !== 'article_text_v2'
     || document.fetch_audit.response_profile !== 'proof_excerpt_v1'
     || document.fetch_audit.response_hmac_contract !== 'hmac-sha256-canonical-json-all-fields-except-response_hmac-v1'
+    || !document.fetch_audit.proof_excerpt
+    || Object.keys(document.fetch_audit.proof_excerpt).length !== 6
+    || !Object.keys(document.fetch_audit.proof_excerpt).every((key) => [
+      'contract', 'algorithm', 'max_code_points', 'sha256', 'utf8_bytes', 'code_points',
+    ].includes(key))
     || document.fetch_audit.proof_excerpt?.contract !== 'proof_excerpt_v1'
     || document.fetch_audit.proof_excerpt?.algorithm !== 'utf8-nfc-ws1-codepoint-prefix-v1'
-    || document.fetch_audit.proof_excerpt?.max !== 3_000
+    || document.fetch_audit.proof_excerpt?.max_code_points !== 3_000
     || document.fetch_audit.final_url !== document.url
     || !/^(?:[a-f0-9]{32,128}|[A-Za-z0-9_-]{22,171})$/.test(document.fetch_audit.request_nonce || '')
     || !/^\d{4}-\d{2}-\d{2}T.*Z$/.test(document.fetch_audit.request_timestamp || '')

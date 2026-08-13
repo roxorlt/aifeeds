@@ -5796,11 +5796,11 @@ function normalizedSignedEvidenceProvenance(item: ManualNewsEvidence): DocumentF
     || raw.response_profile !== MANUAL_NEWS_RESPONSE_PROFILE
     || raw.response_hmac_contract !== MANUAL_NEWS_RESPONSE_HMAC_CONTRACT
     || !hasExactKeys(raw.proof_excerpt, [
-      'contract', 'algorithm', 'max', 'sha256', 'utf8_bytes', 'code_points',
+      'contract', 'algorithm', 'max_code_points', 'sha256', 'utf8_bytes', 'code_points',
     ])
     || raw.proof_excerpt.contract !== MANUAL_NEWS_RESPONSE_PROFILE
     || raw.proof_excerpt.algorithm !== MANUAL_NEWS_PROOF_EXCERPT_ALGORITHM
-    || raw.proof_excerpt.max !== MANUAL_NEWS_EXCERPT_MAX_CODE_POINTS
+    || raw.proof_excerpt.max_code_points !== MANUAL_NEWS_EXCERPT_MAX_CODE_POINTS
     || typeof raw.proof_excerpt.sha256 !== 'string'
     || !/^[a-f0-9]{64}$/.test(raw.proof_excerpt.sha256)
     || !Number.isSafeInteger(raw.proof_excerpt.utf8_bytes)
@@ -5928,7 +5928,7 @@ function normalizedSignedEvidenceProvenance(item: ManualNewsEvidence): DocumentF
     proof_excerpt: {
       contract: MANUAL_NEWS_RESPONSE_PROFILE,
       algorithm: MANUAL_NEWS_PROOF_EXCERPT_ALGORITHM,
-      max: MANUAL_NEWS_EXCERPT_MAX_CODE_POINTS,
+      max_code_points: MANUAL_NEWS_EXCERPT_MAX_CODE_POINTS,
       sha256: raw.proof_excerpt.sha256,
       utf8_bytes: Number(raw.proof_excerpt.utf8_bytes),
       code_points: Number(raw.proof_excerpt.code_points),
