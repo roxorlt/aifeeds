@@ -34,7 +34,7 @@
 ## 发布与验收
 
 1. staging 按顺序执行 migration 033、034；不得修改或重跑已执行的 033。034 只新增 `manual_news_assessment_verifications` 表和索引。
-2. 配置 staging `MANUAL_NEWS_RESEARCH_ORIGIN`、secret `MANUAL_NEWS_RESEARCH_TOKEN`，以及每环境独立、恰好 64 个小写十六进制字符的 secret `MANUAL_NEWS_VERIFICATION_SECRET`（32 随机 bytes 的 lowercase hex）；研究网关必须实现 `/v1/search` 和 `/v1/document` 契约及连接 peer pinning。
+2. 配置 staging `MANUAL_NEWS_RESEARCH_ORIGIN`、secret `MANUAL_NEWS_RESEARCH_TOKEN`、与 HK `AIFEEDS_MANUAL_NEWS_RESPONSE_SECRET` 匹配的独立 32-byte lowercase-hex secret `MANUAL_NEWS_RESEARCH_RESPONSE_SECRET`，以及每环境独立、恰好 64 个小写十六进制字符的 secret `MANUAL_NEWS_VERIFICATION_SECRET`；研究网关必须实现 `/v1/search` 和 signed `article_text_v2` `/v1/document` 契约及连接 peer pinning。
 3. 部署 staging Worker，确认 `MANUAL_NEWS_LEAD_WORKFLOW` binding、研究网关失败关闭和 API 鉴权。
 4. 部署 staging HK，验证文字-only、URL-only、状态轮询、失败重试、确认候选、V1→V2，以及原 1–5 条排序/重生成回归。
 5. 验证确认前后 Top 5 与渲染任务均无自动变化。

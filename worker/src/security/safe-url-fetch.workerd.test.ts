@@ -1,11 +1,20 @@
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash, createHmac } from 'node:crypto';
 
 import { build } from 'esbuild';
 import { Log, LogLevel, Miniflare } from 'miniflare';
 import { expect, test } from 'vitest';
 
 const workerRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+const responseSecret = '11'.repeat(32);
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(',')}}`;
+}
 
 test('workerd rejects unsupported redirect before outbound and accepts the production manual redirect', async () => {
   const entry = `
@@ -22,7 +31,10 @@ test('workerd rejects unsupported redirect before outbound and accepts the produ
             return Response.json({ ok: true });
           }
           const document = await fetchPublicDocument('https://example.com/', {
-            service: { origin: 'https://research-gateway.example', token: 'test-token' },
+            service: {
+              origin: 'https://research-gateway.example', token: 'test-token',
+              responseSecret: '${responseSecret}',
+            },
           });
           return Response.json({ ok: true, url: document.url, bytes: document.bytes });
         } catch (error) {
@@ -50,14 +62,14 @@ test('workerd rejects unsupported redirect before outbound and accepts the produ
   });
   const body = 'Example document';
   const bytes = new TextEncoder().encode(body).byteLength;
-  const audit = encodeURIComponent(JSON.stringify({
+  const auditBase = {
     hops: [{
       url: 'https://example.com/',
       validated_ip: '93.184.216.34',
       connected_ip: '93.184.216.34',
     }],
     source_content_type: 'text/html',
-    extraction: 'html',
+    extraction: 'article_text',
     requested_limits: {
       source_bytes: 8_388_608,
       extracted_text_bytes: 2_097_152,
@@ -65,8 +77,8 @@ test('workerd rejects unsupported redirect before outbound and accepts the produ
     },
     applied_limits: {
       source_bytes: 8_388_608,
-      extracted_text_bytes: 2_097_152,
-      extracted_text_characters: 1_000_000,
+      extracted_text_bytes: 28_000,
+      extracted_text_characters: 28_000,
     },
     actual_sizes: {
       source_bytes: bytes,
@@ -74,16 +86,38 @@ test('workerd rejects unsupported redirect before outbound and accepts the produ
       extracted_text_characters: body.length,
     },
     truncation: { source: false, extracted_text: false },
-    parser: { result: 'success', version: 'workerd-test/1.0' },
-  }));
+    parser: { result: 'success', version: 'chromium/149.0.7735.12' },
+    document: {
+      title: 'Example document', published_at: null,
+      selection: 'article', content_complete: true,
+    },
+  };
   let gatewayCalls = 0;
   const miniflare = new Miniflare({
     modules: true,
     script: bundle.outputFiles[0].text,
     compatibilityDate: '2024-12-01',
     compatibilityFlags: ['nodejs_compat'],
-    outboundService: async () => {
+    outboundService: async (request: Request) => {
       gatewayCalls += 1;
+      const payload = await request.clone().json() as {
+        extraction_mode: string; request_nonce: string; request_timestamp: string;
+      };
+      expect(payload).toMatchObject({ extraction_mode: 'article_text_v2' });
+      const unsigned = {
+        ...auditBase,
+        protocol_version: 'article_text_v2',
+        request_nonce: payload.request_nonce,
+        request_timestamp: payload.request_timestamp,
+        extracted_at: payload.request_timestamp,
+        final_url: 'https://example.com/',
+        body_sha256: createHash('sha256').update(body).digest('hex'),
+      };
+      const audit = encodeURIComponent(JSON.stringify({
+        ...unsigned,
+        response_hmac: createHmac('sha256', Buffer.from(responseSecret, 'hex'))
+          .update(canonicalJson(unsigned)).digest('hex'),
+      }));
       return new Response(body, {
         status: 200,
         headers: {

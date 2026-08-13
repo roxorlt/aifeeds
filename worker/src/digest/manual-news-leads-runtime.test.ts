@@ -1,6 +1,16 @@
 import { describe, expect, test, vi } from 'vitest';
+import { createHash, createHmac } from 'node:crypto';
 
-import { applyManualLeadEvidencePolicy, validateManualLeadAssessment } from './manual-news-leads';
+import {
+  applyManualLeadEvidencePolicy,
+  buildManualLeadFactVerificationPrompt,
+  createManualLeadVerificationProof,
+  isCurrentManualLeadVerification,
+  type ManualNewsProcessedAssessment,
+  validateManualLeadAssessment,
+  validateManualLeadFactVerification,
+  validateManualLeadGeneratedAssessment,
+} from './manual-news-leads';
 import {
   createManualNewsLeadRuntimeAdapters,
   extractManualNewsEvidence,
@@ -25,8 +35,10 @@ function auditObject(
   sourceContentType: string,
   extraction: PublicDocument['extraction'],
   body: string,
+  protocol: { request_nonce?: string; request_timestamp?: string } = {},
 ): PublicDocument['fetch_audit'] {
   const extractedBytes = new TextEncoder().encode(body).byteLength;
+  const articleText = extraction === 'article_text';
   return {
     hops: [{ url, validated_ip: '93.184.216.34', connected_ip: '93.184.216.34' }],
     source_content_type: sourceContentType, extraction,
@@ -34,7 +46,9 @@ function auditObject(
       source_bytes: 8_388_608, extracted_text_bytes: 2_097_152, extracted_text_characters: 1_000_000,
     },
     applied_limits: {
-      source_bytes: 8_388_608, extracted_text_bytes: 2_097_152, extracted_text_characters: 1_000_000,
+      source_bytes: 8_388_608,
+      extracted_text_bytes: articleText ? 28_000 : 2_097_152,
+      extracted_text_characters: articleText ? 28_000 : 1_000_000,
     },
     actual_sizes: {
       source_bytes: sourceContentType === 'application/pdf' ? 48_000 : extractedBytes,
@@ -42,25 +56,167 @@ function auditObject(
       extracted_text_characters: Array.from(body).length,
     },
     truncation: { source: false, extracted_text: false },
-    parser: { result: 'success' as const, version: 'research-gateway-parser/1.0.0' },
+    parser: {
+      result: 'success' as const,
+      version: articleText ? 'chromium/149.0.7735.12' : 'research-gateway-parser/1.0.0',
+    },
+    ...(articleText ? { document: {
+      title: 'Validated source title', published_at: '2026-07-04T08:00:00.000Z',
+      selection: 'article' as const, content_complete: true as const,
+    } } : {}),
+    protocol_version: 'article_text_v2' as const,
+    request_nonce: protocol.request_nonce || '22'.repeat(16),
+    request_timestamp: protocol.request_timestamp || '2026-08-12T00:00:00.000Z',
+    extracted_at: protocol.request_timestamp || '2026-08-12T00:00:00.000Z',
+    final_url: url,
+    body_sha256: createHash('sha256').update(body).digest('hex'),
+    response_hmac: '33'.repeat(32),
   };
 }
 
-function audit(url: string, sourceContentType: string, extraction: PublicDocument['extraction'], body: string): string {
-  return encodeURIComponent(JSON.stringify(auditObject(url, sourceContentType, extraction, body)));
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(',')}}`;
+}
+
+function signedAudit(
+  url: string,
+  sourceContentType: string,
+  extraction: PublicDocument['extraction'],
+  body: string,
+  protocol: { request_nonce: string; request_timestamp: string },
+): string {
+  const auditValue = auditObject(url, sourceContentType, extraction, body, protocol);
+  const { response_hmac: _placeholder, ...unsigned } = auditValue;
+  const response_hmac = createHmac('sha256', Buffer.from('11'.repeat(32), 'hex'))
+    .update(canonicalJson(unsigned)).digest('hex');
+  return encodeURIComponent(JSON.stringify({ ...unsigned, response_hmac }));
 }
 
 function documentFixture(
   url: string,
   body: string,
-  extraction: PublicDocument['extraction'] = 'html',
+  extraction: PublicDocument['extraction'] = 'article_text',
+  metadata: { title?: string; published_at?: string | null; selection?: 'article' | 'main' } = {},
 ): PublicDocument {
   const contentType = extraction === 'pdf_text' ? 'application/pdf' : 'text/html';
+  const fetchAudit = auditObject(url, contentType, extraction, body);
+  if (extraction === 'article_text' && fetchAudit.document) {
+    fetchAudit.document = {
+      title: metadata.title || fetchAudit.document.title,
+      published_at: metadata.published_at === undefined
+        ? fetchAudit.document.published_at : metadata.published_at,
+      selection: metadata.selection || fetchAudit.document.selection,
+      content_complete: true,
+    };
+  }
   return {
     url, content_type: contentType, extraction, body, redirects: 0,
     bytes: new TextEncoder().encode(body).byteLength,
-    fetch_audit: auditObject(url, contentType, extraction, body),
+    fetch_audit: fetchAudit,
+    ...(extraction === 'article_text' ? {
+      title: fetchAudit.document!.title,
+      published_at: fetchAudit.document!.published_at,
+      selection: fetchAudit.document!.selection,
+      content_complete: true as const,
+    } : {}),
   };
+}
+
+const alibabaSupport = 'Alibaba reportedly bans employees from using Claude Code.';
+
+function alibabaGeneratedAssessment(evidenceId: string) {
+  return {
+    event_key: 'alibaba-claude-code-employee-ban-2026-07-04',
+    event_type: 'industry_event', material_update: false, score: 88,
+    recommendation: 'recommended', occurred_at: null, uncertainties: [], matched_event_key: null,
+    source_facts: [{
+      fact_ref: 'fact-01', source_language: 'en',
+      atomic_fact: {
+        subject: 'Alibaba', subject_role: 'organization', predicate: 'reportedly bans',
+        object: 'employees from using Claude Code',
+      },
+      evidence_ids: [evidenceId],
+    }],
+    evidence_dispositions: [{
+      evidence_id: evidenceId, disposition: 'supports_core',
+      source_fact_refs: ['fact-01'], reason_code: null,
+    }],
+    editorial_projection: {
+      title: {
+        projection_ref: 'title-01', source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: '阿里巴巴', subject_role: 'organization', predicate: '据称禁止',
+          object: '员工使用Claude Code',
+        },
+      },
+      summary: [{
+        projection_ref: 'summary-01', source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: '阿里巴巴', subject_role: 'organization', predicate: '据称禁止',
+          object: '员工使用Claude Code',
+        },
+      }],
+    },
+  };
+}
+
+function supportedFactResult(factId: string, evidenceId: string, quote: string) {
+  return {
+    fact_id: factId, supported: true, issue_code: 'none',
+    source_quotes: [{ evidence_id: evidenceId, quote }],
+    ...(factId === 'field:material_update' ? {
+      comparison_result: {
+        value: false, matched_event_key: null, prior_event_keys: [], reason_code: 'no_prior_match',
+        current_evidence_id: evidenceId, current_quote: quote,
+      },
+    } : {}),
+  };
+}
+
+async function createAlibabaProof(
+  evidence: NonNullable<Awaited<ReturnType<typeof extractManualNewsEvidence>>>,
+) {
+  const generated = validateManualLeadGeneratedAssessment(alibabaGeneratedAssessment(evidence.id), [evidence]);
+  const candidate: ManualNewsProcessedAssessment = {
+    ...applyManualLeadEvidencePolicy(generated, [evidence]), duplicate_scope: null, matched_lead_id: null,
+  };
+  const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({
+    assessment: candidate, evidence: [evidence],
+  }).user) as {
+    facts: Array<{ fact_id: string }>;
+    projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+    evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
+  };
+  const verification = validateManualLeadFactVerification({
+    overall_verdict: 'supported',
+    fact_results: prompt.facts.map((fact) => supportedFactResult(fact.fact_id, evidence.id, alibabaSupport)),
+    projection_results: prompt.projections.map((projection) => ({
+      projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
+      supported: true, issue_code: 'none',
+    })),
+    disposition_results: prompt.evidence_dispositions.map((disposition) => ({
+      evidence_id: disposition.evidence_id, disposition: disposition.disposition,
+      supported: true, issue_code: 'none',
+      source_quotes: [{ evidence_id: evidence.id, quote: alibabaSupport }],
+    })),
+  }, candidate, [evidence]);
+  const proofInput = {
+    lead_id: 'ml-runtime-techcrunch-article', assessment_version: 9,
+    assessment: candidate, evidence: [evidence], verification,
+  };
+  const secret = 'a'.repeat(64);
+  const proof = await createManualLeadVerificationProof(proofInput, secret);
+  return { proofInput, proof, secret };
+}
+
+async function createAlibabaCurrentProof(
+  evidence: NonNullable<Awaited<ReturnType<typeof extractManualNewsEvidence>>>,
+) {
+  const { proofInput, proof, secret } = await createAlibabaProof(evidence);
+  return isCurrentManualLeadVerification(proofInput, proof, secret);
 }
 
 describe('manual lead evidence extraction', () => {
@@ -241,10 +397,112 @@ describe('manual lead evidence extraction', () => {
     mockedCall.mockReset();
   });
 
-  test('keeps an explicit source publication time separate from retrieval time', async () => {
+  test('uses the complete trusted article body and creates a current v9 proof', async () => {
+    const body = alibabaSupport;
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://techcrunch.com/2026/07/04/alibaba-claude-code/', body, 'article_text', {
+        title: 'Alibaba reportedly bans employees from using Claude Code | TechCrunch',
+        published_at: '2026-07-04T08:00:00.000Z',
+      },
+    ), undefined, 1234);
+
+    expect(evidence).toMatchObject({
+      title: 'Alibaba reportedly bans employees from using Claude Code | TechCrunch',
+      excerpt: body,
+      claims_supported: [body],
+      published_at: '2026-07-04T08:00:00.000Z',
+      retrieved_at: 1234,
+      fetch_audit: {
+        extraction: 'article_text',
+        parser: { version: 'chromium/149.0.7735.12' },
+        document: { content_complete: true },
+      },
+    });
+    await expect(createAlibabaCurrentProof(evidence!)).resolves.toBe(true);
+  });
+
+  test('v9 proof binds authenticated v2 body and response signature audit fields', async () => {
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://techcrunch.com/2026/07/04/alibaba-claude-code/', alibabaSupport,
+    ));
+    const { proofInput, proof, secret } = await createAlibabaProof(evidence!);
+    const tampered = structuredClone(proofInput);
+    const tamperedEvidence = tampered.evidence[0]!;
+    const tamperedAudit = tamperedEvidence.fetch_audit!;
+    const originalAudit = proofInput.evidence[0]!.fetch_audit!;
+    tamperedAudit.response_hmac = '44'.repeat(32);
+    await expect(isCurrentManualLeadVerification(tampered, proof, secret)).resolves.toBe(false);
+    tamperedAudit.response_hmac = originalAudit.response_hmac;
+    tamperedAudit.body_sha256 = '55'.repeat(32);
+    await expect(isCurrentManualLeadVerification(tampered, proof, secret)).resolves.toBe(false);
+  });
+
+  test('does not truncate a complete trusted article to the former 3000-character prefix', async () => {
+    const body = `Opening material. ${'A'.repeat(3_100)} Final denial remains present.`;
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://www.axios.com/complete-article', body, 'article_text', { title: 'Complete article' },
+    ));
+    expect(evidence?.excerpt).toBe(body);
+    expect(evidence?.excerpt).toContain('Final denial remains present.');
+  });
+
+  test.each([
+    'Alibaba withdrew the restriction on employees using Claude Code.',
+    'Alibaba said the Claude Code restriction applies only to contractors.',
+  ])('preserves visible article blockers and fails closed: %s', async (blocker) => {
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://techcrunch.com/2026/07/04/alibaba-claude-code/',
+      `${alibabaSupport} ${blocker}`, 'article_text', { title: 'Alibaba report' },
+    ));
+
+    expect(evidence?.excerpt).toContain(blocker);
+    await expect(createAlibabaCurrentProof(evidence!))
+      .rejects.toThrow(/evidence_disposition|verification_semantics/);
+  });
+
+  test('rejects raw HTML and incomplete, unsafe, or over-cap article_text documents', async () => {
+    const rawHtml = `<script type="application/ld+json">${JSON.stringify({
+      '@type': 'NewsArticle', articleBody: alibabaSupport,
+    })}</script><article>Alibaba withdrew the restriction on employees using Claude Code.</article>`;
+    expect(await extractManualNewsEvidence(documentFixture(
+      'https://www.axios.com/raw', rawHtml, 'html',
+    ))).toBeNull();
+
+    const incomplete = documentFixture(
+      'https://www.axios.com/incomplete', alibabaSupport, 'article_text', { title: 'Report' },
+    );
+    incomplete.content_complete = undefined;
+    expect(await extractManualNewsEvidence(incomplete)).toBeNull();
+
+    const legacyV1 = documentFixture(
+      'https://www.axios.com/v1', alibabaSupport, 'article_text', { title: 'Report' },
+    );
+    legacyV1.fetch_audit.protocol_version = undefined;
+    expect(await extractManualNewsEvidence(legacyV1)).toBeNull();
+
+    const forgedDigest = documentFixture(
+      'https://www.axios.com/forged', alibabaSupport, 'article_text', { title: 'Report' },
+    );
+    forgedDigest.fetch_audit.body_sha256 = '00'.repeat(32);
+    expect(await extractManualNewsEvidence(forgedDigest)).toBeNull();
+
+    for (const body of [
+      `${alibabaSupport}\u200b hidden blocker`,
+      'x'.repeat(28_001),
+      '界'.repeat(9_334),
+    ]) {
+      expect(await extractManualNewsEvidence(documentFixture(
+        'https://www.axios.com/unsafe', body, 'article_text', { title: 'Report' },
+      ))).toBeNull();
+    }
+  });
+
+  test('keeps trusted DOM publication time separate from retrieval time', async () => {
     const evidence = await extractManualNewsEvidence(documentFixture(
       'https://www.anthropic.com/news/example',
-      '<html><head><title>Supported output provenance</title><meta property="article:published_time" content="2026-08-10T09:30:00-04:00"></head><body>Scope is limited to supported products.</body></html>',
+      'Scope is limited to supported products.', 'article_text', {
+        title: 'Supported output provenance', published_at: '2026-08-10T13:30:00.000Z',
+      },
     ), {
       url: 'https://www.anthropic.com/news/example', title: 'Search title', snippet: 'Search snippet.',
       published_at: '2026-08-09T00:00:00Z',
@@ -259,14 +517,18 @@ describe('manual lead evidence extraction', () => {
 
   test('does not invent a publication time when the source and search hint omit it', async () => {
     const evidence = await extractManualNewsEvidence(documentFixture(
-      'https://www.axios.com/example', '<title>Report</title><p>No machine-readable publication time.</p>',
+      'https://www.axios.com/example', 'No machine-readable publication time.', 'article_text', {
+        title: 'Report', published_at: null,
+      },
     ), undefined, 1234);
     expect(evidence?.published_at).toBeNull();
   });
 
   test('classifies authority only from the exact allowlisted registrable domain of the final fetched URL', async () => {
     const deceptive = await extractManualNewsEvidence(documentFixture(
-      'https://support.claude.com.evil.example/notice', '<title>Fake help</title><p>Untrusted copy.</p>',
+      'https://support.claude.com.evil.example/notice', 'Untrusted copy.', 'article_text', {
+        title: 'Fake help',
+      },
     ), {
       url: 'https://support.claude.com/real', title: 'Malicious hint', snippet: 'Pretend official.',
       source_type: 'official_help', publisher: 'Anthropic', reliable: true,
@@ -277,7 +539,9 @@ describe('manual lead evidence extraction', () => {
     });
 
     const official = await extractManualNewsEvidence(documentFixture(
-      'https://support.claude.com/en/articles/notice', '<title>Official help</title><p>Supported products only.</p>',
+      'https://support.claude.com/en/articles/notice', 'Supported products only.', 'article_text', {
+        title: 'Official help',
+      },
     ), undefined, 1234);
     expect(official).toMatchObject({ source_type: 'official_help', publisher: 'claude.com', reliable: true });
   });
@@ -304,6 +568,7 @@ describe('manual lead evidence extraction', () => {
       DB: db,
       MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
       MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
+      MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
     } as never, {
       researchFetcher: async () => new Response(JSON.stringify({ results: [{
         url: 'https://www.axios.com/report', title: 'Independent report', snippet: 'Independent evidence.',
@@ -324,6 +589,7 @@ describe('manual lead evidence extraction', () => {
       DB: { prepare() { throw new TypeError('D1 receiver mismatch'); } },
       MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
       MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
+      MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
     } as never, { researchFetcher });
 
     await expect(adapters.search({ date: '2026-08-11', text: 'Anthropic watermark', note: '' }))
@@ -340,6 +606,7 @@ describe('manual lead evidence extraction', () => {
       DB: { prepare() { return statement; } },
       MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
       MANUAL_NEWS_RESEARCH_TOKEN: 'secret-test-token',
+      MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
     } as never, {
       researchFetcher: async () => {
         throw new TypeError('Illegal invocation for Bearer secret-test-token');
@@ -367,6 +634,7 @@ describe('manual lead evidence extraction', () => {
       DB: { prepare() { return statement; } },
       MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
       MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
+      MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
     } as never, {
       researchFetcher: async () => {
         throw new Error(
@@ -406,6 +674,7 @@ describe('manual lead evidence extraction', () => {
       DB: { prepare() { return statement; } },
       MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
       MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
+      MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
     } as never, {
       researchFetcher: async () => { throw new Error(unsafeMessage); },
     });
@@ -431,7 +700,10 @@ describe('manual lead evidence extraction', () => {
 
   test('Bernie letter uses bounded trusted PDF text conversion and still needs an independent report', async () => {
     const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
-      const target = JSON.parse(String(init?.body || '{}')).url as string;
+      const request = JSON.parse(String(init?.body || '{}')) as {
+        url: string; request_nonce: string; request_timestamp: string;
+      };
+      const target = request.url;
       const pdf = target.endsWith('.pdf');
       const body = pdf
         ? 'Senator Bernie Sanders asks OpenAI, Anthropic, and Meta leaders to pause AI development.'
@@ -439,8 +711,8 @@ describe('manual lead evidence extraction', () => {
       return new Response(body, {
         headers: {
           'Content-Type': 'text/plain; charset=utf-8',
-          'X-AIFeeds-Fetch-Audit': audit(
-            target, pdf ? 'application/pdf' : 'text/html', pdf ? 'pdf_text' : 'html', body,
+          'X-AIFeeds-Fetch-Audit': signedAudit(
+            target, pdf ? 'application/pdf' : 'text/html', pdf ? 'pdf_text' : 'article_text', body, request,
           ),
         },
       });
@@ -449,6 +721,7 @@ describe('manual lead evidence extraction', () => {
       DB: {} as never,
       MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
       MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
+      MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
     } as never, { researchFetcher: fetcher });
     const letter = await adapters.extract(await adapters.fetch('https://www.sanders.senate.gov/letter.pdf'));
     const report = await adapters.extract(await adapters.fetch('https://www.axios.com/report'));

@@ -127,43 +127,51 @@ function sourceIdentity(urlValue: string): { source_type: ManualEvidenceSourceTy
   return { source_type: 'other', reliable: false, publisher: displayRegistrableDomain(host) };
 }
 
-function decodeHtml(value: string): string {
-  return value
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/\s+/g, ' ')
-    .trim();
+const MANUAL_NEWS_ARTICLE_MAX_BYTES = 28_000;
+const MANUAL_NEWS_ARTICLE_MAX_CHARACTERS = 28_000;
+
+function normalizedHintPublishedAt(value: string | null | undefined): string | null {
+  if (!value) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  if (!/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
 }
 
-function normalizedPublishedAt(body: string, hinted: string | null | undefined): string | null {
-  const candidates: string[] = [];
-  for (const tag of body.match(/<meta\b[^>]*>/gi) || []) {
-    const attributes = new Map<string, string>();
-    for (const match of tag.matchAll(/([:\w-]+)\s*=\s*["']([^"']*)["']/g)) {
-      attributes.set(match[1].toLowerCase(), match[2]);
-    }
-    const key = (attributes.get('property') || attributes.get('name') || attributes.get('itemprop') || '').toLowerCase();
-    if (['article:published_time', 'datepublished', 'date', 'pubdate'].includes(key)) {
-      candidates.push(attributes.get('content') || '');
-    }
-  }
-  const time = /<time\b[^>]*\bdatetime\s*=\s*["']([^"']+)["']/i.exec(body);
-  if (time) candidates.push(time[1]);
-  if (hinted) candidates.push(hinted);
-  for (const value of candidates) {
-    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
-    if (!/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) continue;
-    const timestamp = Date.parse(value);
-    if (value && Number.isFinite(timestamp)) return new Date(timestamp).toISOString();
-  }
-  return null;
+async function completeTrustedArticle(document: PublicDocument): Promise<boolean> {
+  if (document.extraction !== 'article_text'
+    || !['text/html', 'application/xhtml+xml'].includes(document.content_type)
+    || document.content_complete !== true
+    || typeof document.title !== 'string' || !document.title.trim()
+    || !['article', 'main'].includes(String(document.selection))
+    || !document.fetch_audit.document
+    || document.fetch_audit.document.title !== document.title
+    || document.fetch_audit.document.published_at !== document.published_at
+    || document.fetch_audit.document.selection !== document.selection
+    || document.fetch_audit.document.content_complete !== true
+    || document.fetch_audit.extraction !== 'article_text'
+    || document.fetch_audit.protocol_version !== 'article_text_v2'
+    || document.fetch_audit.final_url !== document.url
+    || !/^(?:[a-f0-9]{32,128}|[A-Za-z0-9_-]{22,171})$/.test(document.fetch_audit.request_nonce || '')
+    || !/^\d{4}-\d{2}-\d{2}T.*Z$/.test(document.fetch_audit.request_timestamp || '')
+    || !/^\d{4}-\d{2}-\d{2}T.*Z$/.test(document.fetch_audit.extracted_at || '')
+    || !/^[a-f0-9]{64}$/.test(document.fetch_audit.body_sha256 || '')
+    || !/^[a-f0-9]{64}$/.test(document.fetch_audit.response_hmac || '')
+    || !/^chromium\/(\d+)\.\d+\.\d+\.\d+$/.test(document.fetch_audit.parser.version)
+    || Number(/^chromium\/(\d+)/.exec(document.fetch_audit.parser.version)?.[1] || 0) < 149
+    || document.fetch_audit.truncation.source || document.fetch_audit.truncation.extracted_text) return false;
+  const bytes = new TextEncoder().encode(document.body).byteLength;
+  const characters = Array.from(document.body);
+  if (!characters.length || bytes !== document.bytes
+    || bytes > MANUAL_NEWS_ARTICLE_MAX_BYTES
+    || characters.length > MANUAL_NEWS_ARTICLE_MAX_CHARACTERS
+    || document.fetch_audit.actual_sizes.extracted_text_bytes !== bytes
+    || document.fetch_audit.actual_sizes.extracted_text_characters !== characters.length) return false;
+  if (characters.some((character) => /\p{Default_Ignorable_Code_Point}/u.test(character)
+    && character !== '\u200c' && character !== '\u200d' && !/^[\ufe00-\ufe0f]$/u.test(character))) return false;
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(document.body));
+  const bodyHash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return bodyHash === document.fetch_audit.body_sha256;
 }
 
 async function evidenceId(url: string): Promise<string> {
@@ -178,17 +186,18 @@ export async function extractManualNewsEvidence(
   now = Date.now(),
 ): Promise<ManualNewsEvidence | null> {
   const identity = sourceIdentity(document.url);
-  const html = document.extraction === 'html';
-  const titleMatch = html ? /<title[^>]*>([\s\S]*?)<\/title>/i.exec(document.body) : null;
-  const title = compact(hint?.title || (titleMatch ? decodeHtml(titleMatch[1]) : ''), 220);
-  const excerpt = compact(html ? decodeHtml(document.body) : document.body, 3_000);
+  if (document.extraction === 'html') return null;
+  if (document.extraction === 'article_text' && !await completeTrustedArticle(document)) return null;
+  const articleText = document.extraction === 'article_text';
+  const title = articleText ? document.title! : compact(hint?.title || '', 220);
+  const excerpt = articleText ? document.body : compact(document.body, 3_000);
   if (!title && !excerpt) return null;
   return {
     id: await evidenceId(document.url),
     url: document.url,
     source_type: identity.source_type,
     publisher: compact(identity.publisher, 120),
-    published_at: normalizedPublishedAt(document.body, hint?.published_at),
+    published_at: articleText ? document.published_at! : normalizedHintPublishedAt(hint?.published_at),
     retrieved_at: now,
     title,
     excerpt,
@@ -224,10 +233,12 @@ async function searchExistingNews(env: Env, input: { text: string }): Promise<Ma
 }
 
 function researchService(env: Env, fetcher?: TrustedGatewayFetcher): TrustedResearchService | undefined {
-  if (!env.MANUAL_NEWS_RESEARCH_ORIGIN || !env.MANUAL_NEWS_RESEARCH_TOKEN) return undefined;
+  if (!env.MANUAL_NEWS_RESEARCH_ORIGIN || !env.MANUAL_NEWS_RESEARCH_TOKEN
+    || !env.MANUAL_NEWS_RESEARCH_RESPONSE_SECRET) return undefined;
   return {
     origin: env.MANUAL_NEWS_RESEARCH_ORIGIN,
     token: env.MANUAL_NEWS_RESEARCH_TOKEN,
+    responseSecret: env.MANUAL_NEWS_RESEARCH_RESPONSE_SECRET,
     ...(fetcher ? { fetcher } : {}),
   };
 }

@@ -398,6 +398,9 @@ export interface Env {
   // HTML/JSON/PDF 文本提取及开放网络检索。Worker 绝不直接 fetch 用户提供的域名。
   MANUAL_NEWS_RESEARCH_ORIGIN?: string;
   MANUAL_NEWS_RESEARCH_TOKEN?: string;
+  // Independent 32-byte lowercase-hex key for article_text_v2 response HMACs.
+  // It must match HK AIFEEDS_MANUAL_NEWS_RESPONSE_SECRET for the same environment.
+  MANUAL_NEWS_RESEARCH_RESPONSE_SECRET?: string;
   // HMAC-SHA256 secret for independently persisted manual-news assessment
   // verification records. Must be exactly 64 lowercase hex characters and unique per environment.
   MANUAL_NEWS_VERIFICATION_SECRET?: string;

@@ -44,6 +44,7 @@ function env(overrides: Record<string, unknown> = {}) {
     MANUAL_NEWS_LEAD_WORKFLOW: { create: workflowCreate },
     MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
     MANUAL_NEWS_RESEARCH_TOKEN: 'test-research-token',
+    MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
     DEEPSEEK_API_KEY: 'test-deepseek-key',
     MANUAL_NEWS_VERIFICATION_SECRET: 'a'.repeat(64),
     ...overrides,
@@ -278,6 +279,9 @@ describe('manual daily news leads API', () => {
     for (const overrides of [
       { MANUAL_NEWS_RESEARCH_ORIGIN: undefined },
       { MANUAL_NEWS_RESEARCH_TOKEN: undefined },
+      { MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: undefined },
+      { MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: 'too-short' },
+      { MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: 'A'.repeat(64) },
       { DEEPSEEK_API_KEY: undefined },
       { MANUAL_NEWS_VERIFICATION_SECRET: undefined },
       { MANUAL_NEWS_VERIFICATION_SECRET: 'too-short' },
