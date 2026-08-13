@@ -93,6 +93,18 @@ describe('daily news review contract', () => {
       .resolves.toEqual(['news-6', 'news-2', 'news-7']);
   });
 
+  test('applied selection keeps the rollout fallback when review tables are not migrated yet', async () => {
+    const env = {
+      DB: {
+        prepare() {
+          throw new Error('D1_ERROR: no such table: daily_news_review_batches');
+        },
+      },
+    } as never;
+
+    await expect(getAppliedNewsReviewSelection(env, '2026-07-30')).resolves.toBeNull();
+  });
+
   test('notification lists all candidates and binds the immutable date and batch link', () => {
     const message = buildNewsReviewNotification(
       '2026-07-30',
@@ -110,7 +122,7 @@ describe('daily news review contract', () => {
     expect(message.body).toContain('#news-review');
   });
 
-  test('pool snapshot keeps the calibrated order and default top five', async () => {
+  test('pool snapshot keeps calibrated defaults and ignores an unverified legacy manual lead', async () => {
     const auditCandidates = candidates.map((candidate, index) => ({
       rank: index + 1,
       id: candidate.item_id,
@@ -128,6 +140,7 @@ describe('daily news review contract', () => {
     };
     const rows = new Map(candidates.map((candidate) => [candidate.item_id, {
       id: candidate.item_id,
+      source_ref: candidate.item_id === 'news-10' ? 'manual_lead' : null,
       title: candidate.title,
       content: candidate.summary,
       content_translated: candidate.summary,
@@ -135,6 +148,12 @@ describe('daily news review contract', () => {
       extra: JSON.stringify({ title_zh: candidate.title, ai_summary_zh: candidate.summary }),
     }]));
     const inserted: Array<{ sql: string; binds: unknown[] }> = [];
+    const manualAssessment = {
+      title: 'Anthropic披露部分Claude输出的水印与来源标记',
+      summary: '官方文档将范围限定为受支持的模型与产品。',
+      event_key: 'anthropic-output-provenance-2026-08',
+      score: 82,
+    };
     let saved: Record<string, unknown> | null = null;
     const env = {
       DAILY_NEWS_REVIEW_SECRET: 'secret',
@@ -144,12 +163,17 @@ describe('daily news review contract', () => {
           const stmt = {
             bind(...values: unknown[]) { binds = values; return stmt; },
             async first<T>() {
+              if (/news_review:candidate_generation_read/i.test(sql)) return { generation: 0 } as T;
               if (/FROM digest_pool/i.test(sql)) return pool as T;
               if (/FROM daily_news_review_batches/i.test(sql) && /batch_id = \?/i.test(sql)) return saved as T | null;
               return null as T | null;
             },
             async all<T>() {
               if (/FROM items/i.test(sql)) return { results: binds.map((id) => rows.get(String(id))) as T[] };
+              if (/FROM manual_news_leads/i.test(sql)) return { results: [{
+                id: 'ml-20260730-abc123def456', input_url: 'https://support.claude.com/example',
+                assessment_json: JSON.stringify(manualAssessment), publisher: 'Anthropic',
+              }] as T[] };
               return { results: [] as T[] };
             },
             async run() {
@@ -157,9 +181,13 @@ describe('daily news review contract', () => {
               if (/INSERT INTO daily_news_review_batches/i.test(sql)) {
                 saved = {
                   review_date: binds[0], batch_id: binds[1], candidate_ids: binds[2], candidates_json: binds[3],
-                  default_selected_ids: binds[4], applied_selected_ids: null, selection_hash: null,
-                  edit_revision: 0, publish_status: 'not_requested', publish_error: null, published_at: null,
-                  notified_at: null, notification_hash: null, superseded_by: null, created_at: binds[5], expires_at: binds[6],
+                  default_selected_ids: binds[4], applied_selected_ids: binds[5], selection_hash: binds[6],
+                  edit_revision: binds[7], publish_status: binds[8], publish_error: null, published_at: null,
+                  notified_at: null, notification_hash: null, superseded_by: null,
+                  auto_repaired_from_batch: binds[9], auto_repaired_invalid_ids: binds[10],
+                  created_at: binds[11], expires_at: binds[12], batch_revision: binds[13],
+                  supersedes_batch_id: binds[14], revision_origin: 'scheduled_freeze', lineage_id: binds[15],
+                  is_current: binds[16], candidate_generation: binds[17],
                 };
               }
               return { success: true };
@@ -167,18 +195,22 @@ describe('daily news review contract', () => {
           };
           return stmt;
         },
+        async batch(statements: Array<{ run(): Promise<unknown> }>) {
+          return Promise.all(statements.map((statement) => statement.run()));
+        },
       },
     } as never;
 
     const result = await freezeNewsReviewBatchFromPool(env, '2026-07-30', Date.parse('2026-07-30T00:00:00Z'));
 
     expect(result.created).toBe(true);
-    expect(result.batch.candidate_ids).toEqual(candidates.map((candidate) => candidate.item_id));
+    expect(result.batch.candidate_ids).toEqual(candidates.slice(0, 9).map((candidate) => candidate.item_id));
     expect(result.batch.default_selected_ids).toEqual(candidates.slice(0, 5).map((candidate) => candidate.item_id));
     expect(result.batch.candidates[0]).toMatchObject({
       title: '候选新闻 1', summary: '候选新闻 1 摘要', source: '量子位', score: 100,
     });
     expect(inserted.some((entry) => /INSERT INTO daily_news_review_batches/i.test(entry.sql))).toBe(true);
+    expect(inserted.some((entry) => /UPDATE manual_news_leads SET confirmed_batch_id/i.test(entry.sql))).toBe(false);
   });
 
   test('a new batch compares against the previous production defaults when no human choice exists', async () => {

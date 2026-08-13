@@ -22,19 +22,82 @@ export interface DeepSeekUsage {
   prompt_cache_miss_tokens?: number;     // 没命中 cache 的 input tokens(全价)
 }
 
+export type DeepSeekFinishReason =
+  | 'stop'
+  | 'length'
+  | 'content_filter'
+  | 'tool_calls'
+  | 'insufficient_system_resource'
+  | 'unknown';
+
+export interface DeepSeekSafeDiagnostics {
+  finish_reason: DeepSeekFinishReason;
+  content_chars: number;
+  reasoning_chars: number;
+  usage: DeepSeekUsage;
+}
+
 export interface DeepSeekResult {
   text: string | null;
   usage?: DeepSeekUsage;
-  finish_reason?: string;
+  finish_reason?: DeepSeekFinishReason;
+  diagnostics?: DeepSeekSafeDiagnostics;
   error?: string;
 }
 
 interface DeepSeekResponse {
   choices?: Array<{
-    message?: { content?: string };
-    finish_reason?: string;
+    message?: { content?: unknown; reasoning_content?: unknown };
+    finish_reason?: unknown;
   }>;
-  usage?: DeepSeekUsage;
+  usage?: Record<string, unknown>;
+}
+
+const DEEPSEEK_DIAGNOSTIC_MAX_CHARS = 10_000_000;
+const DEEPSEEK_DIAGNOSTIC_MAX_TOKENS = 100_000_000;
+const DEEPSEEK_FINISH_REASONS = new Set<DeepSeekFinishReason>([
+  'stop', 'length', 'content_filter', 'tool_calls', 'insufficient_system_resource',
+]);
+
+function boundedCount(value: unknown, max: number): number | undefined {
+  return Number.isInteger(value) && Number(value) >= 0 && Number(value) <= max
+    ? Number(value)
+    : undefined;
+}
+
+function safeDeepSeekUsage(raw: unknown): DeepSeekUsage | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const row = raw as Record<string, unknown>;
+  const details = row.completion_tokens_details && typeof row.completion_tokens_details === 'object'
+    && !Array.isArray(row.completion_tokens_details)
+    ? row.completion_tokens_details as Record<string, unknown>
+    : {};
+  const usage: DeepSeekUsage = {};
+  const fields = [
+    'prompt_tokens', 'completion_tokens', 'total_tokens',
+    'prompt_cache_hit_tokens', 'prompt_cache_miss_tokens',
+  ] as const;
+  for (const field of fields) {
+    const value = boundedCount(row[field], DEEPSEEK_DIAGNOSTIC_MAX_TOKENS);
+    if (value !== undefined) usage[field] = value;
+  }
+  const reasoningTokens = boundedCount(
+    row.reasoning_tokens ?? details.reasoning_tokens,
+    DEEPSEEK_DIAGNOSTIC_MAX_TOKENS,
+  );
+  if (reasoningTokens !== undefined) usage.reasoning_tokens = reasoningTokens;
+  return Object.keys(usage).length ? usage : undefined;
+}
+
+function safeFinishReason(value: unknown): DeepSeekFinishReason {
+  return typeof value === 'string' && DEEPSEEK_FINISH_REASONS.has(value as DeepSeekFinishReason)
+    ? value as DeepSeekFinishReason
+    : 'unknown';
+}
+
+function boundedTextCharacters(value: unknown): number {
+  if (typeof value !== 'string') return 0;
+  return Math.min(Array.from(value).length, DEEPSEEK_DIAGNOSTIC_MAX_CHARS);
 }
 
 /**
@@ -88,26 +151,39 @@ export async function callDeepSeek(
       body: JSON.stringify(body),
       signal: controller.signal,
     });
-    clearTimeout(timeoutId);
 
     if (!resp.ok) {
-      const errText = await resp.text();
-      console.error(`[hf-paper-llm] DeepSeek HTTP ${resp.status}: ${errText.slice(0, 300)}`);
+      console.error(`[hf-paper-llm] DeepSeek HTTP ${resp.status}`);
       return { text: null, error: `HTTP ${resp.status}` };
     }
     const data = (await resp.json()) as DeepSeekResponse;
-    const text = data.choices?.[0]?.message?.content?.trim();
-    const finish = data.choices?.[0]?.finish_reason;
+    const choice = data.choices?.[0];
+    const rawContent = typeof choice?.message?.content === 'string'
+      ? choice.message.content
+      : '';
+    const usage = safeDeepSeekUsage(data.usage);
+    const finish = safeFinishReason(choice?.finish_reason);
+    const diagnostics: DeepSeekSafeDiagnostics = {
+      finish_reason: finish,
+      content_chars: boundedTextCharacters(choice?.message?.content),
+      reasoning_chars: boundedTextCharacters(choice?.message?.reasoning_content),
+      usage: usage || {},
+    };
+    const text = rawContent.trim();
     return {
       text: text || null,
-      usage: data.usage,
+      usage,
       finish_reason: finish,
+      diagnostics,
     };
   } catch (e) {
-    clearTimeout(timeoutId);
     const name = e instanceof Error ? e.name : 'unknown';
     console.error(`[hf-paper-llm] call failed: ${name}`);
     return { text: null, error: name };
+  } finally {
+    // Cover fetch plus full success-body consumption. Clearing this after
+    // headers would allow a stalled JSON body to wait forever.
+    clearTimeout(timeoutId);
   }
 }
 
@@ -125,8 +201,14 @@ export async function callDeepSeekJson<T = unknown>(
     timeoutMs?: number;
     retries?: number;        // 默认 1 次(总 2 attempts)
     systemPrompt?: string;
+    requestId?: string;
   } = {},
-): Promise<{ data: T | null; usage?: DeepSeekUsage; error?: string }> {
+): Promise<{
+  data: T | null;
+  usage?: DeepSeekUsage;
+  diagnostics?: DeepSeekSafeDiagnostics;
+  error?: string;
+}> {
   const retries = opts.retries ?? 1;
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (attempt > 0) {
@@ -139,18 +221,43 @@ export async function callDeepSeekJson<T = unknown>(
     });
     if (!result.text) {
       if (attempt < retries) continue;
-      return { data: null, usage: result.usage, error: result.error || 'no_text' };
+      return {
+        data: null,
+        usage: result.usage,
+        diagnostics: result.diagnostics,
+        error: result.error || 'no_text',
+      };
     }
     try {
       const parsed = JSON.parse(result.text) as T;
-      return { data: parsed, usage: result.usage };
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'parse_error';
-      console.warn(`[hf-paper-llm] JSON parse fail attempt ${attempt + 1}: ${msg}`);
+      // A parseable prefix is not necessarily a complete model response.
+      // Trust the provider's terminal reason over JSON.parse so callers never
+      // persist truncated output or output produced during a capacity failure.
+      if (result.diagnostics?.finish_reason === 'length'
+        || result.diagnostics?.finish_reason === 'insufficient_system_resource') {
+        if (attempt < retries) continue;
+        return {
+          data: null,
+          usage: result.usage,
+          diagnostics: result.diagnostics,
+          error: 'no_text',
+        };
+      }
+      return { data: parsed, usage: result.usage, diagnostics: result.diagnostics };
+    } catch {
+      console.warn(`[hf-paper-llm] JSON parse fail attempt ${attempt + 1}`);
       if (attempt < retries) continue;
-      // 把 raw text 前 500 字 log 出来 debug 用
-      console.error(`[hf-paper-llm] raw text(first 500): ${result.text.slice(0, 500)}`);
-      return { data: null, usage: result.usage, error: 'json_parse_fail' };
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(result.text));
+      const hash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+      console.error(
+        `[hf-paper-llm] invalid JSON model=${model} request=${opts.requestId || 'none'} length=${result.text.length} sha256=${hash}`,
+      );
+      return {
+        data: null,
+        usage: result.usage,
+        diagnostics: result.diagnostics,
+        error: 'json_parse_fail',
+      };
     }
   }
   return { data: null, error: 'exhausted_retries' };

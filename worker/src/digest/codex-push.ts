@@ -11,7 +11,11 @@ import { slotKey, bjtDateStr, getBases } from './lib';
 import { renderItem, type RenderRow, type RenderedItem } from './render';
 import { SOURCE_LABELS } from './templates';
 import { pushDeerAlert } from '../notifier';
-import { getAppliedNewsReviewSelection } from './news-review';
+import {
+  getAppliedNewsReviewSelection,
+  getVerifiedNewsReviewSelectionSnapshot,
+  type VerifiedNewsReviewSelectionSnapshot,
+} from './news-review';
 
 const DEFAULT_DAILY_ENDPOINT = 'https://ai-feeds.cc/aifeeds/api/daily/ingest';
 const PUSH_TIMEOUT_MS = 30_000;
@@ -93,16 +97,18 @@ function toCodexItem(r: RenderedItem): CodexItem {
   };
 }
 
-async function fetchRows(env: Env, ids: string[]): Promise<Map<string, RenderRow>> {
+async function fetchRows(env: Env, ids: readonly string[]): Promise<Map<string, RenderRow>> {
   if (!ids.length) return new Map();
   const ph = ids.map(() => '?').join(',');
   const r = await env.DB.prepare(
     `SELECT id, title, content, content_translated, author, handle, url, media, extra
-     FROM items WHERE id IN (${ph})`,
+     FROM items WHERE id IN (${ph}) AND deleted_at IS NULL`,
   )
     .bind(...ids)
     .all<RenderRow>();
-  return new Map((r.results || []).map((row) => [row.id, row]));
+  const rows = new Map((r.results || []).map((row) => [row.id, row]));
+  if (ids.some((id) => !rows.has(id))) throw new Error('missing_or_deleted_items');
+  return rows;
 }
 
 function safeIds(s: string | null): string[] {
@@ -127,6 +133,7 @@ export interface DailyCodexPayload {
       source_order: DigestSource[];
       final_source_order?: DigestSource[];
       source_labels: Record<string, string>;
+      news_review?: VerifiedNewsReviewSelectionSnapshot;
     };
     sections: {
       normal: Array<{ source: DigestSource; source_label: string; count: number; items: CodexItem[] }>;
@@ -343,11 +350,12 @@ async function buildCodexSections(
   env: Env,
   sk: string,
   sources: readonly DigestSource[],
+  reviewedNewsIdsOverride?: readonly string[],
 ): Promise<DailyCodexPayload['digest']['sections']['normal']> {
   const { apiBase } = getBases(env);
   const reviewDate = sk.slice(0, 10);
   const reviewedNewsIds = sources.includes('news')
-    ? await getAppliedNewsReviewSelection(env, reviewDate)
+    ? reviewedNewsIdsOverride || await getAppliedNewsReviewSelection(env, reviewDate)
     : null;
   const sections: DailyCodexPayload['digest']['sections']['normal'] = [];
   let stageCardIndex = 0;
@@ -380,6 +388,29 @@ async function buildCodexSections(
     }
   }
   return sections;
+}
+
+function editorialManualItemIds(digest: DailyCodexPayload['digest']): string[] {
+  return digest.sections.normal
+    .find((section) => section.source === 'news')?.items
+    .map((item) => item.item_id)
+    .filter((id) => id.startsWith('blog:manual:')) || [];
+}
+
+async function assertCurrentEditorialNewsReviewSnapshot(
+  env: Env,
+  date: string,
+  editorialDigest: DailyCodexPayload['digest'],
+): Promise<void> {
+  const locked = editorialDigest.meta.news_review;
+  if (!locked) {
+    if (editorialManualItemIds(editorialDigest).length) throw new Error('manual_news_finalize_snapshot_stale');
+    return;
+  }
+  const current = await getVerifiedNewsReviewSelectionSnapshot(env, date);
+  if (!current || stableJson(current) !== stableJson(locked)) {
+    throw new Error('manual_news_finalize_snapshot_stale');
+  }
 }
 
 interface LockedStageSnapshot {
@@ -468,10 +499,16 @@ export async function buildStagedDailyCodexPayload(
 ): Promise<StagedDailyCodexPayload> {
   const date = opts.date || bjtDateStr();
   const sources = sourcesForStage(stage);
+  const newsReviewSnapshot = stage === 'editorial'
+    ? await getVerifiedNewsReviewSelectionSnapshot(env, date)
+    : null;
   const lockedSnapshots = stage === 'finalize' ? await loadLockedStageSnapshots(env, date) : null;
+  if (lockedSnapshots) {
+    await assertCurrentEditorialNewsReviewSnapshot(env, date, lockedSnapshots.editorial.digest);
+  }
   const sections = lockedSnapshots
     ? combineLockedStageSections(lockedSnapshots)
-    : await buildCodexSections(env, `${date}-08`, sources);
+    : await buildCodexSections(env, `${date}-08`, sources, newsReviewSnapshot?.selected_ids);
   const total = sections.reduce((count, section) => count + section.count, 0);
   if (!total) throw new Error(`empty_stage:${stage}`);
 
@@ -485,6 +522,10 @@ export async function buildStagedDailyCodexPayload(
       source_order: [...sources],
       final_source_order: [...FINAL_SECTION_ORDER],
       source_labels: Object.fromEntries(sources.map((source) => [source, SOURCE_LABELS[source] || source])),
+      ...(stage === 'editorial' && newsReviewSnapshot ? { news_review: newsReviewSnapshot } : {}),
+      ...(lockedSnapshots?.editorial.digest.meta.news_review
+        ? { news_review: lockedSnapshots.editorial.digest.meta.news_review }
+        : {}),
     },
     sections: { normal: sections },
   };
@@ -607,6 +648,18 @@ export async function pushDailyStageToCodex(
   }
 
   const total = payload.digest.sections.normal.reduce((count, section) => count + section.count, 0);
+  if (stage === 'finalize') {
+    try {
+      await assertCurrentEditorialNewsReviewSnapshot(env, payload.date, payload.digest);
+    } catch (error) {
+      const message = String(error).slice(0, 200);
+      await pushDeerAlert(env, '分批日报推 Codex 失败', `${payload.render_key}: ${message}`).catch(() => {});
+      return {
+        ok: false, stage, revision: payload.revision, content_hash: payload.content_hash,
+        render_key: payload.render_key, total_items: total, error: message,
+      };
+    }
+  }
   let response: Response;
   try {
     response = await postDailyPayload(endpoint, env.X_CARD_SHARED_TOKEN, JSON.stringify(payload));

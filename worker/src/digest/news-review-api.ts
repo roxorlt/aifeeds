@@ -6,6 +6,7 @@ import {
   getNewsReviewBatch,
   markNewsReviewPublished,
   newsReviewSecret,
+  sanitizeCurrentNewsReviewBatch,
   submitNewsReviewSelection,
   verifyNewsReviewTokenSignature,
 } from './news-review';
@@ -46,6 +47,21 @@ function reviewLink(date: string, batch: string, token: string): string {
   return url.toString();
 }
 
+function isManualCandidate(candidate: {
+  item_id: string;
+  origin?: string;
+  lead_id?: string;
+}): boolean {
+  return candidate.origin === 'manual_lead'
+    || !!candidate.lead_id
+    || candidate.item_id.startsWith('blog:manual:')
+    || candidate.item_id.startsWith('manual-news:');
+}
+
+function containsManualCandidate(batch: { candidates: Parameters<typeof isManualCandidate>[0][] }): boolean {
+  return batch.candidates.some(isManualCandidate);
+}
+
 export async function handleDailyNewsReviewApi(
   request: Request,
   env: Env,
@@ -63,8 +79,9 @@ export async function handleDailyNewsReviewApi(
     return response({ ok: false, error: 'invalid_review_reference' }, 400);
   }
   if (request.method === 'GET' && !batchId && !token) {
-    const active = await getActiveNewsReviewBatch(env, date);
-    if (!active) return response({ ok: false, error: 'review_batch_not_found' }, 404);
+    const existing = await getActiveNewsReviewBatch(env, date);
+    if (!existing) return response({ ok: false, error: 'review_batch_not_found' }, 404);
+    const active = (await sanitizeCurrentNewsReviewBatch(env, date, now)).batch;
     const activeToken = await createNewsReviewToken(newsReviewSecret(env), date, active.batch_id);
     return response({
       ok: true,
@@ -81,11 +98,31 @@ export async function handleDailyNewsReviewApi(
   }
 
   if (request.method === 'GET') {
-    const [batch, active] = await Promise.all([
-      getNewsReviewBatch(env, date, batchId),
-      getActiveNewsReviewBatch(env, date),
-    ]);
-    if (!batch) return response({ ok: false, error: 'review_batch_not_found' }, 404);
+    const requestedBatch = await getNewsReviewBatch(env, date, batchId);
+    if (!requestedBatch) return response({ ok: false, error: 'review_batch_not_found' }, 404);
+    const sanitized = await sanitizeCurrentNewsReviewBatch(env, date, now);
+    const active = sanitized.batch;
+    const requestedIsActive = requestedBatch.is_current && requestedBatch.lineage_id === date;
+    let batch = requestedIsActive ? active : requestedBatch;
+    if (!requestedIsActive && containsManualCandidate(requestedBatch)) {
+      // Historical revisions remain immutable and read-only. Their old manual
+      // proofs cannot be trusted, so hide those snapshots in the response while
+      // preserving the old revision metadata and its link to the active revision.
+      const hiddenIds = new Set(requestedBatch.candidates
+        .filter(isManualCandidate)
+        .map((candidate) => candidate.item_id));
+      batch = {
+        ...requestedBatch,
+        candidates: requestedBatch.candidates.filter((candidate) => !hiddenIds.has(candidate.item_id)),
+        candidate_ids: requestedBatch.candidate_ids.filter((id) => !hiddenIds.has(id)),
+        default_selected_ids: requestedBatch.default_selected_ids.filter((id) => !hiddenIds.has(id)),
+        applied_selected_ids: requestedBatch.applied_selected_ids?.filter((id) => !hiddenIds.has(id)) ?? null,
+        auto_repaired_invalid_ids: [...new Set([
+          ...(requestedBatch.auto_repaired_invalid_ids || []),
+          ...hiddenIds,
+        ])],
+      };
+    }
     const [publishedSelectedIds, editorialState] = await Promise.all([
       getPublishedNewsReviewSelection(env, date, batch),
       batch.edit_revision > 0 && batch.applied_selected_ids?.length
@@ -103,6 +140,9 @@ export async function handleDailyNewsReviewApi(
       ok: true,
       date,
       batch_id: batch.batch_id,
+      candidate_revision: batch.batch_revision,
+      supersedes_batch_id: batch.supersedes_batch_id,
+      revision_origin: batch.revision_origin,
       candidates: batch.candidates,
       default_selected_ids: batch.default_selected_ids,
       batch_selected_ids: batch.applied_selected_ids || batch.default_selected_ids,
@@ -148,6 +188,17 @@ export async function handleDailyNewsReviewApi(
   if (!submitted.ok) return response(submitted, submitted.status);
   if (!submitted.changed && !submitted.retry_publish) {
     return response({ ok: true, changed: false, regenerated: false, selected_ids: submitted.selected_ids });
+  }
+
+  const prePublish = await sanitizeCurrentNewsReviewBatch(env, date, now);
+  if (prePublish.batch.batch_id !== submitted.batch.batch_id) {
+    const selectedInvalid = submitted.selected_ids.some((id) => prePublish.dropped_ids.includes(id));
+    return response({
+      ok: false,
+      error: selectedInvalid ? 'stale_candidate' : 'review_batch_superseded',
+      batch_id: prePublish.batch.batch_id,
+      candidate_revision: prePublish.batch.batch_revision,
+    }, 409);
   }
 
   const selectionHash = submitted.batch.selection_hash;
