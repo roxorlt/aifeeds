@@ -7,7 +7,7 @@ import {
   buildManualLeadAssessmentRegenerationPrompt,
   buildManualLeadFactVerificationPrompt,
   classifyManualLeadDuplicate,
-  createManualLeadVerificationProof,
+  createManualLeadVerificationProof as createManualLeadVerificationProofWithRawEvidence,
   isCurrentManualLeadVerification,
   MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
   MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
@@ -25,6 +25,17 @@ import {
   type ManualNewsEvidence,
   type ManualNewsProcessedAssessment,
 } from './manual-news-leads';
+import { withSignedArticleTextV2Audit } from './manual-news-signed-evidence.test-fixture';
+
+async function createManualLeadVerificationProof(
+  input: Parameters<typeof createManualLeadVerificationProofWithRawEvidence>[0],
+  secret: string,
+) {
+  for (const evidence of input.evidence) {
+    Object.assign(evidence, withSignedArticleTextV2Audit(evidence));
+  }
+  return createManualLeadVerificationProofWithRawEvidence(input, secret);
+}
 
 const officialAnthropic: ManualNewsEvidence = {
   id: 'ev-official',
@@ -989,7 +1000,7 @@ describe('manual news lead domain', () => {
     'Alibaba said its Claude Code restriction covers only contractors.',
     '阿里巴巴表示Claude Code限制仅适用于承包商。',
     '阿里巴巴表示Claude Code限制仅限于承包商。',
-  ])('does not let a support title mint a current v9 proof over a different participant scope: %s', async (scopeClause) => {
+  ])('does not let a support title mint a current v10 proof over a different participant scope: %s', async (scopeClause) => {
     await expect(createTitleOnlyScopeProof(scopeClause))
       .rejects.toThrow(/evidence_disposition|verification_semantics/);
   });
@@ -1008,7 +1019,7 @@ describe('manual news lead domain', () => {
     '阿里巴巴表示Claude Code限制仅适用于中国员工。',
     '阿里巴巴表示Claude Code限制仅适用于全职员工。',
     '阿里巴巴表示Claude Code限制仅适用于部分员工。',
-  ])('blocks a current v9 proof when the same participant has an additional scope qualifier: %s', async (scopeClause) => {
+  ])('blocks a current v10 proof when the same participant has an additional scope qualifier: %s', async (scopeClause) => {
     await expect(createTitleOnlyScopeProof(scopeClause))
       .rejects.toThrow(/evidence_disposition|verification_semantics/);
   });
@@ -1092,7 +1103,7 @@ describe('manual news lead domain', () => {
       projectionObject: '全职员工使用Claude Code',
       scopeClause: 'Alibaba said its Claude Code restriction applies only to full-time employees.',
     },
-  ])('keeps a current v9 proof when the core fact has the same participant qualifier: $sourceObject', async (fixture) => {
+  ])('keeps a current v10 proof when the core fact has the same participant qualifier: $sourceObject', async (fixture) => {
     await expect(createTitleOnlyScopeProof(fixture.scopeClause, fixture)).resolves.toBe(true);
   });
 
@@ -1180,7 +1191,7 @@ describe('manual news lead domain', () => {
     'Alibaba reportedly bans employees from using Claude Code，尽管阿里巴巴否认相关报道。',
     'Alibaba reportedly bans employees from using Claude Code，虽然阿里巴巴否认相关报道。',
     'Alibaba reportedly bans employees from using Claude Code，以及客服仍可用。',
-  ])('blocks an additive or concessive support unit before a malicious verifier can mint a current v9 proof: %s', async (quote) => {
+  ])('blocks an additive or concessive support unit before a malicious verifier can mint a current v10 proof: %s', async (quote) => {
     await expect(createMaliciouslySupportedGeneratedProjectionProof(
       alibabaBanGeneratedAssessment(),
       quote,
@@ -2575,7 +2586,7 @@ describe('manual news lead domain', () => {
     [{ predicate: '据称禁止', object: '员工稍后使用Claude Code' }, { object: 'employees from using Claude Code later' }, 'Alibaba reportedly bans employees from using Claude Code later.'],
     [{ predicate: '据称禁止', object: '员工周一使用Claude Code' }, { object: 'employees from using Claude Code on Monday' }, 'Alibaba reportedly bans employees from using Claude Code on Monday.'],
     [{ predicate: '据称禁止', object: '员工下午5点使用Claude Code' }, { object: 'employees from using Claude Code at 5 pm' }, 'Alibaba reportedly bans employees from using Claude Code at 5 pm.'],
-  ])('creates a current v8 proof for an exactly equivalent bilingual semantic projection: %#', async (
+  ])('creates a current v10 proof for an exactly equivalent bilingual semantic projection: %#', async (
     projection,
     source,
     quote,

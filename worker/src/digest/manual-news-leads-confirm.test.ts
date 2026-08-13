@@ -30,6 +30,10 @@ vi.mock('./news-review', () => ({
 
 import { confirmManualNewsLeadCandidate } from './manual-news-leads-store';
 import {
+  proofForLegacyPolicy,
+  withSignedArticleTextV2Audit,
+} from './manual-news-signed-evidence.test-fixture';
+import {
   applyManualLeadEvidencePolicy,
   buildManualLeadFactVerificationPrompt,
   createManualLeadVerificationProof,
@@ -82,24 +86,30 @@ async function fakeConfirmationEnv() {
     last_mutation_kind: null, last_mutation_idempotency_key: null, last_mutation_nonce: null,
     confirmed_batch_id: null, confirmed_at: null, created_at: 1, updated_at: 1,
   };
-  const evidence = {
-    evidence_id: 'ev-1', url: row.input_url, source_type: 'official_help', publisher: 'Anthropic',
-    published_at: null, retrieved_at: 2, title: 'Documentation',
-    excerpt: supportedFact,
-    claims_supported_json: JSON.stringify([supportedFact]), reliable: 1,
-  };
-  const evidenceForMarker = {
-    id: evidence.evidence_id,
-    url: evidence.url,
+  const evidenceForMarker = withSignedArticleTextV2Audit({
+    id: 'ev-1',
+    url: row.input_url,
     source_type: 'official_help' as const,
-    publisher: evidence.publisher,
-    published_at: evidence.published_at,
-    retrieved_at: evidence.retrieved_at,
-    title: evidence.title,
-    excerpt: evidence.excerpt,
+    publisher: 'Anthropic',
+    published_at: null,
+    retrieved_at: 2,
+    title: 'Documentation',
+    excerpt: supportedFact,
     claims_supported: [supportedFact],
     reliable: true,
-    fetch_audit: null,
+  });
+  const evidence = {
+    evidence_id: evidenceForMarker.id,
+    url: evidenceForMarker.url,
+    source_type: evidenceForMarker.source_type,
+    publisher: evidenceForMarker.publisher,
+    published_at: evidenceForMarker.published_at,
+    retrieved_at: evidenceForMarker.retrieved_at,
+    title: evidenceForMarker.title,
+    excerpt: evidenceForMarker.excerpt,
+    claims_supported_json: JSON.stringify(evidenceForMarker.claims_supported),
+    fetch_audit_json: JSON.stringify(evidenceForMarker.fetch_audit),
+    reliable: 1,
   };
   const core = validateManualLeadGeneratedAssessment(rawAssessment, [evidenceForMarker]);
   const processedCore = applyManualLeadEvidencePolicy(core, [evidenceForMarker]);
@@ -351,6 +361,40 @@ describe('manual lead candidate confirmation', () => {
 
     const result = await confirmManualNewsLeadCandidate(
       memory.env, memory.row.id, 7, 1, `confirm-${_label}`, 100,
+    );
+
+    expect(result).toMatchObject({ ok: false, status: 409, error: 'lead_not_fact_verified' });
+    expect(insertedBatch).toBeNull();
+    expect(memory.row.confirmed_at).toBeNull();
+  });
+
+  test('rejects an active v9 proof before confirmation mutates the candidate pool', async () => {
+    const memory = await fakeConfirmationEnv();
+    Object.assign(memory.verification, proofForLegacyPolicy(
+      {
+        policy_version: String(memory.verification.policy_version),
+        canonical_digest: String(memory.verification.canonical_digest),
+        hmac_sha256: String(memory.verification.hmac_sha256),
+      },
+      { lead_id: memory.row.id, assessment_version: memory.verification.assessment_version },
+      'a'.repeat(64),
+    ));
+
+    const result = await confirmManualNewsLeadCandidate(
+      memory.env, memory.row.id, 7, 1, 'confirm-v9-proof', 100,
+    );
+
+    expect(result).toMatchObject({ ok: false, status: 409, error: 'lead_not_fact_verified' });
+    expect(insertedBatch).toBeNull();
+    expect(memory.row.confirmed_at).toBeNull();
+  });
+
+  test('rejects a v10 proof whose persisted evidence has become unsigned before confirmation', async () => {
+    const memory = await fakeConfirmationEnv();
+    memory.evidence.fetch_audit_json = 'null';
+
+    const result = await confirmManualNewsLeadCandidate(
+      memory.env, memory.row.id, 7, 1, 'confirm-unsigned-v10-proof', 100,
     );
 
     expect(result).toMatchObject({ ok: false, status: 409, error: 'lead_not_fact_verified' });

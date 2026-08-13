@@ -22,9 +22,11 @@
 useDefault = true
 
 [allowlist]
-description = "历史 CF Web Analytics site_tag（commit 4ef9f890，已从 working tree 移除、CF 后台已删）+ seo 路由测试占位 key abc123def456，均非真实密钥。"
+description = "历史 CF Web Analytics site_tag（commit 4ef9f890，已从 working tree 移除、CF 后台已删）+ 精确测试 fixture 值，均非真实密钥。"
 regexes = [
   '''857fab927a70440bb19c685c8f85094f''',
   '''9e6f987fd43d45d8ae74c134ad8a0e4e''',
   '''abc123def456''',
+  '''anthropic-c2pa-provenance-2026-08-11''',
+  '''regulator-safety-pilot-2026-08-11''',
 ]

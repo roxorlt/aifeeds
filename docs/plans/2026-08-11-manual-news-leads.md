@@ -21,11 +21,11 @@
 
 - Mutating API 同时要求 Bearer secret、`Idempotency-Key` 与 `expected_version`；D1 条件更新负责并发冲突检测。
 - 只允许 HTTP(S) 标准端口、无 URL credentials；Worker 的唯一网络 peer 是 `MANUAL_NEWS_RESEARCH_ORIGIN` 指定的固定 HTTPS origin。网关逐跳返回 target URL、DNS 验证 IP 和实际连接 IP；Worker 要求两 IP 相同且均为公网，否则在读取正文前失败关闭。最多 3 跳，读取正文期间继续执行 12 秒 deadline，并以流式方式执行 2 MiB 增量上限。
-- PDF 二进制绝不在 Worker 中按 UTF-8/HTML 处理；网关必须返回 `source_content_type=application/pdf`、`extraction=pdf_text` 的有界纯文本和同一套 peer audit，否则拒绝。Worker 请求原始源 8 MiB、提取文本 2 MiB / 100 万字符上限；网关必须证明 requested/applied limits、原始/提取实际字节数、提取字符数、源/文本截断状态以及 parser result/version。截断、parser 失败、audit 与响应正文尺寸不一致或任一 actual 超过 applied limit 时全部失败关闭。
+- 正式证据统一使用 signed `article_text_v2` envelope。请求携带 `extraction_mode=article_text_v2`、随机 nonce、canonical request timestamp、limits 与 max redirects；响应 audit 必须完整包含相同 nonce/timestamp、canonical extracted timestamp、逐跳 peer、final URL、source/extraction、requested/applied/actual limits、无截断标记、成功 parser、body SHA-256、`protocol_version=article_text_v2`，以及用环境独立 response secret 对除 `response_hmac` 外完整 canonical audit 计算的 HMAC。HTML/XHTML 只接受 Chromium 提取的完整单一 `article_text` 及一致的 title/published_at/selection/content_complete metadata，CF 不重解释 raw HTML；text/plain、JSON、PDF 分别保留 `text`、`json`、`pdf_text` 语义，但也必须位于同一 v2 envelope。PDF bytes 绝不在 Worker 中按 UTF-8/HTML 处理。
 - 来源权威等级只由最终抓取 URL 的精确 registrable-domain allowlist 决定；用户和搜索 hint 不能指定 `source_type`、`reliable` 或官方身份。
 - 模型额外字段、缺字段、非法枚举、未知 evidence ID 均失败关闭；不确定范围/时间必须显式输出。
 - 结构化高置信 anchor 在模型调用前执行精确 token-set 门控；URL 和 note 不参与，`o3` 不匹配 `o3-mini`，`GPT-5.6` 不匹配 preview/5.60，并保守支持 `Claude 5` 这类实体+独立版本组合。纯中文且无结构 anchor 的线索交给双模型与 quote gate，不做伪中文分词。
-- 完整核验结果不写回 assessment JSON 自证。第一阶段把源语言、可逐字核验的 `source_atomic_facts_v2` 原子事实（稳定 fact ID）与逐句 fact-ID 映射的 `zh_editorial_projection_v2` 中文编辑投影分开持久化；summary 必须与源事实等长、同序且一一映射。程序本地从两侧四槽事实确定性派生正交的来源归因、认识可能性、计划/未来、进行/完成与 polarity，以及参与者/数量范围、对象关系与否定、与具体目标产品绑定的后缀、实体、地区、原因、版本和绝对/相对时间槽；`consumed-semantic-spans-v1` 要求 predicate/object 中的每段实义内容都被主动作、助动词或已签名槽位消费，未知情态/时长/条件/范围以及未绑定产品的 qualifier 失败关闭。第二阶段先核验源事实连续原文，再独立核验中文投影无增删改事实槽位。migration 034 的独立 verification 行持久化严格验证后的 `verification_json`，并使用 `MANUAL_NEWS_VERIFICATION_SECRET` 对 lead ID、assessment version、完整最终 assessment、派生双语语义合同、完整 evidence（含 `fetch_audit`）及完整 verification JSON 的规范摘要做 HMAC-SHA256。当前 policy 为 `fact-evidence-projection-hmac-v8`；旧 policy、缺少当前语义摘要的旧双语合同或旧 proof 一律 fail closed，须 retry 重生。lead API、重放、确认、候选组装与跨日去重只信当前 active 且 schema/quote/digest/HMAC 全部复算一致的记录；033 遗留且无 verification 的 assessment 默认隐藏。
+- 完整核验结果不写回 assessment JSON 自证。第一阶段把源语言、可逐字核验的 `source_atomic_facts_v2` 原子事实（稳定 fact ID）与逐句 fact-ID 映射的 `zh_editorial_projection_v2` 中文编辑投影分开持久化；summary 必须与源事实等长、同序且一一映射。程序本地从两侧四槽事实确定性派生正交的来源归因、认识可能性、计划/未来、进行/完成与 polarity，以及参与者/数量范围、对象关系与否定、与具体目标产品绑定的后缀、实体、地区、原因、版本和绝对/相对时间槽；`consumed-semantic-spans-v1` 要求 predicate/object 中的每段实义内容都被主动作、助动词或已签名槽位消费，未知情态/时长/条件/范围以及未绑定产品的 qualifier 失败关闭。第二阶段先核验源事实连续原文，再独立核验中文投影无增删改事实槽位。migration 034 的独立 verification 行持久化严格验证后的 `verification_json`，并使用 `MANUAL_NEWS_VERIFICATION_SECRET` 对 lead ID、assessment version、完整最终 assessment、派生双语语义合同、完整 evidence、规范化 signed-v2 provenance 及完整 verification JSON 的规范摘要做 HMAC-SHA256。当前 policy 为 `fact-evidence-projection-hmac-v10`；v9、旧 policy、legacy/v1/unsigned/malformed evidence 或旧 proof 一律经 invalid-proof 路径隐藏/隔离，须显式 retry/re-evidence，绝不原地升级。create、isCurrent、持久化 load、confirm、candidate rebuild、freeze/finalize 与跨日 prior-event load 统一复算同一条件；持久化检查不使用当前墙钟重新淘汰历史采集时间。
 - evidence、assessment、verification 的写入/失效全部绑定 lead version、processing owner、`processing_attempt` fencing token 和状态。接管后即使 owner 相同，旧 attempt 对 `replaceEvidence`、`saveVerifiedAssessment`、`invalidateAssessment` 和状态转换均为零写入；失效只保留带 owner/attempt/version/digest/nonce 的审计并把 verification 标记为 invalidated，不物理删除历史 assessment。
 - 候选批次最多 10 条，确认操作保留当前 production selection，`rerender_enqueued` 固定为 `false`。
 - `daily_news_review_candidate_generations` 按日期/lineage 懒初始化为 0；历史日期及既有 batch 的 `candidate_generation` 默认 0。它只在成功的 pre-freeze confirmation 中单调递增，同幂等键重放不重复递增；active revision 仍沿用原 batch revision CAS。
@@ -33,17 +33,16 @@
 
 ## 发布与验收
 
-1. staging 按顺序执行 migration 033、034；不得修改或重跑已执行的 033。034 只新增 `manual_news_assessment_verifications` 表和索引。
-2. 配置 staging `MANUAL_NEWS_RESEARCH_ORIGIN`、secret `MANUAL_NEWS_RESEARCH_TOKEN`、与 HK `AIFEEDS_MANUAL_NEWS_RESPONSE_SECRET` 匹配的独立 32-byte lowercase-hex secret `MANUAL_NEWS_RESEARCH_RESPONSE_SECRET`，以及每环境独立、恰好 64 个小写十六进制字符的 secret `MANUAL_NEWS_VERIFICATION_SECRET`；研究网关必须实现 `/v1/search` 和 signed `article_text_v2` `/v1/document` 契约及连接 peer pinning。
-3. 部署 staging Worker，确认 `MANUAL_NEWS_LEAD_WORKFLOW` binding、研究网关失败关闭和 API 鉴权。
-4. 部署 staging HK，验证文字-only、URL-only、状态轮询、失败重试、确认候选、V1→V2，以及原 1–5 条排序/重生成回归。
-5. 验证确认前后 Top 5 与渲染任务均无自动变化。
-6. production 按相同顺序迁移与部署，完成两条示例线索的证据范围人工验收。
+1. 先把 HK feature 合入 HK 主线；安装 dedicated Chromium account/sandbox/resource gate、研究网关与 `AIFEEDS_MANUAL_NEWS_RESPONSE_SECRET`，完成真实 offline Chromium sandbox smoke。
+2. 在 HK 完成 authenticated gateway/secret 及 legacy、v1、v2、tamper、stale、private-target smoke；任何 skip 或环境缺口都不得视为通过。此门禁通过前不得部署 CF consumer。
+3. 再配置 CF staging 的 `MANUAL_NEWS_RESEARCH_ORIGIN`、`MANUAL_NEWS_RESEARCH_TOKEN`、与 HK response secret 匹配的 `MANUAL_NEWS_RESEARCH_RESPONSE_SECRET`、`MANUAL_NEWS_VERIFICATION_SECRET` 和 Workflow binding；按序确认既有 migration 033、034 后部署 Worker/Workflow。
+4. 在 CF staging 验证文字-only、URL-only、状态轮询、失败重试、v9/unsigned proof 隐藏与隔离、确认候选、freeze/finalize 以及原 1–5 条排序/重生成回归；确认 Top 5 与渲染任务无自动变化。
+5. staging 全部通过后才进入 CF production，按同一 secret/binding/migration inventory 部署并完成两条示例线索的证据范围人工验收。禁止 consumer-first 发布。
 
 新线索正常成本是两次 DeepSeek V4 Pro 调用。同一次 Workflow 的状态转换重放若 active verification 的 policy、完整 digest 与 HMAC 都仍有效，则复用 assessment，模型调用为 0；运营侧显式 retry 在同一 D1 batch 中先审计并失效旧 active verification，确保下一轮重新检索和生成。旧记录、证据变化或无效凭证也会先失效再生成。第一次模型调用后、verification 原子持久化前发生瞬时失败时，Workflow 保持 at-least-once，下一次会重新执行两次模型调用，不在代码中伪造恢复结果。
 
 ## 研究网关契约
 
 - `/v1/search` 返回严格 `{results:[{url,title,snippet,published_at}]}`，最多 8 条；搜索摘要只用于发现 URL，所有候选 URL 仍须经过 `/v1/document` 重新取证。
-- `/v1/document` 请求体为 `{url,limits:{source_bytes,extracted_text_bytes,extracted_text_characters},max_redirects}`；只返回 UTF-8 文本，并通过 `X-AIFeeds-Fetch-Audit` 提供严格对象：`hops`（逐跳 URL、DNS 验证 IP、实际连接 IP）、`source_content_type`、`extraction`、`requested_limits`、`applied_limits`、`actual_sizes`、`truncation:{source,extracted_text}`、`parser:{result,version}`。`requested_limits` 必须与 Worker 请求一致，applied 不得放宽 requested，actual 不得超过 applied；成功证据禁止任何截断且 parser result 必须为 `success`。HTML 可返回原文，PDF 必须由生产级 parser 转换成 `pdf_text`，不能把 PDF bytes 当文本返回。
+- `/v1/document` 请求体为 `{url,extraction_mode:'article_text_v2',request_nonce,request_timestamp,limits:{source_bytes,extracted_text_bytes,extracted_text_characters},max_redirects}`；只返回 UTF-8 提取文本，并通过 `X-AIFeeds-Fetch-Audit` 提供上述严格 signed v2 audit。`requested_limits` 必须与 Worker 请求一致，applied 不得放宽 requested，actual 不得超过 applied；成功证据禁止任何截断且 parser result 必须为 `success`。HTML/XHTML 不得返回 raw HTML，PDF 必须由生产级 parser 转换成 `pdf_text`。
 - origin 未配置、token 缺失、schema 不合法、审计缺失、peer 不一致、正文超时或超限时，线索进入失败/待复核状态，绝不能把仅有 D1 或搜索摘要伪装成已完成开放网络研究。

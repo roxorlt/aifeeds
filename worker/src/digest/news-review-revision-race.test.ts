@@ -24,6 +24,10 @@ import {
   submitNewsReviewSelection,
   type NewsReviewCandidate,
 } from './news-review';
+import {
+  proofForLegacyPolicy,
+  withSignedArticleTextV2Audit,
+} from './manual-news-signed-evidence.test-fixture';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const migrations = path.resolve(here, '../../migrations');
@@ -167,7 +171,7 @@ async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Pro
     },
     matched_event_key: null,
   };
-  const evidence = {
+  const evidence = withSignedArticleTextV2Audit({
     id: `ev-${id}`,
     url: `https://www.anthropic.com/news/${id}`,
     source_type: 'official_primary' as const,
@@ -178,8 +182,7 @@ async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Pro
     excerpt: supportingText,
     claims_supported: [supportingText],
     reliable: true,
-    fetch_audit: null,
-  };
+  });
   const core = validateManualLeadGeneratedAssessment(rawAssessment, [evidence]);
   const processed = applyManualLeadEvidencePolicy(core, [evidence]);
   const assessment = {
@@ -232,8 +235,9 @@ async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Pro
     lead_id, evidence_id, url, source_type, publisher, published_at, retrieved_at,
     title, excerpt, claims_supported_json, reliable, fetch_audit_json
   ) VALUES (?, ?, ?, 'official_primary', 'anthropic.com', '2026-08-11', 1,
-    'Official product release documentation', ?, ?, 1, 'null')`).run(
-    id, `ev-${id}`, `https://www.anthropic.com/news/${id}`, supportingText, JSON.stringify([supportingText]),
+    'Official product release documentation', ?, ?, 1, ?)`).run(
+    id, `ev-${id}`, `https://www.anthropic.com/news/${id}`, supportingText,
+    JSON.stringify([supportingText]), JSON.stringify(evidence.fetch_audit),
   );
   db.sqlite.prepare(`INSERT INTO manual_news_event_assessments (
     lead_id, assessment_version, event_key, event_type, material_update, score,
@@ -249,6 +253,25 @@ async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Pro
     `mav-${id}`, id, proof.policy_version, proof.canonical_digest, proof.hmac_sha256,
     JSON.stringify(verification), `verification-create-${id}`,
   );
+}
+
+function downgradeActiveProofToV9(db: SerialSqliteD1, leadId: string): void {
+  const proof = db.sqlite.prepare(`SELECT policy_version, canonical_digest, hmac_sha256, assessment_version
+    FROM manual_news_assessment_verifications WHERE lead_id = ? AND status = 'active'`)
+    .get(leadId) as any;
+  const legacy = proofForLegacyPolicy(
+    proof,
+    { lead_id: leadId, assessment_version: proof.assessment_version },
+    'b'.repeat(64),
+  );
+  db.sqlite.prepare(`UPDATE manual_news_assessment_verifications
+    SET policy_version = ?, hmac_sha256 = ? WHERE lead_id = ? AND status = 'active'`)
+    .run(legacy.policy_version, legacy.hmac_sha256, leadId);
+}
+
+function stripActiveEvidenceProvenance(db: SerialSqliteD1, leadId: string): void {
+  db.sqlite.prepare(`UPDATE manual_news_evidence SET fetch_audit_json = 'null' WHERE lead_id = ?`)
+    .run(leadId);
 }
 
 function activeCount(db: SerialSqliteD1): number {
@@ -306,6 +329,96 @@ describe('news review revision CAS', () => {
     const replay = await sanitizeCurrentNewsReviewBatch(current.env, '2026-08-11', 130);
     expect(replay).toMatchObject({ changed: false, dropped_ids: [] });
     expect(replay.batch.batch_id).toBe(sanitized.batch.batch_id);
+  });
+
+  test('candidate reconstruction drops an otherwise active v9 manual proof', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-v9candidate01';
+    await insertLead(current.db, leadId, 'anthropic-claude-5-release-2026-08-11');
+    const frozen = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('v9-candidate'),
+      candidates('v9-candidate').map((item) => item.item_id), 100,
+    );
+    await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, frozen.batch.batch_revision, 'confirm-v9-candidate', 110,
+    );
+    downgradeActiveProofToV9(current.db, leadId);
+
+    const sanitized = await sanitizeCurrentNewsReviewBatch(current.env, '2026-08-11', 120);
+
+    expect(sanitized.dropped_ids).toContain(`blog:manual:${leadId}`);
+    expect(sanitized.batch.candidates.some((candidate) => candidate.lead_id === leadId)).toBe(false);
+  });
+
+  test('candidate reconstruction drops a v10 manual proof over unsigned persisted evidence', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-unsignedcand1';
+    await insertLead(current.db, leadId, 'anthropic-claude-5-release-2026-08-11');
+    const frozen = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('unsigned-candidate'),
+      candidates('unsigned-candidate').map((item) => item.item_id), 100,
+    );
+    await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, frozen.batch.batch_revision, 'confirm-unsigned-candidate', 110,
+    );
+    stripActiveEvidenceProvenance(current.db, leadId);
+
+    const sanitized = await sanitizeCurrentNewsReviewBatch(current.env, '2026-08-11', 120);
+
+    expect(sanitized.dropped_ids).toContain(`blog:manual:${leadId}`);
+    expect(sanitized.batch.candidates.some((candidate) => candidate.lead_id === leadId)).toBe(false);
+  });
+
+  test('finalize snapshot excludes a selected manual item after its proof is downgraded to v9', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-v9finalize01';
+    const scheduled = candidates('v9-finalize');
+    const itemInsert = current.db.sqlite.prepare('INSERT INTO items (id, deleted_at) VALUES (?, NULL)');
+    for (const candidate of scheduled) itemInsert.run(candidate.item_id);
+    await insertLead(current.db, leadId, 'anthropic-claude-5-release-2026-08-11');
+    const frozen = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', scheduled, scheduled.map((item) => item.item_id), 100,
+    );
+    await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, frozen.batch.batch_revision, 'confirm-v9-finalize', 110,
+    );
+    const active = await getActiveNewsReviewBatch(current.env, '2026-08-11');
+    const token = await createNewsReviewToken('test-secret', '2026-08-11', active!.batch_id);
+    const selectedIds = [`blog:manual:${leadId}`, ...scheduled.slice(0, 4).map((item) => item.item_id)];
+    await submitNewsReviewSelection(current.env, {
+      date: '2026-08-11', batch_id: active!.batch_id, token, selected_ids: selectedIds,
+    }, 115);
+    downgradeActiveProofToV9(current.db, leadId);
+
+    const snapshot = await getVerifiedNewsReviewSelectionSnapshot(current.env, '2026-08-11', 120);
+    expect(snapshot?.selected_ids).not.toContain(`blog:manual:${leadId}`);
+    expect(snapshot?.manual_verifications).toEqual([]);
+  });
+
+  test('finalize snapshot excludes a selected v10 manual item after provenance becomes unsigned', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-unsignedfinal';
+    const scheduled = candidates('unsigned-finalize');
+    const itemInsert = current.db.sqlite.prepare('INSERT INTO items (id, deleted_at) VALUES (?, NULL)');
+    for (const candidate of scheduled) itemInsert.run(candidate.item_id);
+    await insertLead(current.db, leadId, 'anthropic-claude-5-release-2026-08-11');
+    const frozen = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', scheduled, scheduled.map((item) => item.item_id), 100,
+    );
+    await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, frozen.batch.batch_revision, 'confirm-unsigned-finalize', 110,
+    );
+    const active = await getActiveNewsReviewBatch(current.env, '2026-08-11');
+    const token = await createNewsReviewToken('test-secret', '2026-08-11', active!.batch_id);
+    const selectedIds = [`blog:manual:${leadId}`, ...scheduled.slice(0, 4).map((item) => item.item_id)];
+    await submitNewsReviewSelection(current.env, {
+      date: '2026-08-11', batch_id: active!.batch_id, token, selected_ids: selectedIds,
+    }, 115);
+    stripActiveEvidenceProvenance(current.db, leadId);
+
+    const snapshot = await getVerifiedNewsReviewSelectionSnapshot(current.env, '2026-08-11', 120);
+    expect(snapshot?.selected_ids).not.toContain(`blog:manual:${leadId}`);
+    expect(snapshot?.manual_verifications).toEqual([]);
   });
 
   test('rejects selection of a just-invalidated manual candidate as stale without publishing', async () => {
@@ -814,6 +927,48 @@ describe('news review revision CAS', () => {
 
     expect(refreshed.batch.candidates.some((candidate) => candidate.lead_id === leadId)).toBe(false);
     expect(refreshed.batch.candidates.every((candidate) => candidate.origin !== 'manual_lead')).toBe(true);
+  });
+
+  test('scheduled freeze drops a manual candidate backed only by an active v9 proof', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-v9freeze0001';
+    await insertLead(current.db, leadId, 'anthropic-claude-5-release-2026-08-11');
+    await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('v9-freeze-v1'),
+      candidates('v9-freeze-v1').map((item) => item.item_id), 100,
+    );
+    await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, 1, 'confirm-v9-freeze', 110,
+    );
+    downgradeActiveProofToV9(current.db, leadId);
+
+    const refreshed = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('v9-freeze-v2'),
+      candidates('v9-freeze-v2').map((item) => item.item_id), 120,
+    );
+
+    expect(refreshed.batch.candidates.some((candidate) => candidate.lead_id === leadId)).toBe(false);
+  });
+
+  test('scheduled freeze drops a v10 manual candidate whose persisted evidence is unsigned', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-unsignedfreeze';
+    await insertLead(current.db, leadId, 'anthropic-claude-5-release-2026-08-11');
+    await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('unsigned-freeze-v1'),
+      candidates('unsigned-freeze-v1').map((item) => item.item_id), 100,
+    );
+    await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, 1, 'confirm-unsigned-freeze', 110,
+    );
+    stripActiveEvidenceProvenance(current.db, leadId);
+
+    const refreshed = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('unsigned-freeze-v2'),
+      candidates('unsigned-freeze-v2').map((item) => item.item_id), 120,
+    );
+
+    expect(refreshed.batch.candidates.some((candidate) => candidate.lead_id === leadId)).toBe(false);
   });
 
   test('scheduled freeze cannot preserve a manual-looking snapshot without a verified durable lead', async () => {

@@ -29,6 +29,10 @@ import {
   submitManualNewsLead,
 } from './manual-news-leads-store';
 import { ManualNewsProviderError } from './manual-news-provider';
+import {
+  proofForLegacyPolicy,
+  withSignedArticleTextV2Audit,
+} from './manual-news-signed-evidence.test-fixture';
 
 class SqliteD1 {
   readonly sqlite = new DatabaseSync(':memory:');
@@ -224,6 +228,7 @@ function fixture(status = 'verifying', version = 4, processingOwner: string | nu
   const db = new SqliteD1();
   databases.push(db);
   const leadId = 'ml-20260811-abc123def456';
+  const signedEvidence = fixtureEvidence()[0];
   db.sqlite.prepare(`INSERT INTO manual_news_leads (
     id, review_date, input_type, input_text, input_url, note, status, version,
     submit_idempotency_key, processing_owner, processing_attempt, created_at, updated_at
@@ -232,11 +237,13 @@ function fixture(status = 'verifying', version = 4, processingOwner: string | nu
   );
   db.sqlite.prepare(`INSERT INTO manual_news_evidence (
     lead_id, evidence_id, url, source_type, publisher, published_at, retrieved_at,
-    title, excerpt, claims_supported_json, reliable
+    title, excerpt, claims_supported_json, fetch_audit_json, reliable
   ) VALUES (?, 'ev-official', 'https://support.claude.com/example', 'official_help', 'claude.com',
     '2026-08-10T13:30:00.000Z', 2, 'Official help',
     'Anthropic documented Claude provenance for supported products on 2026-08-10.',
-    '["Anthropic documented Claude provenance for supported products on 2026-08-10."]', 1)`).run(leadId);
+    '["Anthropic documented Claude provenance for supported products on 2026-08-10."]', ?, 1)`).run(
+    leadId, JSON.stringify(signedEvidence.fetch_audit),
+  );
   return {
     db,
     env: { DB: db as unknown as D1Database, MANUAL_NEWS_VERIFICATION_SECRET: VERIFICATION_SECRET } as Env,
@@ -309,13 +316,7 @@ function generatedAssessment(overrides: Record<string, unknown> = {}) {
 }
 
 function processedAssessment() {
-  const evidence = [{
-    id: 'ev-official', url: 'https://support.claude.com/example', source_type: 'official_help' as const,
-    publisher: 'claude.com', published_at: '2026-08-10T13:30:00.000Z', retrieved_at: 2,
-    title: 'Official help', excerpt: fixtureFact,
-    claims_supported: [fixtureFact],
-    reliable: true, fetch_audit: null,
-  }];
+  const evidence = fixtureEvidence();
   return {
     ...applyManualLeadEvidencePolicy(validateManualLeadGeneratedAssessment(generatedAssessment(), evidence), evidence),
     duplicate_scope: null, matched_lead_id: null,
@@ -323,17 +324,17 @@ function processedAssessment() {
 }
 
 function fixtureEvidence(): ManualNewsEvidence[] {
-  return [{
+  return [withSignedArticleTextV2Audit({
     id: 'ev-official', url: 'https://support.claude.com/example', source_type: 'official_help',
     publisher: 'claude.com', published_at: '2026-08-10T13:30:00.000Z', retrieved_at: 2,
     title: 'Official help', excerpt: fixtureFact,
     claims_supported: [fixtureFact],
-    reliable: true, fetch_audit: null,
-  }];
+    reliable: true,
+  })];
 }
 
 function replacementEvidence(count: number): ManualNewsEvidence[] {
-  return Array.from({ length: count }, (_, index) => ({
+  return Array.from({ length: count }, (_, index) => withSignedArticleTextV2Audit({
     ...fixtureEvidence()[0],
     id: `ev-replacement-${index + 1}`,
     url: `https://support.claude.com/replacement-${index + 1}`,
@@ -1229,6 +1230,47 @@ describe('manual lead D1-backed dedupe', () => {
       WHERE lead_id = ? AND action = 'verification_quarantine'`).get(state.leadId)).toEqual({ count: 1 });
   });
 
+  test('quarantines a persisted active v9 proof instead of upgrading it in place', async () => {
+    const state = fixture('verifying', 9);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    await saveFixtureAssessment(store, state.leadId, 9);
+    const proof = state.db.sqlite.prepare(`SELECT policy_version, canonical_digest, hmac_sha256
+      FROM manual_news_assessment_verifications WHERE lead_id = ? AND status = 'active'`)
+      .get(state.leadId) as any;
+    const legacy = proofForLegacyPolicy(
+      proof,
+      { lead_id: state.leadId, assessment_version: 9_000_001 },
+      VERIFICATION_SECRET,
+    );
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications
+      SET policy_version = ?, hmac_sha256 = ? WHERE lead_id = ? AND status = 'active'`)
+      .run(legacy.policy_version, legacy.hmac_sha256, state.leadId);
+
+    expect((await store.getLead(state.leadId))?.assessment).toBeNull();
+    expect(state.db.sqlite.prepare(`SELECT policy_version, status, reason
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId)).toEqual({
+      policy_version: 'fact-evidence-projection-hmac-v9',
+      status: 'invalidated',
+      reason: 'verification_integrity_invalid',
+    });
+  });
+
+  test('quarantines a v10 proof after its persisted evidence provenance becomes unsigned', async () => {
+    const state = fixture('verifying', 9);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    await saveFixtureAssessment(store, state.leadId, 9);
+    state.db.sqlite.prepare(`UPDATE manual_news_evidence SET fetch_audit_json = 'null'
+      WHERE lead_id = ?`).run(state.leadId);
+
+    expect((await store.getLead(state.leadId))?.assessment).toBeNull();
+    expect(state.db.sqlite.prepare(`SELECT policy_version, status, reason
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId)).toEqual({
+      policy_version: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+      status: 'invalidated',
+      reason: 'verification_integrity_invalid',
+    });
+  });
+
   test('concurrent quarantine attempts audit only the exact active snapshot invalidation winner', async () => {
     const state = fixture('verifying', 9);
     const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
@@ -1594,10 +1636,25 @@ describe('manual lead D1-backed dedupe', () => {
       })]);
     expect(await store.listRecentPriorEvents('2026-08-11', state.leadId)).toEqual([]);
 
-    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications SET hmac_sha256 = ?
-      WHERE lead_id = 'old-lead' AND status = 'active'`).run('0'.repeat(64));
+    const proof = state.db.sqlite.prepare(`SELECT policy_version, canonical_digest, hmac_sha256
+      FROM manual_news_assessment_verifications WHERE lead_id = 'old-lead' AND status = 'active'`)
+      .get() as any;
+    const legacy = proofForLegacyPolicy(
+      proof,
+      { lead_id: 'old-lead', assessment_version: 3_000_001 },
+      VERIFICATION_SECRET,
+    );
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications
+      SET policy_version = ?, hmac_sha256 = ? WHERE lead_id = 'old-lead' AND status = 'active'`)
+      .run(legacy.policy_version, legacy.hmac_sha256);
     expect(await store.findPriorEventsByEventKey(assessment().event_key, state.leadId)).toEqual([]);
     expect(await store.listRecentPriorEvents('2026-01-02', state.leadId)).toEqual([]);
+    expect(state.db.sqlite.prepare(`SELECT policy_version, status, reason
+      FROM manual_news_assessment_verifications WHERE lead_id = 'old-lead'`).get()).toEqual({
+      policy_version: 'fact-evidence-projection-hmac-v9',
+      status: 'invalidated',
+      reason: 'verification_integrity_invalid',
+    });
   });
 
   test('rolls back a status transition when its audit insert fails', async () => {

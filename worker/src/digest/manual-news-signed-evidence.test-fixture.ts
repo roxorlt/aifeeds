@@ -1,0 +1,71 @@
+import { createHash, createHmac } from 'node:crypto';
+
+import type { ManualNewsEvidence, ManualLeadVerificationProof } from './manual-news-leads';
+
+export function withSignedArticleTextV2Audit<T extends ManualNewsEvidence>(
+  evidence: T,
+): T & { fetch_audit: NonNullable<ManualNewsEvidence['fetch_audit']> } {
+  const bytes = Buffer.byteLength(evidence.excerpt, 'utf8');
+  const publishedAt = evidence.published_at && !/^\d{4}-\d{2}-\d{2}$/.test(evidence.published_at)
+    ? new Date(evidence.published_at).toISOString()
+    : evidence.published_at;
+  return {
+    ...evidence,
+    published_at: publishedAt,
+    fetch_audit: {
+      hops: [{
+        url: evidence.url,
+        validated_ip: '93.184.216.34',
+        connected_ip: '93.184.216.34',
+      }],
+      source_content_type: 'text/html',
+      extraction: 'article_text',
+      requested_limits: {
+        source_bytes: 8_388_608,
+        extracted_text_bytes: 2_097_152,
+        extracted_text_characters: 1_000_000,
+      },
+      applied_limits: {
+        source_bytes: 8_388_608,
+        extracted_text_bytes: 28_000,
+        extracted_text_characters: 28_000,
+      },
+      actual_sizes: {
+        source_bytes: bytes,
+        extracted_text_bytes: bytes,
+        extracted_text_characters: Array.from(evidence.excerpt).length,
+      },
+      truncation: { source: false, extracted_text: false },
+      parser: { result: 'success', version: 'chromium/149.0.7735.12' },
+      document: {
+        title: evidence.title,
+        published_at: publishedAt,
+        selection: 'article',
+        content_complete: true,
+      },
+      protocol_version: 'article_text_v2',
+      request_nonce: '22'.repeat(16),
+      request_timestamp: '2026-08-11T00:00:00.000Z',
+      extracted_at: '2026-08-11T00:00:01.000Z',
+      final_url: evidence.url,
+      body_sha256: createHash('sha256').update(evidence.excerpt).digest('hex'),
+      response_hmac: '33'.repeat(32),
+    },
+  } as T & { fetch_audit: NonNullable<ManualNewsEvidence['fetch_audit']> };
+}
+
+export function proofForLegacyPolicy(
+  proof: Pick<ManualLeadVerificationProof, 'canonical_digest' | 'hmac_sha256'> & { policy_version: string },
+  input: { lead_id: string; assessment_version: number },
+  secret: string,
+  policyVersion = 'fact-evidence-projection-hmac-v9',
+) {
+  const hmacPayload = [
+    policyVersion, input.lead_id, String(input.assessment_version), proof.canonical_digest,
+  ].join('\n');
+  return {
+    ...proof,
+    policy_version: policyVersion,
+    hmac_sha256: createHmac('sha256', secret).update(hmacPayload).digest('hex'),
+  };
+}

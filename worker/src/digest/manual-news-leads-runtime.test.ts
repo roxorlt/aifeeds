@@ -24,6 +24,7 @@ import {
   manualNewsProviderDiagnostics,
   manualNewsProviderFailureAudit,
 } from './manual-news-provider';
+import { proofForLegacyPolicy } from './manual-news-signed-evidence.test-fixture';
 
 vi.mock('../hf-paper/llm', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../hf-paper/llm')>();
@@ -397,7 +398,7 @@ describe('manual lead evidence extraction', () => {
     mockedCall.mockReset();
   });
 
-  test('uses the complete trusted article body and creates a current v9 proof', async () => {
+  test('uses the complete trusted article body and creates a current v10 proof', async () => {
     const body = alibabaSupport;
     const evidence = await extractManualNewsEvidence(documentFixture(
       'https://techcrunch.com/2026/07/04/alibaba-claude-code/', body, 'article_text', {
@@ -421,7 +422,46 @@ describe('manual lead evidence extraction', () => {
     await expect(createAlibabaCurrentProof(evidence!)).resolves.toBe(true);
   });
 
-  test('v9 proof binds authenticated v2 body and response signature audit fields', async () => {
+  test('rejects an otherwise active v9 proof at the direct current-proof boundary', async () => {
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://techcrunch.com/2026/07/04/alibaba-claude-code/', alibabaSupport,
+    ));
+    const { proofInput, proof, secret } = await createAlibabaProof(evidence!);
+    const legacy = proofForLegacyPolicy(proof, proofInput, secret);
+
+    await expect(isCurrentManualLeadVerification(proofInput, legacy, secret)).resolves.toBe(false);
+  });
+
+  test('v10 proof creation rejects unsigned and malformed gateway provenance', async () => {
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://techcrunch.com/2026/07/04/alibaba-claude-code/', alibabaSupport,
+    ));
+    const { proofInput, proof, secret } = await createAlibabaProof(evidence!);
+    const unsigned = structuredClone(proofInput);
+    unsigned.evidence[0]!.fetch_audit = null;
+    const malformed = structuredClone(proofInput);
+    malformed.evidence[0]!.fetch_audit!.protocol_version = undefined;
+    const forgedBodyDigest = structuredClone(proofInput);
+    forgedBodyDigest.evidence[0]!.fetch_audit!.body_sha256 = '00'.repeat(32);
+    const impossiblePublishedAt = structuredClone(proofInput);
+    impossiblePublishedAt.evidence[0]!.published_at = '2026-02-31';
+    impossiblePublishedAt.evidence[0]!.fetch_audit!.document!.published_at = '2026-02-31';
+
+    await expect(createManualLeadVerificationProof(unsigned, secret))
+      .rejects.toThrow(/manual_news_evidence_provenance_invalid/);
+    await expect(isCurrentManualLeadVerification(unsigned, proof, secret)).resolves.toBe(false);
+    await expect(createManualLeadVerificationProof(malformed, secret))
+      .rejects.toThrow(/manual_news_evidence_provenance_invalid/);
+    await expect(isCurrentManualLeadVerification(malformed, proof, secret)).resolves.toBe(false);
+    await expect(createManualLeadVerificationProof(forgedBodyDigest, secret))
+      .rejects.toThrow(/manual_news_evidence_provenance_invalid/);
+    await expect(isCurrentManualLeadVerification(forgedBodyDigest, proof, secret)).resolves.toBe(false);
+    await expect(createManualLeadVerificationProof(impossiblePublishedAt, secret))
+      .rejects.toThrow(/manual_news_evidence_provenance_invalid/);
+    await expect(isCurrentManualLeadVerification(impossiblePublishedAt, proof, secret)).resolves.toBe(false);
+  });
+
+  test('v10 proof binds authenticated v2 body and response signature audit fields', async () => {
     const evidence = await extractManualNewsEvidence(documentFixture(
       'https://techcrunch.com/2026/07/04/alibaba-claude-code/', alibabaSupport,
     ));
@@ -435,6 +475,41 @@ describe('manual lead evidence extraction', () => {
     tamperedAudit.response_hmac = originalAudit.response_hmac;
     tamperedAudit.body_sha256 = '55'.repeat(32);
     await expect(isCurrentManualLeadVerification(tampered, proof, secret)).resolves.toBe(false);
+  });
+
+  test.each([
+    ['text/plain', 'text'],
+    ['application/json', 'json'],
+    ['application/pdf', 'pdf_text'],
+  ] as const)('keeps signed v2 %s extraction current with %s semantics', async (sourceType, extraction) => {
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://techcrunch.com/2026/07/04/alibaba-claude-code/', alibabaSupport,
+    ));
+    const audit = evidence!.fetch_audit!;
+    audit.source_content_type = sourceType;
+    audit.extraction = extraction;
+    audit.applied_limits.extracted_text_bytes = 2_097_152;
+    audit.applied_limits.extracted_text_characters = 1_000_000;
+    audit.parser.version = 'research-gateway-parser/1.0.0';
+    delete audit.document;
+
+    const { proofInput, proof, secret } = await createAlibabaProof(evidence!);
+
+    await expect(isCurrentManualLeadVerification(proofInput, proof, secret)).resolves.toBe(true);
+  });
+
+  test('does not expire historically persisted signed evidence against the current wall clock', async () => {
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://techcrunch.com/2026/07/04/alibaba-claude-code/', alibabaSupport,
+    ));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2036-08-12T00:00:00.000Z'));
+    try {
+      const { proofInput, proof, secret } = await createAlibabaProof(evidence!);
+      await expect(isCurrentManualLeadVerification(proofInput, proof, secret)).resolves.toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test('does not truncate a complete trusted article to the former 3000-character prefix', async () => {
