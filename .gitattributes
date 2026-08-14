@@ -1,0 +1,3 @@
+# Frozen upstream Unicode 15.1 UCD bytes intentionally retain their source whitespace.
+worker/vendor/unicode/15.1.0/ucd/CompositionExclusions.txt -whitespace
+worker/vendor/unicode/15.1.0/ucd/emoji/emoji-data.txt -whitespace
