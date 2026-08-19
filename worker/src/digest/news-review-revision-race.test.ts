@@ -58,6 +58,7 @@ class SerialSqliteD1 {
     this.sqlite.exec(fs.readFileSync(path.join(migrations, '035-manual-news-assessment-generation-cycles.sql'), 'utf8'));
     this.sqlite.exec(fs.readFileSync(path.join(migrations, '036-manual-news-assessment-generation-cycles-v2.sql'), 'utf8'));
     this.sqlite.exec(fs.readFileSync(path.join(migrations, '037-manual-news-proof-key-ids.sql'), 'utf8'));
+    this.sqlite.exec(fs.readFileSync(path.join(migrations, '038-news-review-human-priority.sql'), 'utf8'));
   }
 
   prepare(sql: string) {
@@ -1192,4 +1193,33 @@ describe('news review revision CAS', () => {
     expect(active?.candidates.filter((candidate) => candidate.origin === 'manual_lead')).toHaveLength(5);
     expect(active?.candidate_ids.slice(0, 5)).toEqual(scheduled.slice(0, 5).map((item) => item.item_id));
   }, 10_000);
+
+  test('confirming a manual lead carries the human sequence and its review flag into the new revision', async () => {
+    const current = state();
+    const base = candidates('human-confirm');
+    await freezeNewsReviewBatch(
+      current.env, '2026-08-11', base, base.map((item) => item.item_id), 100,
+    );
+    const frozen = await getActiveNewsReviewBatch(current.env, '2026-08-11');
+    const token = await createNewsReviewToken('test-secret', '2026-08-11', frozen!.batch_id);
+    const humanOrder = ['human-confirm-4', 'human-confirm-1', 'human-confirm-3'];
+    expect(await submitNewsReviewSelection(current.env, {
+      date: '2026-08-11', batch_id: frozen!.batch_id, token, selected_ids: humanOrder,
+    }, 110)).toMatchObject({ ok: true, changed: true });
+
+    const leadId = 'ml-20260811-humanconfirm';
+    await insertLead(current.db, leadId, 'event-human-confirm');
+    const confirmed = await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, frozen!.batch_revision, 'confirm-after-human-review', 120,
+    );
+
+    // 确认线索只扩候选池，不得把人审选择序列扔回自动排序，标记也必须继承，
+    // 否则后一轮自动冻结就失去保护（2026-08-19 覆盖事故的入口之一）。
+    expect(confirmed).toMatchObject({ ok: true, batch: { revision: 2 } });
+    const after = await getActiveNewsReviewBatch(current.env, '2026-08-11');
+    expect(after?.human_reviewed).toBe(true);
+    expect(after?.applied_selected_ids).toEqual(humanOrder);
+    expect(after?.candidates.some((candidate) => candidate.lead_id === leadId)).toBe(true);
+    await expect(getAppliedNewsReviewSelection(current.env, '2026-08-11')).resolves.toEqual(humanOrder);
+  });
 });

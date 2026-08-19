@@ -42,6 +42,9 @@ export interface NewsReviewBatch {
   auto_repaired_from_batch: string | null;
   auto_repaired_invalid_ids: string[];
   superseded_by: string | null;
+  // 该批次的 applied_selected_ids 出自人工审核提交，或由人审序列继承而来。
+  // 一旦置 1，同一 lineage 的后续版本必须继承，自动路径不得重排（见 038 迁移）。
+  human_reviewed: boolean;
   batch_revision: number;
   supersedes_batch_id: string | null;
   revision_origin: 'scheduled_freeze' | 'manual_lead';
@@ -85,6 +88,7 @@ interface NewsReviewBatchRow {
   auto_repaired_from_batch: string | null;
   auto_repaired_invalid_ids: string | null;
   superseded_by: string | null;
+  human_reviewed?: number;
   batch_revision?: number;
   supersedes_batch_id?: string | null;
   revision_origin?: NewsReviewBatch['revision_origin'];
@@ -131,6 +135,8 @@ function toBatch(row: NewsReviewBatchRow): NewsReviewBatch {
     batch_revision: Number(row.batch_revision || 1),
     supersedes_batch_id: row.supersedes_batch_id || null,
     revision_origin: row.revision_origin || 'scheduled_freeze',
+    // 迁移落地前的旧行没有该列，按「无人审」处理，行为与改造前一致。
+    human_reviewed: row.human_reviewed === 1,
     lineage_id: row.lineage_id || row.review_date,
     is_current: row.is_current === undefined ? !row.superseded_by : row.is_current === 1,
     candidate_generation: Number(row.candidate_generation || 0),
@@ -329,6 +335,23 @@ export async function getAppliedNewsReviewSelection(env: Env, date: string): Pro
   return readAppliedNewsReviewSelection(env, date);
 }
 
+// HK 推送来源标记用：当日 lineage 的当前批次是否携带人审序列。表/列在 rollout 窗口
+// 内可能还没迁移到位，此时按「无人审」处理，让契约退化成原来的自动语义而不是报错。
+export async function hasHumanReviewedNewsSelection(env: Env, date: string): Promise<boolean> {
+  try {
+    const row = await env.DB.prepare(
+      `/* news_review:human_reviewed_current */ SELECT human_reviewed
+       FROM daily_news_review_batches
+       WHERE review_date = ? AND lineage_id = ? AND is_current = 1
+       ORDER BY created_at DESC LIMIT 1`,
+    ).bind(date, date).first<{ human_reviewed: number }>();
+    return Number(row?.human_reviewed || 0) === 1;
+  } catch (error) {
+    console.warn('[news-review] human review flag unavailable', String(error).slice(0, 160));
+    return false;
+  }
+}
+
 export async function getPublishedNewsReviewSelection(
   env: Env,
   date: string,
@@ -442,15 +465,29 @@ async function freezeNewsReviewBatchAtGeneration(
   const repair = previous
     ? repairInvalidNewsReviewSelection(previousPublishedIds, candidateIds)
     : { required: false, invalid_ids: [], selected_ids: [] };
-  const selectionHash = repair.required ? await newsReviewSelectionHash(repair.selected_ids) : null;
+  // 人审优先：previous 带人审标记时，新版本继承人审序列本身，而不是让 applied_selected_ids
+  // 归空、把生产回落到本轮自动排序。repairInvalidNewsReviewSelection 在「无失效条目」时
+  // 原样返回人审顺序；有失效条目时只剔除失效项，保留其余相对顺序，补位项追加在末尾。
+  const humanReviewed = !!previous?.human_reviewed;
+  const inheritsHumanSelection = humanReviewed && repair.selected_ids.length > 0;
+  const appliedSelectedIds = repair.required || inheritsHumanSelection ? repair.selected_ids : null;
+  const selectionHash = appliedSelectedIds ? await newsReviewSelectionHash(appliedSelectedIds) : null;
+  const editRevision = inheritsHumanSelection
+    ? Math.max(previous!.edit_revision, 1)
+    : (repair.required ? 1 : 0);
+  // 继承且无失效条目时选择序列与线上一致，沿用上一版的发布状态，不制造假的待发布态。
+  const publishStatus = repair.required
+    ? 'pending'
+    : (inheritsHumanSelection ? previous!.publish_status : 'not_requested');
+  const publishedAt = !repair.required && inheritsHumanSelection ? previous!.published_at : null;
   const insert = env.DB.prepare(
     `/* news_review:insert_revision_cas */ INSERT INTO daily_news_review_batches (
        review_date, batch_id, candidate_ids, candidates_json, default_selected_ids,
        applied_selected_ids, selection_hash, edit_revision, publish_status,
        auto_repaired_from_batch, auto_repaired_invalid_ids, created_at, expires_at,
        batch_revision, supersedes_batch_id, revision_origin, lineage_id, is_current,
-       candidate_generation
-     ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled_freeze', ?, ?, ?
+       candidate_generation, published_at, human_reviewed
+     ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled_freeze', ?, ?, ?, ?, ?
      WHERE EXISTS (SELECT 1 FROM daily_news_review_candidate_generations
        WHERE review_date = ? AND lineage_id = ? AND generation = ?)
      AND ${previous
@@ -461,11 +498,11 @@ async function freezeNewsReviewBatchAtGeneration(
      ON CONFLICT(review_date, batch_id) DO NOTHING`,
   ).bind(
     date, batchId, JSON.stringify(candidateIds), JSON.stringify(effectiveCandidates),
-    JSON.stringify(validatedDefault.selected_ids), repair.required ? JSON.stringify(repair.selected_ids) : null,
-    selectionHash, repair.required ? 1 : 0, repair.required ? 'pending' : 'not_requested',
+    JSON.stringify(validatedDefault.selected_ids), appliedSelectedIds ? JSON.stringify(appliedSelectedIds) : null,
+    selectionHash, editRevision, publishStatus,
     repair.required ? previous!.batch_id : null, repair.required ? JSON.stringify(repair.invalid_ids) : null,
     now, newsReviewExpiresAt(date), batchRevision, previous?.batch_id || null, date, previous ? 0 : 1,
-    candidateGeneration, date, date, candidateGeneration,
+    candidateGeneration, publishedAt, humanReviewed ? 1 : 0, date, date, candidateGeneration,
     date, date, ...(previous ? [previous.batch_id, previous.batch_revision] : []),
   );
   const statements: D1PreparedStatement[] = [insert];
@@ -573,7 +610,8 @@ export async function submitNewsReviewSelection(
   const writeStatement = env.DB.prepare(
     `UPDATE daily_news_review_batches SET
        applied_selected_ids = ?, selection_hash = ?, edit_revision = edit_revision + 1,
-       publish_status = 'pending', publish_error = NULL, published_at = NULL
+       publish_status = 'pending', publish_error = NULL, published_at = NULL,
+       human_reviewed = 1
      WHERE review_date = ? AND lineage_id = ? AND batch_id = ?
        AND is_current = 1 AND superseded_by IS NULL AND ${verificationGuard}`,
   ).bind(
@@ -885,9 +923,9 @@ async function sanitizeCurrentNewsReviewBatchAttempt(
          publish_error, published_at, notified_at, notification_hash,
          auto_repaired_from_batch, auto_repaired_invalid_ids, superseded_by,
          created_at, expires_at, batch_revision, supersedes_batch_id, revision_origin,
-         lineage_id, is_current, candidate_generation
+         lineage_id, is_current, candidate_generation, human_reviewed
        ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL,
-         ?, ?, ?, ?, ?, ?, 0, ?
+         ?, ?, ?, ?, ?, ?, 0, ?, ?
        WHERE EXISTS (SELECT 1 FROM daily_news_review_batches
          WHERE review_date = ? AND lineage_id = ? AND batch_id = ?
            AND batch_revision = ? AND is_current = 1)
@@ -899,6 +937,7 @@ async function sanitizeCurrentNewsReviewBatchAttempt(
       publishedChanged ? null : current.publish_error, publishedChanged ? null : current.published_at,
       current.batch_id, JSON.stringify(droppedIds), now, current.expires_at, batchRevision,
       current.batch_id, current.revision_origin, date, current.candidate_generation,
+      current.human_reviewed ? 1 : 0,
       date, date, current.batch_id, current.batch_revision,
       ...verificationBindings,
     ),
