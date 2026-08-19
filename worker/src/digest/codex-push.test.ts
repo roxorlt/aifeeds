@@ -5,6 +5,7 @@ vi.mock('./news-review', () => ({
   getAppliedNewsReviewSelection: vi.fn(async () => null),
   getPublishedNewsReviewSelection: vi.fn(),
   getVerifiedNewsReviewSelectionSnapshot: vi.fn(),
+  hasHumanReviewedNewsSelection: vi.fn(async () => false),
   sanitizeCurrentNewsReviewBatch: vi.fn(),
 }));
 
@@ -20,6 +21,7 @@ import { getAppliedNewsReviewSelection } from './news-review';
 import {
   getPublishedNewsReviewSelection,
   getVerifiedNewsReviewSelectionSnapshot,
+  hasHumanReviewedNewsSelection,
   sanitizeCurrentNewsReviewBatch,
 } from './news-review';
 
@@ -130,6 +132,7 @@ function makeEnv() {
 
 beforeEach(() => {
   vi.mocked(getAppliedNewsReviewSelection).mockResolvedValue(null);
+  vi.mocked(hasHumanReviewedNewsSelection).mockResolvedValue(false);
   vi.mocked(getPublishedNewsReviewSelection).mockResolvedValue([]);
   vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mockResolvedValue(null);
   vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
@@ -577,5 +580,120 @@ describe('daily Codex payload v2', () => {
 
     expect('protocol_version' in legacy).toBe(false);
     expect(legacy.render_key).toMatch(/^daily-2026-07-21-normal-/);
+  });
+});
+
+// HK 下游靠 origin 区分「人审序列」和「自动排序」，2026-08-19 之前所有推送只有
+// source: 'cloudflare-daily-staged',面板无法拒绝自动推送覆盖人审 r2。
+describe('staged push origin contract', () => {
+  const date = '2026-07-21';
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.mocked(getAppliedNewsReviewSelection).mockResolvedValue(null);
+    vi.mocked(hasHumanReviewedNewsSelection).mockResolvedValue(false);
+    vi.mocked(getPublishedNewsReviewSelection).mockResolvedValue([]);
+    vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mockResolvedValue(null);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
+      batch: { candidate_ids: [], candidates: [], default_selected_ids: [], applied_selected_ids: [] },
+      changed: false,
+      dropped_ids: [],
+      manual_verifications: [],
+    } as never);
+  });
+
+  function pushableEnv() {
+    const state = makeEnv();
+    seedAll(state.setPool);
+    Object.assign(state.env as object, {
+      X_CARD_SHARED_TOKEN: 'test-token',
+      DAILY_PUSH_STAGING_ENDPOINT: 'https://staging-render.example.test/aifeeds/api/daily/ingest',
+      API_BASE: 'https://staging-api.ai-feeds.com',
+    });
+    return state;
+  }
+
+  async function lockInputStages(env: Env): Promise<void> {
+    for (const stage of ['foundation', 'editorial', 'papers'] as const) {
+      await buildStagedDailyCodexPayload(env, stage, { date, persistRevision: true });
+    }
+  }
+
+  test('marks a review submission push as review regardless of the batch flag lookup', async () => {
+    const { env } = pushableEnv();
+    // 人审提交路径显式传 review：即使标记读取退化成 false 也不能降级成 auto。
+    vi.mocked(hasHumanReviewedNewsSelection).mockResolvedValue(false);
+
+    const payload = await buildStagedDailyCodexPayload(env, 'editorial', { date, origin: 'review' });
+
+    expect(payload.origin).toBe('review');
+    expect(payload.source).toBe('cloudflare-daily-staged');
+  });
+
+  test('infers auto for the morning push and review once the day carries a human selection', async () => {
+    const { env } = pushableEnv();
+
+    const beforeReview = await buildStagedDailyCodexPayload(env, 'editorial', { date });
+    vi.mocked(hasHumanReviewedNewsSelection).mockResolvedValue(true);
+    const afterReview = await buildStagedDailyCodexPayload(env, 'editorial', { date });
+
+    expect(beforeReview.origin).toBe('auto');
+    expect(afterReview.origin).toBe('review');
+  });
+
+  test('carries the inherited review origin into the 08:00 finalize push', async () => {
+    const { env } = pushableEnv();
+    await lockInputStages(env);
+    vi.mocked(hasHumanReviewedNewsSelection).mockResolvedValue(true);
+
+    const finalize = await buildStagedDailyCodexPayload(env, 'finalize', { date });
+
+    expect(finalize.origin).toBe('review');
+  });
+
+  test('keeps foundation and papers on auto because they carry no news section', async () => {
+    const { env } = pushableEnv();
+    vi.mocked(hasHumanReviewedNewsSelection).mockResolvedValue(true);
+    const lookupsBefore = vi.mocked(hasHumanReviewedNewsSelection).mock.calls.length;
+
+    const foundation = await buildStagedDailyCodexPayload(env, 'foundation', { date });
+    const papers = await buildStagedDailyCodexPayload(env, 'papers', { date });
+
+    expect([foundation.origin, papers.origin]).toEqual(['auto', 'auto']);
+    expect(vi.mocked(hasHumanReviewedNewsSelection).mock.calls.length).toBe(lookupsBefore);
+  });
+
+  test('origin stays out of content_hash and render_key so a re-push keeps its revision', async () => {
+    const { env } = pushableEnv();
+
+    const auto = await buildStagedDailyCodexPayload(env, 'editorial', { date, persistRevision: true });
+    const review = await buildStagedDailyCodexPayload(env, 'editorial', {
+      date, persistRevision: true, origin: 'review',
+    });
+
+    expect(review.origin).toBe('review');
+    expect(auto.origin).toBe('auto');
+    expect(review.content_hash).toBe(auto.content_hash);
+    expect(review.render_key).toBe(auto.render_key);
+    expect(review.revision).toBe(auto.revision);
+  });
+
+  test('sends origin on the wire and reports it back to the ops caller', async () => {
+    const { env } = pushableEnv();
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ id: 'stage-1', status: 'queued' }),
+      { status: 202, headers: { 'content-type': 'application/json' } },
+    ));
+
+    const reviewed = await pushDailyStageToCodex(env, 'editorial', date, { origin: 'review' });
+    const reviewedBody = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    vi.mocked(hasHumanReviewedNewsSelection).mockResolvedValue(false);
+    const automatic = await pushDailyStageToCodex(env, 'foundation', date);
+    const automaticBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+
+    expect(reviewed).toMatchObject({ ok: true, stage: 'editorial', origin: 'review' });
+    expect(reviewedBody.origin).toBe('review');
+    expect(automatic).toMatchObject({ ok: true, stage: 'foundation', origin: 'auto' });
+    expect(automaticBody.origin).toBe('auto');
   });
 });

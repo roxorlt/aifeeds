@@ -203,7 +203,9 @@ export async function handleDailyNewsReviewApi(
 
   const selectionHash = submitted.batch.selection_hash;
   if (!selectionHash) return response({ ok: false, error: 'selection_hash_missing' }, 409);
-  const editorial = await pushDailyStageToCodex(env, 'editorial', date);
+  // 人审提交路径：内容就是这次人工确认的选题序列，来源恒为 review，
+  // 不依赖 D1 标记推断（推断失败也不能把人审推送降级成 auto）。
+  const editorial = await pushDailyStageToCodex(env, 'editorial', date, { origin: 'review' });
   if (!editorial.ok) {
     const error = editorial.error || editorial.skipped || 'editorial_push_failed';
     await markNewsReviewPublished(env, date, batchId, selectionHash, error);
@@ -213,7 +215,7 @@ export async function handleDailyNewsReviewApi(
   const papers = await getDailyStageState(env, date, 'papers');
   let finalize: Awaited<ReturnType<typeof pushDailyStageToCodex>> | null = null;
   if (papers?.pushed_at) {
-    finalize = await pushDailyStageToCodex(env, 'finalize', date);
+    finalize = await pushDailyStageToCodex(env, 'finalize', date, { origin: 'review' });
     if (!finalize.ok) {
       const error = finalize.error || finalize.skipped || 'finalize_push_failed';
       await markNewsReviewPublished(env, date, batchId, selectionHash, error);
