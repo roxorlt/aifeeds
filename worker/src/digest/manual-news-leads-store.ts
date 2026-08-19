@@ -52,6 +52,7 @@ import {
   getPublishedNewsReviewSelection,
   newsReviewExpiresAt,
   newsReviewSecret,
+  newsReviewSelectionHash,
   sanitizeCurrentNewsReviewBatch,
   type NewsReviewBatch,
 } from './news-review';
@@ -1810,6 +1811,13 @@ export async function confirmManualNewsLeadCandidate(
     lineage_id: lead.review_date,
   });
   const candidateIds = merged.candidates.map((item) => item.item_id);
+  // 人审优先：确认线索只改候选池，不得把人审选择序列扔回自动排序。带人审标记时
+  // 把人审序列（剔除已不在候选池的条目、补位追加在末尾）继续写进新版本的
+  // applied_selected_ids，并继承标记，供后续自动冻结继续保护。
+  const inheritsHumanSelection = active.human_reviewed && merged.default_selected_ids.length > 0;
+  const inheritedSelectionHash = inheritsHumanSelection
+    ? await newsReviewSelectionHash(merged.default_selected_ids)
+    : null;
   const existingManualVerifications = activeSanitization?.manual_verifications || [];
   const existingManualGuard = existingManualVerifications.length
     ? existingManualVerifications.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
@@ -1826,8 +1834,9 @@ export async function confirmManualNewsLeadCandidate(
       `/* manual_lead:confirm_batch */ INSERT INTO daily_news_review_batches (
          review_date, batch_id, candidate_ids, candidates_json, default_selected_ids,
          created_at, expires_at, batch_revision, supersedes_batch_id, revision_origin,
-         lineage_id, is_current, candidate_generation
-       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual_lead', ?, 0, ?
+         lineage_id, is_current, candidate_generation,
+         applied_selected_ids, selection_hash, edit_revision, publish_status, human_reviewed
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual_lead', ?, 0, ?, ?, ?, ?, ?, ?
        WHERE EXISTS (SELECT 1 FROM manual_news_leads WHERE id = ? AND version = ?)
        AND EXISTS (SELECT 1 FROM daily_news_review_batches
            WHERE review_date = ? AND lineage_id = ? AND batch_id = ? AND batch_revision = ? AND is_current = 1)
@@ -1837,7 +1846,13 @@ export async function confirmManualNewsLeadCandidate(
     ).bind(
       lead.review_date, batchId, JSON.stringify(candidateIds), JSON.stringify(merged.candidates),
       JSON.stringify(merged.default_selected_ids), now, newsReviewExpiresAt(lead.review_date),
-      batchRevision, active.batch_id, lead.review_date, active.candidate_generation, lead.id, expectedVersion,
+      batchRevision, active.batch_id, lead.review_date, active.candidate_generation,
+      inheritsHumanSelection ? JSON.stringify(merged.default_selected_ids) : null,
+      inheritedSelectionHash,
+      inheritsHumanSelection ? Math.max(active.edit_revision, 1) : 0,
+      inheritsHumanSelection ? active.publish_status : 'not_requested',
+      active.human_reviewed ? 1 : 0,
+      lead.id, expectedVersion,
       lead.review_date, lead.review_date, active.batch_id, active.batch_revision,
       ...manualVerificationSnapshotGuardBindings(lead.id, verified.record),
       ...existingManualBindings,

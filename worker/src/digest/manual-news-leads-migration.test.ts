@@ -21,6 +21,7 @@ describe('manual news lead migration', () => {
     db.exec(fs.readFileSync(path.join(migrations, '035-manual-news-assessment-generation-cycles.sql'), 'utf8'));
     db.exec(fs.readFileSync(path.join(migrations, '036-manual-news-assessment-generation-cycles-v2.sql'), 'utf8'));
     db.exec(fs.readFileSync(path.join(migrations, '037-manual-news-proof-key-ids.sql'), 'utf8'));
+    db.exec(fs.readFileSync(path.join(migrations, '038-news-review-human-priority.sql'), 'utf8'));
 
     expect(tableColumns(db, 'daily_news_review_batches')).toEqual(expect.arrayContaining([
       'batch_revision', 'supersedes_batch_id', 'revision_origin', 'lineage_id', 'is_current',

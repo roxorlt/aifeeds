@@ -4433,11 +4433,14 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
         const notified = await notifyNewsReviewBatch(env, frozen.batch);
         let autoRepairPush: Record<string, unknown> | null = null;
         if (frozen.auto_repaired && frozen.batch.selection_hash) {
-          const editorial = await pushDailyStageToCodex(env, 'editorial', date);
+          // 自动修复推送的 origin 跟着内容走：批次继承人审序列（只剔除失效条目）时
+          // 本质仍是人审结果，标 review；当日没人审过才是纯自动排序，标 auto。
+          const origin = frozen.batch.human_reviewed ? 'review' as const : 'auto' as const;
+          const editorial = await pushDailyStageToCodex(env, 'editorial', date, { origin });
           if (!editorial.ok) throw new Error(`auto_repair_editorial_push_failed:${editorial.error || editorial.skipped}`);
           const papers = await getDailyStageState(env, date, 'papers');
           const finalize = papers?.pushed_at
-            ? await pushDailyStageToCodex(env, 'finalize', date)
+            ? await pushDailyStageToCodex(env, 'finalize', date, { origin })
             : null;
           if (finalize && !finalize.ok) throw new Error(`auto_repair_finalize_push_failed:${finalize.error || finalize.skipped}`);
           if (finalize?.ok) await generateDailyPage(env, date);
@@ -4450,6 +4453,8 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
           superseded_batch_id: frozen.superseded_batch_id,
           auto_repaired: frozen.auto_repaired,
           auto_repaired_invalid_ids: frozen.auto_repaired_invalid_ids,
+          human_reviewed: frozen.batch.human_reviewed,
+          applied_selected_ids: frozen.batch.applied_selected_ids,
           auto_repair_push: autoRepairPush,
           notified: notified.notified,
           review_url: notified.review_url,

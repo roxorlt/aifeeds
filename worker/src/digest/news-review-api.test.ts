@@ -240,6 +240,10 @@ describe('daily news review API', () => {
 
     expect(response.status).toBe(200);
     expect(vi.mocked(pushDailyStageToCodex).mock.calls.map((call) => call[1])).toEqual(['editorial', 'finalize']);
+    // HK 靠 origin 区分人审推送和自动推送；提交路径必须显式标 review，
+    // 不能依赖 D1 标记推断（推断退化时不许把人审降级成 auto）。
+    expect(vi.mocked(pushDailyStageToCodex).mock.calls.map((call) => call[3]))
+      .toEqual([{ origin: 'review' }, { origin: 'review' }]);
     expect(generateDailyPage).toHaveBeenCalledWith(expect.anything(), '2026-07-30');
     expect(markNewsReviewPublished).toHaveBeenCalledWith(
       expect.anything(), '2026-07-30', batch.batch_id, 'selection-hash',

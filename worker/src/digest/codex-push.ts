@@ -14,6 +14,7 @@ import { pushDeerAlert } from '../notifier';
 import {
   getAppliedNewsReviewSelection,
   getVerifiedNewsReviewSelectionSnapshot,
+  hasHumanReviewedNewsSelection,
   type VerifiedNewsReviewSelectionSnapshot,
 } from './news-review';
 
@@ -256,6 +257,19 @@ export interface DailyFinalManifest {
   manifest_hash: string;
 }
 
+// HK 下游契约（2026-08-19 起）：staged payload 顶层的 origin 说明这一批内容的
+// 排序来自哪里 —— 'review' = 人工审核提交的选题序列（含由人审序列继承 / 自动剔除
+// 失效条目后的版本），'auto' = 纯自动排序（当日尚无人审）。HK 面板与渲染据此判断
+// 「自动推送不得覆盖人审结果」，不再只靠 source: 'cloudflare-daily-staged'。
+// origin 只描述内容来源，不描述触发者：08:00 cron finalize 若带的是人审序列，
+// 同样标 'review'。字段不参与 content_hash（hash 只覆盖 digest）。
+export type DailyPushOrigin = 'review' | 'auto';
+
+export interface DailyStagePushOptions {
+  // 显式来源。人审提交路径必须传 'review'；不传则按当日审核批次的人审标记推断。
+  origin?: DailyPushOrigin;
+}
+
 export interface StagedDailyCodexPayload {
   protocol_version: 2;
   date: string;
@@ -268,6 +282,7 @@ export interface StagedDailyCodexPayload {
   expected_stages: DailyCodexInputStage[];
   title: string;
   source: 'cloudflare-daily-staged';
+  origin: DailyPushOrigin;
   digest: DailyCodexPayload['digest'];
   final_manifest: DailyFinalManifest | null;
 }
@@ -492,10 +507,23 @@ async function buildFinalManifest(
   };
 }
 
+// 未显式指定来源时，按「这批内容里的行业要闻序列是不是人审结果」推断：
+// 只有 editorial / finalize 带 news 板块，foundation / papers 与人审无关，恒为 auto。
+async function resolveDailyPushOrigin(
+  env: Env,
+  date: string,
+  stage: DailyCodexStage,
+  explicit?: DailyPushOrigin,
+): Promise<DailyPushOrigin> {
+  if (explicit) return explicit;
+  if (stage !== 'editorial' && stage !== 'finalize') return 'auto';
+  return (await hasHumanReviewedNewsSelection(env, date)) ? 'review' : 'auto';
+}
+
 export async function buildStagedDailyCodexPayload(
   env: Env,
   stage: DailyCodexStage,
-  opts: { date?: string; persistRevision?: boolean } = {},
+  opts: { date?: string; persistRevision?: boolean; origin?: DailyPushOrigin } = {},
 ): Promise<StagedDailyCodexPayload> {
   const date = opts.date || bjtDateStr();
   const sources = sourcesForStage(stage);
@@ -556,6 +584,7 @@ export async function buildStagedDailyCodexPayload(
     expected_stages: [...DAILY_CODEX_EXPECTED_STAGES],
     title: `AI Feeds ${date} 日报`,
     source: 'cloudflare-daily-staged',
+    origin: await resolveDailyPushOrigin(env, date, stage, opts.origin),
     digest,
     final_manifest: finalManifest,
   };
@@ -571,6 +600,7 @@ export interface DailyPushResult {
   stage?: DailyCodexStage;
   revision?: number;
   content_hash?: string;
+  origin?: DailyPushOrigin;
   error?: string;
 }
 
@@ -622,6 +652,7 @@ export async function pushDailyStageToCodex(
   env: Env,
   stage: DailyCodexStage,
   dateOverride?: string,
+  options: DailyStagePushOptions = {},
 ): Promise<DailyPushResult> {
   if (!env.X_CARD_SHARED_TOKEN) return { ok: false, skipped: 'no_token', stage };
   const endpoint = stagedDailyEndpoint(env);
@@ -640,6 +671,7 @@ export async function pushDailyStageToCodex(
     payload = await buildStagedDailyCodexPayload(env, stage, {
       date: dateOverride,
       persistRevision: true,
+      ...(options.origin ? { origin: options.origin } : {}),
     });
   } catch (error) {
     const message = String(error).slice(0, 200);
@@ -656,7 +688,7 @@ export async function pushDailyStageToCodex(
       await pushDeerAlert(env, '分批日报推 Codex 失败', `${payload.render_key}: ${message}`).catch(() => {});
       return {
         ok: false, stage, revision: payload.revision, content_hash: payload.content_hash,
-        render_key: payload.render_key, total_items: total, error: message,
+        origin: payload.origin, render_key: payload.render_key, total_items: total, error: message,
       };
     }
   }
@@ -692,12 +724,16 @@ export async function pushDailyStageToCodex(
     };
   }
   const data = (await response.json().catch(() => ({}))) as { id?: string; status?: string };
-  console.log(`[daily-codex-stage] ${payload.render_key} items=${total} → id=${data.id} status=${data.status}`);
+  console.log(
+    `[daily-codex-stage] ${payload.render_key} origin=${payload.origin} items=${total}`
+    + ` → id=${data.id} status=${data.status}`,
+  );
   return {
     ok: true,
     stage,
     revision: payload.revision,
     content_hash: payload.content_hash,
+    origin: payload.origin,
     render_key: payload.render_key,
     total_items: total,
     codex_id: data.id,

@@ -21,4 +21,14 @@ describe('staged daily worker wiring', () => {
     expect(indexSource).toContain('handleDailyNewsReviewApi(request, env)');
     expect(indexSource).toContain('DAILY_NEWS_REVIEW_SECRET');
   });
+
+  test('rescore auto-repair pushes tag their origin from the frozen batch review state', () => {
+    const rescore = indexSource.slice(
+      indexSource.indexOf("mode === 'daily-digest-rescore'"),
+      indexSource.indexOf("mode === 'backfill-hf-paper-workflow'"),
+    );
+    expect(rescore).toContain("frozen.batch.human_reviewed ? 'review' as const : 'auto' as const");
+    expect(rescore).toContain("pushDailyStageToCodex(env, 'editorial', date, { origin })");
+    expect(rescore).toContain("pushDailyStageToCodex(env, 'finalize', date, { origin })");
+  });
 });
