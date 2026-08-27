@@ -32,6 +32,10 @@ export interface WarningEntry {
 export interface PushDeerSendResult {
   attempted: number;
   succeeded: number;
+  configured?: number;
+  http_failures?: number;
+  provider_failures?: number;
+  exceptions?: number;
 }
 
 async function sendPushDeer(
@@ -42,10 +46,14 @@ async function sendPushDeer(
   const keysCsv = env.PUSHDEER_ADMIN_KEYS;
   if (!keysCsv) {
     console.warn('[notifier] PUSHDEER_ADMIN_KEYS not set, skip message');
-    return { attempted: 0, succeeded: 0 };
+    return { attempted: 0, succeeded: 0, configured: 0,
+      http_failures: 0, provider_failures: 0, exceptions: 0 };
   }
   const keys = keysCsv.split(',').map((key) => key.trim()).filter(Boolean);
   let succeeded = 0;
+  let httpFailures = 0;
+  let providerFailures = 0;
+  let exceptions = 0;
   await Promise.all(keys.map(async (key) => {
     try {
       const response = await fetch(PUSHDEER_ENDPOINT, {
@@ -59,17 +67,25 @@ async function sendPushDeer(
         }),
       });
       if (!response.ok) {
+        httpFailures++;
         console.error(`[pushdeer] ${response.status}`, await response.text());
         return;
       }
       const data = await response.json<{ code?: number; error?: string }>();
       if (data.code === 0) succeeded++;
-      else console.error('[pushdeer]', data);
+      else {
+        providerFailures++;
+        console.error('[pushdeer]', data);
+      }
     } catch (error) {
+      exceptions++;
       console.error('[pushdeer] exception', error);
     }
   }));
-  return { attempted: keys.length, succeeded };
+  return {
+    configured: keys.length, attempted: keys.length, succeeded,
+    http_failures: httpFailures, provider_failures: providerFailures, exceptions,
+  };
 }
 
 export async function pushDeerMessage(
@@ -105,11 +121,11 @@ export async function pushDeerWarning(
   env: Env,
   title: string,
   body: string,
-): Promise<void> {
+): Promise<boolean> {
   // 无 KV 时降级日志,保留可观测性
   if (!env.AUTH_KV) {
     console.warn(`[pushdeer-warning|no-kv] ${title}: ${body.slice(0, 200)}`);
-    return;
+    return false;
   }
   const entry: WarningEntry = {
     title,
@@ -131,10 +147,16 @@ export async function pushDeerWarning(
     buffer = buffer.slice(-WARNING_BUFFER_MAX);
   }
   // 写回 + TTL 25h 兜底(若 daily cron 漏跑两天,KV 自然过期防积累)
-  await env.AUTH_KV.put(WARNING_BUFFER_KEY, JSON.stringify(buffer), {
-    expirationTtl: 25 * 3600,
-  });
-  console.log(`[pushdeer-warning|buffered] ${title} (buffer size: ${buffer.length})`);
+  try {
+    await env.AUTH_KV.put(WARNING_BUFFER_KEY, JSON.stringify(buffer), {
+      expirationTtl: 25 * 3600,
+    });
+    console.log(`[pushdeer-warning|buffered] ${title} (buffer size: ${buffer.length})`);
+    return true;
+  } catch (error) {
+    console.error('[pushdeer-warning] KV enqueue failed', error);
+    return false;
+  }
 }
 
 export async function notifyWeiboCookieInvalid(
@@ -217,18 +239,13 @@ export async function sendDailyWarningDigest(env: Env): Promise<{
   }
   const body = lines.join('\n');
 
-  // 推送 + 成功后清空 buffer
-  const keys = env.PUSHDEER_ADMIN_KEYS.split(',').map((k) => k.trim()).filter(Boolean);
-  await Promise.allSettled(
-    keys.map((key) =>
-      fetch(PUSHDEER_ENDPOINT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ pushkey: key, text: title, desp: body, type: 'markdown' }),
-      })
-    ),
-  );
-  // 清 buffer(即使 PushDeer 部分失败也清 — 重试机制由 buffer 自然累计承担)
+  // 仅在至少一个目标明确成功后提交 outbox。HTTP/解析/网络失败均保留同一
+  // buffer，允许当天再次执行 digest，而不是把 delivery attempt 当 delivery。
+  const delivery = await sendPushDeer(env, title, body);
+  if (delivery.succeeded < 1) {
+    console.warn(`[pushdeer-digest] delivery failed for ${buffer.length} warnings`);
+    return { warnings: buffer.length, pushed: false, reason: 'delivery_failed' };
+  }
   await env.AUTH_KV.delete(WARNING_BUFFER_KEY);
   console.log(`[pushdeer-digest] flushed ${buffer.length} warnings`);
   return { warnings: buffer.length, pushed: true };

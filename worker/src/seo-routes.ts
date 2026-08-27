@@ -13,7 +13,11 @@ import type { Env } from './index';
 import { getBases } from './digest/lib';
 import { escapeHtml } from './digest/templates';
 import type { DailyVideoRow } from './digest/daily-video';
-import { loadDailyVideo } from './digest/daily-video';
+import {
+  listAuthorizedDailyReleaseSummaries,
+  readAuthorizedDailyPage,
+  readAuthorizedDailyVideo,
+} from './digest/publication-release';
 import {
   dailyVideoObject,
   dailyVideoPublicationDate,
@@ -126,25 +130,29 @@ interface DailyPageRow {
   lastmod?: string | null;
 }
 
+function dailyPagesFromReleases(
+  releases: Awaited<ReturnType<typeof listAuthorizedDailyReleaseSummaries>>,
+): DailyPageRow[] {
+  return releases.map((release) => {
+    const timestamp = new Date(release.promoted_at_ms).toISOString();
+    return {
+      date: release.date,
+      title: release.title,
+      item_count: release.item_count,
+      generated_at: timestamp,
+      lastmod: timestamp,
+    };
+  });
+}
+
 async function loadDailyPages(env: Env, limit?: number): Promise<DailyPageRow[]> {
-  const sql =
-    `SELECT date, title, item_count, generated_at, COALESCE(lastmod, generated_at) AS lastmod
-       FROM daily_pages ORDER BY date DESC` +
-    (limit ? ` LIMIT ${limit}` : '');
-  const r = await env.DB.prepare(sql).all<DailyPageRow>();
-  return r.results || [];
+  return dailyPagesFromReleases(await listAuthorizedDailyReleaseSummaries(env, limit));
 }
 
 async function loadDailyVideos(env: Env): Promise<DailyVideoRow[]> {
-  const result = await env.DB.prepare(
-    `SELECT date, title, description, duration_seconds,
-            mp4_key, mp4_sha256, mp4_size,
-            poster_key, poster_sha256, poster_size,
-            vtt_key, vtt_sha256, vtt_size,
-            uploaded_at, updated_at
-       FROM daily_videos ORDER BY date DESC`,
-  ).all<DailyVideoRow>();
-  return result.results || [];
+  return (await listAuthorizedDailyReleaseSummaries(env))
+    .map((release) => release.video)
+    .filter((video): video is DailyVideoRow => video !== null);
 }
 
 function latestDailyPageModified(rows: DailyPageRow[]): string | null {
@@ -156,10 +164,18 @@ function latestDailyPageModified(rows: DailyPageRow[]): string | null {
 
 // ── /daily/:date 伺服 ──────────────────────────────────────────
 // 合法日期命中 R2 → 200 静态 HTML;miss → 简洁 404 页(含返回归档链接)。
-async function serveDailyPage(env: Env, date: string): Promise<Response> {
+async function serveDailyPage(env: Env, date: string, method: string): Promise<Response> {
   const { siteBase } = getBases(env);
-  const obj = env.READMES ? await env.READMES.get(`daily/${date}.html`) : null;
-  if (!obj) {
+  try {
+    const publication = await readAuthorizedDailyPage(env, date);
+    const body = new TextDecoder().decode(publication.bytes);
+    const withWatchLink = ensureDailyVideoWatchLinkHtml(body, date, env);
+    const headers = {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'private, no-store',
+    };
+    return new Response(method === 'HEAD' ? null : withWatchLink, { status: 200, headers });
+  } catch {
     const body = `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -179,15 +195,6 @@ async function serveDailyPage(env: Env, date: string): Promise<Response> {
 </html>`;
     return html(body, 404, null);
   }
-  const body = await new Response(obj.body).text();
-  const withWatchLink = ensureDailyVideoWatchLinkHtml(body, date, env);
-  return new Response(withWatchLink, {
-    status: 200,
-    headers: {
-      'Content-Type': 'text/html; charset=utf-8',
-      'Cache-Control': 'public, max-age=3600',
-    },
-  });
 }
 
 function dailyVideoWatchNotFound(env: Env): Response {
@@ -213,8 +220,12 @@ function dailyVideoWatchNotFound(env: Env): Response {
 }
 
 async function serveDailyVideoWatchPage(env: Env, date: string): Promise<Response> {
-  const video = await loadDailyVideo(env, date);
-  if (!video) return dailyVideoWatchNotFound(env);
+  let video: DailyVideoRow;
+  try {
+    video = (await readAuthorizedDailyVideo(env, date)).row;
+  } catch {
+    return dailyVideoWatchNotFound(env);
+  }
 
   const { apiBase, siteBase } = getBases(env);
   const canonical = `${siteBase}/video/daily/${date}`;
@@ -282,7 +293,7 @@ ${renderDailyVideoPlayer(video, env, { showWatchLink: false })}
     jsonLd,
     bodyHtml,
   });
-  return html(page, 200, 3600);
+  return html(page, 200, null);
 }
 
 // ── /daily(/) 归档索引 ─────────────────────────────────────────
@@ -587,20 +598,6 @@ Sitemap: ${siteBase}/sitemap.xml
 // sitemapindex 只能容 <sitemap> 子节点(不能放 <url>),故首页/归档并入日报片的 <urlset>。
 async function sitemapIndexResponse(env: Env): Promise<Response> {
   const { siteBase } = getBases(env);
-  const daily = await loadDailyPages(env); // date DESC
-  const latestDailyMod = latestDailyPageModified(daily);
-  const dailyMod = latestDailyMod ? dateOnly(latestDailyMod) : null;
-  const videos = await loadDailyVideos(env);
-  const videoMod = videos.reduce<string | null>((latest, row) => {
-    const value = row.updated_at || row.uploaded_at;
-    return !latest || value > latest ? value : latest;
-  }, null);
-
-  const entries: string[] = [];
-  entries.push(sitemapEntry(`${siteBase}/sitemap-daily.xml`, dailyMod));
-  entries.push(sitemapEntry(`${siteBase}/sitemap-archive.xml`, null));
-  entries.push(sitemapEntry(`${siteBase}/video-sitemap.xml`, videoMod ? dateOnly(videoMod) : null));
-
   // 各源仍符合内容门禁的 live 页计数 + 最新 generated_at，据此算续片数
   // (ceil(count/5万))，空源仍列 page1。JOIN items 防止陈旧 live 索引把已删除/去重/敏感项继续暴露。
   const countRes = await env.DB.prepare(
@@ -612,6 +609,23 @@ async function sitemapIndexResponse(env: Env): Promise<Response> {
   ).all<{ source: string; c: number; m: string | null }>();
   const counts = new Map<string, { c: number; m: string | null }>();
   for (const r of countRes.results || []) counts.set(r.source, { c: Number(r.c), m: r.m });
+
+  // All unrelated async reads are complete before this single release snapshot. Each
+  // release loads page+video graphs and then performs the shared joined final guard.
+  const releases = await listAuthorizedDailyReleaseSummaries(env);
+  const daily = dailyPagesFromReleases(releases);
+  const latestDailyMod = latestDailyPageModified(daily);
+  const dailyMod = latestDailyMod ? dateOnly(latestDailyMod) : null;
+  const videos = releases.map((release) => release.video)
+    .filter((video): video is DailyVideoRow => video !== null);
+  const videoMod = videos.reduce<string | null>((latest, row) => {
+    const value = row.updated_at || row.uploaded_at;
+    return !latest || value > latest ? value : latest;
+  }, null);
+  const entries: string[] = [];
+  entries.push(sitemapEntry(`${siteBase}/sitemap-daily.xml`, dailyMod));
+  entries.push(sitemapEntry(`${siteBase}/sitemap-archive.xml`, null));
+  entries.push(sitemapEntry(`${siteBase}/video-sitemap.xml`, videoMod ? dateOnly(videoMod) : null));
 
   for (const s of SITEMAP_SOURCES) {
     const row = counts.get(s);
@@ -693,8 +707,10 @@ function isValidArchiveGroup(row: ArchiveSitemapGroup): boolean {
 // 旧 /sitemap.xml 内容整体搬来:/ + /daily/ + 全部 daily_pages 行。
 async function dailySitemapResponse(env: Env): Promise<Response> {
   const { siteBase } = getBases(env);
-  const rows = await loadDailyPages(env); // date DESC
-  const videos = await loadDailyVideos(env);
+  const releases = await listAuthorizedDailyReleaseSummaries(env);
+  const rows = dailyPagesFromReleases(releases); // date DESC
+  const videos = releases.map((release) => release.video)
+    .filter((video): video is DailyVideoRow => video !== null);
   const latestDailyMod = latestDailyPageModified(rows);
   const latestMod = latestDailyMod ? dateOnly(latestDailyMod) : dateOnly(new Date().toISOString());
 
@@ -867,7 +883,7 @@ export async function handleSeoRoute(request: Request, env: Env): Promise<Respon
   const dateMatch = pathname.match(DAILY_DATE_RE);
   if (dateMatch) {
     const date = dateMatch[1];
-    if (isValidCalendarDate(date)) return serveDailyPage(env, date);
+    if (isValidCalendarDate(date)) return serveDailyPage(env, date, method);
     return redirectArchive(env); // 2026-13-99 之类
   }
 

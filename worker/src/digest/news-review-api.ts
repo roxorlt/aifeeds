@@ -1,6 +1,7 @@
 import type { Env } from '../index';
 import {
   createNewsReviewToken,
+  authorizeNewsReviewBatchSnapshot,
   getActiveNewsReviewBatch,
   getPublishedNewsReviewSelection,
   getNewsReviewBatch,
@@ -104,13 +105,19 @@ export async function handleDailyNewsReviewApi(
     const active = sanitized.batch;
     const requestedIsActive = requestedBatch.is_current && requestedBatch.lineage_id === date;
     let batch = requestedIsActive ? active : requestedBatch;
-    if (!requestedIsActive && containsManualCandidate(requestedBatch)) {
-      // Historical revisions remain immutable and read-only. Their old manual
-      // proofs cannot be trusted, so hide those snapshots in the response while
-      // preserving the old revision metadata and its link to the active revision.
-      const hiddenIds = new Set(requestedBatch.candidates
-        .filter(isManualCandidate)
-        .map((candidate) => candidate.item_id));
+    let authorizationDenied: Array<{ item_id: string; code: string }> = [];
+    if (!requestedIsActive) {
+      // Historical rows are immutable audit records, not permanent
+      // capabilities. Project every historical identity through today's
+      // registry/source/item/manual authorization without rewriting the row.
+      const authorization = await authorizeNewsReviewBatchSnapshot(
+        env, date, requestedBatch, requestedBatch.candidate_ids, 'historical_review_api',
+      );
+      const allowedIds = new Set(authorization.allowed_ids);
+      const hiddenIds = new Set(requestedBatch.candidate_ids.filter((id) => !allowedIds.has(id)));
+      authorizationDenied = authorization.decisions
+        .filter((decision) => !decision.allowed)
+        .map((decision) => ({ item_id: decision.item_id, code: decision.code }));
       batch = {
         ...requestedBatch,
         candidates: requestedBatch.candidates.filter((candidate) => !hiddenIds.has(candidate.item_id)),
@@ -123,12 +130,40 @@ export async function handleDailyNewsReviewApi(
         ])],
       };
     }
-    const [publishedSelectedIds, editorialState] = await Promise.all([
+    let [publishedSelectedIds, editorialState] = await Promise.all([
       getPublishedNewsReviewSelection(env, date, batch),
       batch.edit_revision > 0 && batch.applied_selected_ids?.length
         ? getDailyStageState(env, date, 'editorial')
         : Promise.resolve(null),
     ]);
+    const authorizationBatch = requestedIsActive ? active : requestedBatch;
+    const outwardAuthorization = await authorizeNewsReviewBatchSnapshot(
+      env, date, authorizationBatch, authorizationBatch.candidate_ids, 'review_api_final_projection',
+    );
+    const outwardAllowed = new Set(outwardAuthorization.allowed_ids);
+    const outwardHidden = new Set(batch.candidate_ids.filter((id) => !outwardAllowed.has(id)));
+    if (outwardHidden.size) {
+      batch = {
+        ...batch,
+        candidates: batch.candidates.filter((candidate) => !outwardHidden.has(candidate.item_id)),
+        candidate_ids: batch.candidate_ids.filter((id) => !outwardHidden.has(id)),
+        default_selected_ids: batch.default_selected_ids.filter((id) => !outwardHidden.has(id)),
+        applied_selected_ids: batch.applied_selected_ids?.filter((id) => !outwardHidden.has(id)) ?? null,
+        auto_repaired_invalid_ids: [...new Set([
+          ...(batch.auto_repaired_invalid_ids || []),
+          ...outwardHidden,
+        ])],
+      };
+      publishedSelectedIds = publishedSelectedIds.filter((id) => outwardAllowed.has(id));
+      const deniedById = new Map(authorizationDenied.map((entry) => [entry.item_id, entry]));
+      for (const decision of outwardAuthorization.decisions) {
+        if (!decision.allowed) deniedById.set(decision.item_id, {
+          item_id: decision.item_id,
+          code: decision.code,
+        });
+      }
+      authorizationDenied = [...deniedById.values()];
+    }
     const expired = now >= batch.expires_at;
     const superseded = !!batch.superseded_by;
     let newerBatch: { batch_id: string; review_url: string } | null = null;
@@ -158,6 +193,7 @@ export async function handleDailyNewsReviewApi(
         }
         : null,
       auto_repaired_invalid_ids: batch.auto_repaired_invalid_ids,
+      authorization_denied: authorizationDenied,
       expires_at: new Date(batch.expires_at).toISOString(),
       expired,
       superseded,

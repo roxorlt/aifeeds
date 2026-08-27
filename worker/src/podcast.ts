@@ -44,6 +44,21 @@ import { canonicalize, idHashOf, urlHashOf } from './feeds/extract';
 import { parseSeenSet, partitionForCatchup } from './x-list-cursor';
 // 无音频文字项改判 blog：复用 blog 管线的 trigger + 全文门槛(同一套 BlogPipeline 产 excerpt_zh)。
 import { triggerBlogWorkflowForItem, isFullEnoughHtml } from './blog';
+import {
+  markWorkflowPending,
+  markWorkflowTriggered,
+  runFeedWorkflowRecovery,
+  type FeedWorkflowRecoveryResult,
+} from './feeds/dedup';
+import { pushDeerWarning } from './notifier';
+import {
+  produceWorkflowRetryExhaustedWarnings,
+  readWarningCanonicalReadiness,
+  releaseWarningOutboxLegacyBridgeReservations,
+  resolveWarningOutboxLegacyBridge,
+  type WarningOutboxBridgeResult,
+  type WarningOutboxProducerResult,
+} from './ops/warning-outbox';
 
 /** podcast catch-up 分流阈值：最新 N 条立即 trigger，其余 pending_workflow=1 平摊(§5.5)。 */
 const PODCAST_CATCHUP_THRESHOLD = 50;
@@ -182,6 +197,7 @@ async function ingestOnePodcastFeed(
         JSON.stringify({
           feed_id: feed.id,
           feed_key: feed.key,
+          editorial_type: feed.editorial_type,
           guid: e.guid,
           canonical_url: e.canonicalUrl,
           url_hash: e.urlHash,
@@ -219,6 +235,7 @@ async function ingestOnePodcastFeed(
         feed_id: feed.id,
         show_key: feed.key,
         source_company: feed.source_company,
+        editorial_type: feed.editorial_type,
         show_name: feed.name,
         feed_url: feed.feed_url,
         fetch_strategy: feed.fetch_strategy,
@@ -279,6 +296,7 @@ async function ingestOnePodcastFeed(
         feed_id: feed.id,
         feed_key: feed.key,
         source_company: feed.source_company,
+        editorial_type: feed.editorial_type,
         blog_name: feed.name,
         feed_url: feed.feed_url,
         fetch_strategy: feed.fetch_strategy,
@@ -398,7 +416,10 @@ export async function triggerPodcastWorkflowForItem(
   itemId: string,
   signals: PodcastTriggerSignals,
 ): Promise<TriggerResult> {
-  if (!env.PODCAST_PIPELINE_WORKFLOW) return 'binding_missing';
+  if (!env.PODCAST_PIPELINE_WORKFLOW) {
+    await markWorkflowPending(env, itemId, 'WORKFLOW_BINDING_MISSING');
+    return 'binding_missing';
+  }
 
   const nowUnix = Math.floor(Date.now() / 1000);
   try {
@@ -426,14 +447,95 @@ export async function triggerPodcastWorkflowForItem(
         lang: 'zh' as const,
       },
     });
+    await markWorkflowTriggered(env, itemId);
     return 'triggered';
   } catch (e) {
     if (String(e).toLowerCase().includes('already exists')) {
+      await markWorkflowTriggered(env, itemId);
       return 'already_exists';
     }
     console.error(`[podcast-trigger] create failed for ${itemId}:`, e);
+    await markWorkflowPending(env, itemId, 'WORKFLOW_CREATE_FAILED');
     return 'failed';
   }
+}
+
+export type PodcastWorkflowRecoveryResult = FeedWorkflowRecoveryResult & {
+  warning_mode: 'legacy' | 'bridge' | 'outbox';
+  warning_bridge?: WarningOutboxBridgeResult;
+  warning_outbox?: WarningOutboxProducerResult;
+};
+
+/** 每小时独立恢复至少 30 分钟仍未完成的 podcast workflow。 */
+export async function runPodcastWorkflowRecovery(env: Env): Promise<PodcastWorkflowRecoveryResult> {
+  const producerEnabled = env.WARNING_OUTBOX_PRODUCER_ENABLED === '1';
+  const drainEnabled = env.WARNING_OUTBOX_DRAIN_ENABLED === '1';
+  const canonicalReady = producerEnabled && drainEnabled
+    ? (await readWarningCanonicalReadiness(env, 'podcast')).ready
+    : false;
+  const targetAuthority = producerEnabled && drainEnabled && canonicalReady;
+  const legacyAuthority = !producerEnabled || (producerEnabled && drainEnabled && !canonicalReady);
+  let bridgeResult: WarningOutboxBridgeResult = {
+    status: 'ok', suppressed_ids: [], legacy_ids: [], alert_legacy_owned: 0,
+    alert_bridge_suppressed: 0, bridge_duplicate_possible: 0,
+  };
+  let bridgeError: unknown;
+  const recovery = await runFeedWorkflowRecovery(env, {
+    sourceType: 'podcast',
+    trigger: (itemId, extra) => triggerPodcastWorkflowForItem(env, itemId, {
+      hasNativeTranscript: Boolean(extra.transcript_url) || extra.transcript_tier === 'A',
+    }),
+    ...(legacyAuthority ? { onExhausted: async ({ itemIds, attempts, alertPeriod }: {
+      itemIds: string[]; attempts: number; alertPeriod: string;
+    }) => {
+      let legacyIds = itemIds;
+      if (drainEnabled) {
+        try {
+          bridgeResult = await resolveWarningOutboxLegacyBridge(env, 'podcast', itemIds, alertPeriod);
+          legacyIds = bridgeResult.legacy_ids;
+        } catch (error) {
+          bridgeError = error;
+          return false;
+        }
+      }
+      if (legacyIds.length === 0) return true;
+      const delivered = await pushDeerWarning(
+        env, '播客 workflow 自愈重试耗尽',
+        `${legacyIds.length} 条播客项已达到 ${attempts} 次自动重试上限（UTC ${alertPeriod}）：${legacyIds.slice(0, 10).join(', ')}`,
+      );
+      if (!delivered && drainEnabled) {
+        try {
+          await releaseWarningOutboxLegacyBridgeReservations(env, 'podcast', legacyIds, alertPeriod);
+        } catch (error) {
+          bridgeError = error;
+        }
+      }
+      return delivered;
+    } } : {}),
+  });
+  if (bridgeError) {
+    throw new Error(`warning_outbox_bridge_lookup_failed: ${String(bridgeError)}`);
+  }
+  if (!producerEnabled) {
+    return drainEnabled
+      ? { ...recovery, warning_mode: 'bridge', warning_bridge: bridgeResult }
+      : { ...recovery, warning_mode: 'legacy' };
+  }
+  const outbox = await produceWorkflowRetryExhaustedWarnings(env, 'podcast');
+  if (!targetAuthority) {
+    return {
+      ...recovery,
+      warning_mode: drainEnabled ? 'bridge' : 'outbox',
+      ...(drainEnabled ? { warning_bridge: bridgeResult } : {}),
+      warning_outbox: outbox,
+    };
+  }
+  return {
+    ...recovery,
+    exhausted_alerts: outbox.alert_enqueued,
+    warning_mode: 'outbox',
+    warning_outbox: outbox,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

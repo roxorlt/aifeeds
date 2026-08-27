@@ -25,7 +25,7 @@ export interface CronTaskDef {
   category: CronCategory;
   label: string;
   bjt_times: string[];
-  frequency: 'daily' | 'daily-2x' | 'daily-4x' | 'hourly-2x' | 'hourly-1x' | 'multi-tick';
+  frequency: 'daily' | 'daily-2x' | 'daily-4x' | 'hourly-2x' | 'hourly-1x' | 'multi-tick' | 'every-5-min';
   description: string;
 }
 
@@ -182,6 +182,24 @@ export const CRON_SCHEDULE: CronTaskDef[] = [
     description: '厂商博客 RSS 抓取 (每 2h, UTC 偶数时 :20) → blog-pipeline workflow enrich',
   },
   {
+    name: 'blog-workflow-recovery',
+    source: 'blog',
+    category: 'backfill',
+    label: '博客 workflow 自愈',
+    bjt_times: ['*:30'],
+    frequency: 'hourly-1x',
+    description: '扫描至少 30 分钟未完成的博客项，按小时幂等重试，最多 6 次',
+  },
+  {
+    name: 'warning-subject-backfill-blog',
+    source: 'blog',
+    category: 'backfill',
+    label: '博客告警身份暖机',
+    bjt_times: ['*:15'],
+    frequency: 'hourly-1x',
+    description: '按冻结高水位有界物化 raw alias 到 NFC canonical subject',
+  },
+  {
     name: 'podcast-fetch',
     source: 'podcast',
     category: 'fetch',
@@ -189,6 +207,24 @@ export const CRON_SCHEDULE: CronTaskDef[] = [
     bjt_times: ['03:50', '09:50', '15:50', '21:50'],
     frequency: 'daily-4x',
     description: 'AI 播客 RSS 抓取 (4x/天, UTC {1,7,13,19}:50) → podcast-pipeline workflow enrich',
+  },
+  {
+    name: 'podcast-workflow-recovery',
+    source: 'podcast',
+    category: 'backfill',
+    label: '播客 workflow 自愈',
+    bjt_times: ['*:30'],
+    frequency: 'hourly-1x',
+    description: '扫描至少 30 分钟未完成的播客项，按小时幂等重试，最多 6 次',
+  },
+  {
+    name: 'warning-subject-backfill-podcast',
+    source: 'podcast',
+    category: 'backfill',
+    label: '播客告警身份暖机',
+    bjt_times: ['*:15'],
+    frequency: 'hourly-1x',
+    description: '独立有界物化 podcast raw alias 到 NFC canonical subject',
   },
   // ─── 通用 (common) ───────────────────────────────────────────
   {
@@ -208,6 +244,51 @@ export const CRON_SCHEDULE: CronTaskDef[] = [
     bjt_times: ['11:35'],
     frequency: 'daily',
     description: '清理过期数据 (refresh_log / events / cron_runs 30d+)',
+  },
+  {
+    name: 'warning-outbox-drain',
+    source: 'common',
+    category: 'system',
+    label: '可靠告警 Outbox 投递',
+    bjt_times: ['*/5'],
+    frequency: 'every-5-min',
+    description: '每 5 分钟独立租约投递；disabled、ok、partial，异常单独记 cron error',
+  },
+  {
+    name: 'warning-outbox-retention',
+    source: 'common',
+    category: 'cleanup',
+    label: '可靠告警 Outbox 清理',
+    bjt_times: ['11:35'],
+    frequency: 'daily',
+    description: 'UTC 03:35 有界清理最多 500 个已到期终态事件',
+  },
+  {
+    name: 'publication-capacity-warning-produce',
+    source: 'common',
+    category: 'system',
+    label: '发布容量告警物化',
+    bjt_times: ['*/5'],
+    frequency: 'every-5-min',
+    description: '每 5 分钟独立物化永久容量阈值 crossing 到 042 专用 outbox',
+  },
+  {
+    name: 'publication-capacity-warning-drain',
+    source: 'common',
+    category: 'system',
+    label: '发布容量告警投递',
+    bjt_times: ['*/5'],
+    frequency: 'every-5-min',
+    description: '每 5 分钟独立租约投递 042 容量告警，不依赖 039 或发布开关',
+  },
+  {
+    name: 'publication-capacity-warning-retention',
+    source: 'common',
+    category: 'cleanup',
+    label: '发布容量告警清理',
+    bjt_times: ['11:35'],
+    frequency: 'daily',
+    description: 'UTC 03:35 有界清理 042 outbox 到期终态；永久 crossing 不删除',
   },
   {
     name: 'warning-digest',

@@ -2,13 +2,13 @@
 //
 // FEED_REGISTRY = curated 的可订阅 feed 清单（增删源改这里，不动 migration）。
 // 设计文档 §3.1：2026-06-09 逐条实测可直连的 ~24 源（feed_url 用 verifiedFeedUrl 列真实地址）。
-//   - 10 国外博客原生 RSS（含 Anthropic 第三方桥）+ 2 国内原生（Qwen 旧站 / 美团）
+//   - 国外博客以官方 RSS/page-scrape 为主（Anthropic 已改官方 sitemap）+ 国内官方源
 //   - 1 GitHub Releases（MiniCPM，归 source_type='blog'）
 //   - 11 播客 feed（A 档 5 个有原生文字稿）
 //   - (Phase 2,2026-06-22) +4 国内播客,经 HK VPS 自托管 RSSHub 小宇宙路由（via='rsshub'）→ 共 28
 //   - (Phase 3,2026-06-22) +5 page-scrape 博客（AI21/Cohere/Databricks/MiniMax/美团）→ 共 32
 //   - (2026-06-24) +3 国外第三方新闻媒体原生 RSS（TechCrunch / The Verge / MIT Technology Review）→ 共 35
-//   - (2026-06-25) +1 微博科技热搜 via HK RSSHub（热度雷达，Worker 转发 WEIBO_COOKIES）→ 共 39
+//   - (2026-06-25) +1 微博科技热搜 via HK RSSHub（热度雷达，Worker 转发 WEIBO_COOKIES）→ 39；2026-08-27 + Z.ai 官方模型列表 → 共 40
 //
 // ensureFeedSources(env) 启动时幂等 upsert 进 sources 表（镜像 X 把 list 存 sources 的范式）：
 //   sources.id=FeedDef.id, source_type=kind, source_ref=key, name, config=JSON.stringify(FeedDef)。
@@ -122,12 +122,11 @@ const FOREIGN_BLOGS: FeedDef[] = [
     cc_policy: "allow",
     editorial_type: "official",
     via: "native",
-    feed_url:
-      "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_news.xml",
+    feed_url: "https://www.anthropic.com/news",
     cadence_hours: 2,
-    fetch_strategy: "native",
+    fetch_strategy: "page-scrape",
     site_base: "https://www.anthropic.com",
-    notes: "第三方 SPOF（Olshansk RSS 桥）；官方无 RSS",
+    notes: "官方 sitemap.xml 发现 /news/<slug>，详情页静态抽取；不依赖第三方 RSS bridge",
   },
   {
     id: "blog:mistral",
@@ -258,6 +257,24 @@ const FOREIGN_NEWS_MEDIA: FeedDef[] = [
 
 // ── 国内博客（原生，2）+ GitHub Releases（1）─────────────────────────────────
 const DOMESTIC_BLOGS: FeedDef[] = [
+  {
+    id: "blog:zai-models",
+    key: "zai-models",
+    kind: "blog",
+    format: "rss",
+    source_company: "Z.ai",
+    name: "Z.ai Models",
+    region: "domestic",
+    cc_policy: "deny",
+    editorial_type: "official",
+    via: "native",
+    feed_url: "https://huggingface.co/api/models?author=zai-org&sort=createdAt&direction=-1&limit=50",
+    cadence_hours: 2,
+    fetch_strategy: "native",
+    discovery_strategy: "huggingface-models",
+    site_base: "https://huggingface.co/zai-org",
+    notes: "官方 Hugging Face zai-org 模型列表；Link cursor 最多 5 页；以 API 不可变 _id 去重且只认 createdAt，改名/更新/旧仓转公开不造新事件",
+  },
   {
     id: "blog:qwen",
     key: "qwen",

@@ -8,6 +8,9 @@ vi.mock('./news-review', () => ({
   hasHumanReviewedNewsSelection: vi.fn(async () => false),
   sanitizeCurrentNewsReviewBatch: vi.fn(),
 }));
+vi.mock('./news-source-policy', () => ({
+  authorizeFormalNewsSet: vi.fn(),
+}));
 
 import type { Env } from '../index';
 import type { RenderRow } from './render';
@@ -16,7 +19,9 @@ import {
   buildStagedDailyCodexPayload,
   getDailyStageState,
   pushDailyStageToCodex,
+  pushDailyToCodex,
 } from './codex-push';
+import { authorizeFormalNewsSet } from './news-source-policy';
 import { getAppliedNewsReviewSelection } from './news-review';
 import {
   getPublishedNewsReviewSelection,
@@ -131,6 +136,10 @@ function makeEnv() {
 }
 
 beforeEach(() => {
+  vi.mocked(authorizeFormalNewsSet).mockImplementation(async (_env, _date, ids) => ({
+    allowed_ids: [...ids],
+    decisions: ids.map((id) => ({ item_id: id, allowed: true, code: 'ALLOW_SCHEDULED_FORMAL' as const })),
+  }));
   vi.mocked(getAppliedNewsReviewSelection).mockResolvedValue(null);
   vi.mocked(hasHumanReviewedNewsSelection).mockResolvedValue(false);
   vi.mocked(getPublishedNewsReviewSelection).mockResolvedValue([]);
@@ -581,7 +590,98 @@ describe('daily Codex payload v2', () => {
     expect('protocol_version' in legacy).toBe(false);
     expect(legacy.render_key).toMatch(/^daily-2026-07-21-normal-/);
   });
+
+  test('v1 rebuilds and reauthorizes the exact news body before every HTTP attempt', async () => {
+    const { env, setPool } = makeEnv();
+    setPool('2026-07-21', 'news', ['blog:openai:release']);
+    setPool('2026-07-21', 'ph', ['product_hunt:stable:2026-07-21']);
+    Object.assign(env as object, {
+      NEWS_CODEX_PUSH: '1',
+      X_CARD_SHARED_TOKEN: 'test-token',
+      API_BASE: 'https://api.ai-feeds.com',
+      DAILY_PUSH_ENDPOINT: 'https://render.example.test/ingest',
+    });
+    let authorizations = 0;
+    vi.mocked(authorizeFormalNewsSet).mockImplementation(async (_env, _date, ids) => {
+      authorizations += 1;
+      const allowedIds = authorizations <= 2 ? [...ids] : [];
+      return {
+        allowed_ids: allowedIds,
+        decisions: ids.map((id) => ({
+          item_id: id, allowed: allowedIds.includes(id),
+          code: allowedIds.includes(id) ? 'ALLOW_SCHEDULED_FORMAL' as const : 'DENY_SOURCE_DISABLED' as const,
+        })),
+      };
+    });
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('retry', { status: 500 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'ok', status: 'queued' }), { status: 202 }));
+
+    const result = await pushDailyToCodex(env, 8, '2026-07-21');
+
+    expect(result.ok).toBe(true);
+    expect(authorizations).toBe(3);
+    const first = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as DailyBody;
+    const second = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)) as DailyBody;
+    expect(newsIds(first)).toEqual(['blog:openai:release']);
+    expect(newsIds(second)).toEqual([]);
+    expect(first.render_key).not.toBe(second.render_key);
+  });
+
+  test('staged editorial retry fails closed when current authorization changes after the first attempt', async () => {
+    const { env, setPool } = makeEnv();
+    setPool('2026-07-21', 'news', ['blog:openai:release']);
+    Object.assign(env as object, {
+      X_CARD_SHARED_TOKEN: 'test-token',
+      DAILY_PUSH_STAGING_ENDPOINT: 'https://staging-render.example.test/ingest',
+      API_BASE: 'https://staging-api.ai-feeds.com',
+    });
+    let authorizations = 0;
+    vi.mocked(authorizeFormalNewsSet).mockImplementation(async (_env, _date, ids) => {
+      authorizations += 1;
+      return {
+        allowed_ids: authorizations <= 2 ? [...ids] : [],
+        decisions: ids.map((id) => ({
+          item_id: id, allowed: authorizations <= 2,
+          code: authorizations <= 2 ? 'ALLOW_SCHEDULED_FORMAL' as const : 'DENY_EXPLICIT_ITEM_RADAR' as const,
+        })),
+      };
+    });
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('retry', { status: 500 }))
+      .mockResolvedValueOnce(new Response('{}', { status: 202 }));
+
+    const result = await pushDailyStageToCodex(env, 'editorial', '2026-07-21');
+
+    expect(result).toMatchObject({ ok: false, stage: 'editorial', error: expect.stringContaining('empty_stage:editorial') });
+    expect(authorizations).toBe(3);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('finalize rejects a locked editorial snapshot whose news authorization is no longer current', async () => {
+    const { env, setPool } = makeEnv();
+    seedAll(setPool);
+    for (const stage of ['foundation', 'editorial', 'papers'] as const) {
+      await buildStagedDailyCodexPayload(env, stage, { date: '2026-07-21', persistRevision: true });
+    }
+    vi.mocked(authorizeFormalNewsSet).mockImplementation(async (_env, _date, ids) => ({
+      allowed_ids: [],
+      decisions: ids.map((id) => ({ item_id: id, allowed: false, code: 'DENY_SOURCE_RADAR' as const })),
+    }));
+
+    await expect(buildStagedDailyCodexPayload(env, 'finalize', { date: '2026-07-21' }))
+      .rejects.toThrow('stale_editorial_authorization_requires_superseding_revision');
+  });
 });
+
+interface DailyBody {
+  render_key: string;
+  digest: { sections: { normal: Array<{ source: string; items: Array<{ item_id: string }> }> } };
+}
+
+function newsIds(body: DailyBody): string[] {
+  return body.digest.sections.normal.find((section) => section.source === 'news')?.items.map((item) => item.item_id) || [];
+}
 
 // HK 下游靠 origin 区分「人审序列」和「自动排序」，2026-08-19 之前所有推送只有
 // source: 'cloudflare-daily-staged',面板无法拒绝自动推送覆盖人审 r2。

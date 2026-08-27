@@ -18,7 +18,10 @@ test('product PushDeer message keeps the supplied title without alarm prefix', a
     '候选正文',
   );
 
-  expect(result).toEqual({ attempted: 2, succeeded: 2 });
+  expect(result).toEqual({
+    configured: 2, attempted: 2, succeeded: 2,
+    http_failures: 0, provider_failures: 0, exceptions: 0,
+  });
   expect(fetchMock).toHaveBeenCalledTimes(2);
   const body = new URLSearchParams(String(fetchMock.mock.calls[0][1]?.body));
   expect(body.get('text')).toBe('AI Feeds 今日行业要闻候选');

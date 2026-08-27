@@ -8,15 +8,20 @@ vi.mock('./daily-page-run', () => ({
 vi.mock('../notifier', () => ({
   pushDeerAlert: vi.fn(async () => {}),
 }));
+vi.mock('./publication-release', () => ({
+  loadCurrentDailyReleaseForBuild: vi.fn(),
+}));
 
 import { runDailyPagePhase, checkDailyPageFreshness } from './daily-page-monitor';
 import { generateDailyPage } from './daily-page-run';
 import { pushDeerAlert } from '../notifier';
+import { loadCurrentDailyReleaseForBuild } from './publication-release';
 import { bjtDateStr } from './lib';
 import type { Env } from '../index';
 
 const genMock = vi.mocked(generateDailyPage);
 const alertMock = vi.mocked(pushDeerAlert);
+const releaseMock = vi.mocked(loadCurrentDailyReleaseForBuild);
 
 function baseEnv(over: Partial<Env> = {}): Env {
   return { PUSHDEER_ADMIN_KEYS: 'k1' } as unknown as Env;
@@ -74,23 +79,6 @@ function makeKv() {
   };
 }
 
-function makeDb(generatedAt: string | null) {
-  return {
-    prepare(sql: string) {
-      const stmt = {
-        bind() { return stmt; },
-        async first<T>() {
-          if (/daily_pages/i.test(sql)) {
-            return (generatedAt ? { generated_at: generatedAt } : null) as T | null;
-          }
-          return null as T | null;
-        },
-      };
-      return stmt;
-    },
-  };
-}
-
 function envFresh(db: unknown, kv: unknown): Env {
   return { DB: db, AUTH_KV: kv, PUSHDEER_ADMIN_KEYS: 'k1' } as unknown as Env;
 }
@@ -99,12 +87,16 @@ describe('checkDailyPageFreshness(#4 缺页兜底)', () => {
   beforeEach(() => {
     alertMock.mockReset();
     alertMock.mockResolvedValue(undefined);
+    releaseMock.mockReset();
   });
 
-  test('今天有新鲜行(generated_at=此刻)→ fresh,不告警', async () => {
+  test('今天有经当前 guard 验证的新鲜 release head → fresh,不告警', async () => {
     const kv = makeKv();
-    const res = await checkDailyPageFreshness(envFresh(makeDb(new Date().toISOString()), kv));
+    const promotedAt = Date.now();
+    releaseMock.mockResolvedValue({ head: { promoted_at_ms: promotedAt } } as never);
+    const res = await checkDailyPageFreshness(envFresh({} as never, kv));
     expect(res.fresh).toBe(true);
+    expect(res.generatedAt).toBe(new Date(promotedAt).toISOString());
     expect(res.reason).toBe('fresh');
     expect(res.alerted).toBe(false);
     expect(alertMock).not.toHaveBeenCalled();
@@ -112,7 +104,8 @@ describe('checkDailyPageFreshness(#4 缺页兜底)', () => {
 
   test('今天无行 → 告警(reason=missing),且当天只告一次', async () => {
     const kv = makeKv();
-    const env = envFresh(makeDb(null), kv);
+    releaseMock.mockResolvedValue(null);
+    const env = envFresh({} as never, kv);
 
     const first = await checkDailyPageFreshness(env);
     expect(first.reason).toBe('missing');
@@ -131,13 +124,24 @@ describe('checkDailyPageFreshness(#4 缺页兜底)', () => {
     expect(alertMock).toHaveBeenCalledTimes(1); // 仍是 1 次
   });
 
-  test('陈旧行(generated_at=远早于今天 UTC 0 点)→ 告警(reason=stale)', async () => {
+  test('陈旧 release head(promoted_at=远早于今天 UTC 0 点)→ 告警(reason=stale)', async () => {
     const kv = makeKv();
     const stale = new Date(Date.UTC(2000, 0, 1)).toISOString();
-    const res = await checkDailyPageFreshness(envFresh(makeDb(stale), kv));
+    releaseMock.mockResolvedValue({ head: { promoted_at_ms: Date.parse(stale) } } as never);
+    const res = await checkDailyPageFreshness(envFresh({} as never, kv));
     expect(res.fresh).toBe(false);
     expect(res.reason).toBe('stale');
     expect(res.alerted).toBe(true);
+    expect(alertMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('裸 daily_pages 即使存在，当前 release guard 拒绝也按 missing fail-closed 告警', async () => {
+    const kv = makeKv();
+    releaseMock.mockRejectedValue(new Error('FORMAL_NEWS_FINAL_GUARD_FAILED'));
+    const res = await checkDailyPageFreshness(envFresh({
+      prepare() { throw new Error('must not read bare daily_pages'); },
+    }, kv));
+    expect(res).toMatchObject({ fresh: false, generatedAt: null, alerted: true, reason: 'missing' });
     expect(alertMock).toHaveBeenCalledTimes(1);
   });
 });

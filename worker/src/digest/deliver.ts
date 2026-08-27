@@ -10,6 +10,7 @@ import { DIGEST_SOURCE_ORDER, type DigestSource, type Density } from './config';
 import { nextSendAt, genEmailToken, getBases } from './lib';
 import { buildDigestEmail, type DigestItem } from './templates';
 import { stripLabelPrefix } from '../feeds/classify-translate';
+import { authorizeFormalNewsSet } from './news-source-policy';
 
 interface DeliverParams {
   subId: number;
@@ -159,6 +160,60 @@ function toDigestItem(source: DigestSource, row: ItemRow): DigestItem {
   };
 }
 
+async function collectAuthorizedDigestItems(
+  env: Env,
+  sk: string,
+  density: Density,
+  sources: readonly DigestSource[],
+): Promise<{ items: DigestItem[]; subject: string }> {
+  const items: DigestItem[] = [];
+  const subjRow = await env.DB.prepare(
+    `SELECT items_meta FROM digest_pool WHERE slot_key = ? AND source = '_subject' AND density = 'meta'`,
+  )
+    .bind(sk)
+    .first<{ items_meta: string | null }>();
+  let subject = '今日 AI 精选';
+  try {
+    subject = (JSON.parse(subjRow?.items_meta || '{}').subject as string) || subject;
+  } catch {
+    /* ignore */
+  }
+
+  for (const source of DIGEST_SOURCE_ORDER) {
+    if (source === 'clawhub') continue;
+    if (source !== 'news' && !sources.includes(source)) continue;
+    const pool = await env.DB.prepare(
+      `SELECT item_ids, items_meta FROM digest_pool WHERE slot_key = ? AND source = ? AND density = ?`,
+    )
+      .bind(sk, source, density)
+      .first<{ item_ids: string; items_meta: string | null }>();
+    if (!pool) continue;
+    const poolIds = safeParseArray<string>(pool.item_ids);
+    let ids = source === 'news'
+      ? (await authorizeFormalNewsSet(env, sk.slice(0, 10), poolIds, 'email_delivery')).allowed_ids
+      : poolIds;
+    if (!ids.length) continue;
+    const ph = ids.map(() => '?').join(',');
+    const r = await env.DB.prepare(
+      `SELECT id, title, content, content_translated, author, handle, url, media, extra
+       FROM items WHERE id IN (${ph}) AND deleted_at IS NULL`,
+    )
+      .bind(...ids)
+      .all<ItemRow>();
+    const byId = new Map((r.results || []).map((row) => [row.id, row]));
+    if (source === 'news') {
+      ids = (await authorizeFormalNewsSet(
+        env, sk.slice(0, 10), ids, 'email_delivery_final_attempt',
+      )).allowed_ids;
+    }
+    for (const id of ids) {
+      const row = byId.get(id);
+      if (row) items.push(toDigestItem(source, row));
+    }
+  }
+  return { items, subject };
+}
+
 export class DigestDeliverWorkflow extends WorkflowEntrypoint<Env, DeliverParams> {
   async run(event: WorkflowEvent<DeliverParams>, step: WorkflowStep) {
     const { subId, slotKey: sk } = event.payload;
@@ -188,47 +243,9 @@ export class DigestDeliverWorkflow extends WorkflowEntrypoint<Env, DeliverParams
     const density = sub.density as Density;
 
     // Step 1:选品(每源各取,读 pool;无 LLM)
-    const collected = await step.do('collect', RETRY, async () => {
-      const items: DigestItem[] = [];
-      const subjRow = await this.env.DB.prepare(
-        `SELECT items_meta FROM digest_pool WHERE slot_key = ? AND source = '_subject' AND density = 'meta'`,
-      )
-        .bind(sk)
-        .first<{ items_meta: string | null }>();
-      let subject = '今日 AI 精选';
-      try {
-        subject = (JSON.parse(subjRow?.items_meta || '{}').subject as string) || subject;
-      } catch {
-        /* ignore */
-      }
-
-      for (const source of DIGEST_SOURCE_ORDER) {
-        // 2026-06-21 ClawHub 退出订阅日报:即便老订阅 sources 里仍存了 clawhub 也不投递(只留 homepage 频道)。
-        if (source === 'clawhub') continue;
-        // 'news'(行业新闻)是强制头条,所有订阅者都收;其余源按用户订阅勾选。
-        if (source !== 'news' && !sources.includes(source)) continue;
-        const pool = await this.env.DB.prepare(
-          `SELECT item_ids, items_meta FROM digest_pool WHERE slot_key = ? AND source = ? AND density = ?`,
-        )
-          .bind(sk, source, density)
-          .first<{ item_ids: string; items_meta: string | null }>();
-        if (!pool) continue;
-        const ids = safeParseArray<string>(pool.item_ids);
-        if (!ids.length) continue;
-        const ph = ids.map(() => '?').join(',');
-        const r = await this.env.DB.prepare(
-          `SELECT id, title, content, content_translated, author, handle, url, media, extra FROM items WHERE id IN (${ph})`,
-        )
-          .bind(...ids)
-          .all<ItemRow>();
-        const byId = new Map((r.results || []).map((row) => [row.id, row]));
-        for (const id of ids) {
-          const row = byId.get(id);
-          if (row) items.push(toDigestItem(source, row));
-        }
-      }
-      return { items, subject };
-    });
+    const collected = await step.do('collect', RETRY, async () => (
+      collectAuthorizedDigestItems(this.env, sk, density, sources)
+    ));
 
     // Empty 兜底:记 no_items + 跳到明天该节点
     if (!collected.items.length) {
@@ -246,7 +263,7 @@ export class DigestDeliverWorkflow extends WorkflowEntrypoint<Env, DeliverParams
     }
 
     // Step 2:渲染
-    const mail = await step.do('render', RETRY, async () => {
+    await step.do('render', RETRY, async () => {
       const { apiBase, siteBase } = getBases(this.env);
       const token = await genEmailToken(this.env, sub.email, subId);
       const unsubUrl = `${apiBase}/unsubscribe?token=${encodeURIComponent(sub.unsubscribe_token)}`;
@@ -264,11 +281,26 @@ export class DigestDeliverWorkflow extends WorkflowEntrypoint<Env, DeliverParams
     const unsubUrl = `${getBases(this.env).apiBase}/unsubscribe?token=${encodeURIComponent(sub.unsubscribe_token)}`;
     try {
       const sendRes = await step.do('send', RETRY, async () => {
+        // Workflow step retries re-enter this callback. Re-read the pool and
+        // current source/item/manual authorization for every actual Resend
+        // attempt, then rebuild the exact wire mail from that current set.
+        const { apiBase, siteBase } = getBases(this.env);
+        const token = await genEmailToken(this.env, sub.email, subId);
+        const current = await collectAuthorizedDigestItems(this.env, sk, density, sources);
+        if (!current.items.length) return { ok: true as const, noItems: true as const, itemCount: 0 };
+        const currentMail = buildDigestEmail({
+          subject: current.subject,
+          items: current.items,
+          emailToken: token,
+          unsubscribeUrl: unsubUrl,
+          apiBase,
+          siteBase,
+        });
         const r = await sendEmail(this.env, {
           to: sub.email,
-          subject: mail.subject,
-          text: mail.text,
-          html: mail.html,
+          subject: currentMail.subject,
+          text: currentMail.text,
+          html: currentMail.html,
           headers: {
             'List-Unsubscribe': `<${unsubUrl}>`,
             'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
@@ -276,13 +308,26 @@ export class DigestDeliverWorkflow extends WorkflowEntrypoint<Env, DeliverParams
           replyTo: REPLY_TO,
         });
         if (!r.ok) throw new Error(`resend_${r.errCode || 'fail'}`);
-        return r;
+        return { ...r, noItems: false as const, itemCount: current.items.length };
       });
+      if (sendRes.noItems) {
+        await step.do('record-no-items-after-reauthorization', RETRY, async () => {
+          await this.env.DB.prepare(
+            `INSERT INTO digest_send_log (subscription_id, slot_key, sent_at, items_count, status) VALUES (?, ?, ?, 0, 'no_items')`,
+          )
+            .bind(subId, sk, Date.now())
+            .run();
+          await this.env.DB.prepare(`UPDATE subscriptions SET next_send_at = ? WHERE id = ?`)
+            .bind(nextSendAt(sub.send_slot), subId)
+            .run();
+        });
+        return { subId, status: 'no_items' };
+      }
       await step.do('record-success', RETRY, async () => {
         await this.env.DB.prepare(
           `INSERT INTO digest_send_log (subscription_id, slot_key, sent_at, items_count, status, resend_message_id) VALUES (?, ?, ?, ?, 'sent', ?)`,
         )
-          .bind(subId, sk, Date.now(), collected.items.length, sendRes.id || null)
+          .bind(subId, sk, Date.now(), sendRes.itemCount, sendRes.id || null)
           .run();
         await this.env.DB.prepare(
           `UPDATE subscriptions SET last_sent_at = ?, next_send_at = ?, worker_send_failures = 0 WHERE id = ? AND status IN ('active','paused')`,
@@ -290,7 +335,7 @@ export class DigestDeliverWorkflow extends WorkflowEntrypoint<Env, DeliverParams
           .bind(Date.now(), nextSendAt(sub.send_slot), subId)
           .run();
       });
-      return { subId, status: 'sent', count: collected.items.length };
+      return { subId, status: 'sent', count: sendRes.itemCount };
     } catch (err) {
       // 投递重试耗尽:记 failed,worker_send_failures++,>=5 → paused(防 Resend 故障 mass-kick)
       await step.do('record-fail', RETRY, async () => {

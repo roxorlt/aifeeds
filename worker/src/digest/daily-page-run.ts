@@ -8,7 +8,17 @@
 import type { Env } from '../index';
 import { buildDailyPageData, renderDailyPageHtml, type DailyPageData } from './daily-page';
 import { getBases, bjtDateStr } from './lib';
-import { loadDailyVideo } from './daily-video';
+import { authorizeFormalNewsSet } from './news-source-policy';
+import { canonicalBusinessRevision } from './publication-canonical';
+import { reserveAppendOnlyPublication } from './publication-storage';
+import {
+  assertCurrentDailyReleaseAuthorization,
+  assertCurrentDailyReleaseSetAuthorization,
+  loadCurrentDailyReleaseForBuild,
+  materializeAppendOnlyPublication,
+  projectAuthorizedDailyPageCompatibility,
+  promoteDailyRelease,
+} from './publication-release';
 
 const INDEXNOW_ENDPOINT = 'https://api.indexnow.org/indexnow';
 
@@ -28,25 +38,75 @@ function countItems(data: DailyPageData): number {
   return data.sections.reduce((n, s) => n + s.items.length, 0);
 }
 
-// R2 快照 + D1 索引 UPSERT(幂等:同 date 覆盖同一 key / 同一行)。
-async function persistPage(env: Env, data: DailyPageData): Promise<number> {
+function assertPublicationGates(env: Env): void {
+  const reservation = env.DAILY_PUBLICATION_RESERVATION_ENABLED === '1';
+  const put = env.DAILY_PUBLICATION_PUT_ENABLED === '1';
+  const promotion = env.DAILY_PUBLICATION_PROMOTION_ENABLED === '1';
+  if (put && !reservation) throw new Error('invalid_daily_publication_gates:put_without_reservation');
+  if (promotion && (!reservation || !put)) throw new Error('invalid_daily_publication_gates:promotion_without_dependencies');
+  if (!reservation || !put || !promotion) throw new Error('daily_publication_disabled');
+}
+
+// Append-only private object + exact D1 release-head promotion. Legacy daily_pages
+// remains an audit/compatibility projection and is never an outward authority.
+async function persistPage(
+  env: Env,
+  data: DailyPageData,
+): Promise<{ itemCount: number; release: Awaited<ReturnType<typeof promoteDailyRelease>> }> {
+  assertPublicationGates(env);
+  if (!env.READMES) throw new Error('daily_publication_r2_missing');
   const itemCount = countItems(data);
-  const video = await loadDailyVideo(env, data.date);
+  const current = await loadCurrentDailyReleaseForBuild(env, data.date);
+  const video = current?.video || null;
   const html = renderDailyPageHtml(data, env, video);
-  await env.READMES!.put(`daily/${data.date}.html`, html, {
-    httpMetadata: { contentType: 'text/html; charset=utf-8' },
+  const bytes = new TextEncoder().encode(html);
+  const authorization = await authorizeFormalNewsSet(
+    env, data.date, data.formalNewsItemIds, 'daily_page_reservation',
+  );
+  if (JSON.stringify(authorization.allowed_ids) !== JSON.stringify(data.formalNewsItemIds)) {
+    throw new Error('daily_page_formal_authorization_stale');
+  }
+  const head = current?.head || null;
+  const videoMode = head?.video_publication_id ? 'reuse_current' as const : 'none' as const;
+  const businessRevisionId = await canonicalBusinessRevision({
+    schema_version: 1,
+    kind: 'daily_page',
+    date: data.date,
+    html,
+    formal_news_item_ids: data.formalNewsItemIds,
+    review_batch: data.reviewBatch,
+    base_release_generation: Number(head?.release_generation || 0),
+    base_page_publication_id: head?.page_publication_id || null,
+    base_video_publication_id: head?.video_publication_id || null,
+    base_video_digest: head?.video_manifest_digest || null,
+    video_mode: videoMode,
   });
+  const reserved = await reserveAppendOnlyPublication({ DB: env.DB }, {
+    publication_date: data.date,
+    publication_type: 'page',
+    business_revision_id: businessRevisionId,
+    objects: [{ object_role: 'html', mime: 'text/html; charset=utf-8', bytes }],
+    metadata: { title: pageTitle(data.date, data.subject), item_count: itemCount, subject: data.subject },
+    formal_news_item_ids: data.formalNewsItemIds,
+    formal_guard_expected: JSON.parse(authorization.final_guard?.expected_json || '[]') as unknown[],
+    review_batch: data.reviewBatch,
+    release_binding: {
+      video_mode: videoMode,
+      bound_video_publication_id: head?.video_publication_id || null,
+      bound_video_digest: head?.video_manifest_digest || null,
+      base_release_generation: Number(head?.release_generation || 0),
+      base_page_publication_id: head?.page_publication_id || null,
+      base_video_publication_id: head?.video_publication_id || null,
+      base_video_digest: head?.video_manifest_digest || null,
+    },
+  });
+  await materializeAppendOnlyPublication(env, reserved.reservation, { html: bytes });
+  const release = await promoteDailyRelease(env, reserved.reservation.publication_id);
   const now = new Date().toISOString();
-  await env.DB.prepare(
-    `INSERT INTO daily_pages (date, title, item_count, generated_at, lastmod)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(date) DO UPDATE SET
-       title = excluded.title, item_count = excluded.item_count,
-       generated_at = excluded.generated_at, lastmod = excluded.lastmod`,
-  )
-    .bind(data.date, pageTitle(data.date, data.subject), itemCount, now, now)
-    .run();
-  return itemCount;
+  await projectAuthorizedDailyPageCompatibility(env, { ...release, date: data.date }, {
+    title: pageTitle(data.date, data.subject), item_count: itemCount, generated_at: now, lastmod: now,
+  });
+  return { itemCount, release };
 }
 
 // 生成单日日报静态页。历史日期(非今日 BJT)自动锚定候选窗口到该日,避免回填时选出"当下"的 top N。
@@ -65,7 +125,7 @@ export async function generateDailyPage(
   const itemCount = countItems(data);
   if (opts.dry) return { date, itemCount, skipped: false, reason: 'dry' };
 
-  await persistPage(env, data);
+  const persisted = await persistPage(env, data);
 
   // 前日重渲染:本日行已 UPSERT 进 daily_pages,重跑前一已生成日期的页面,其「后一日」导航即解析到本日,
   // 保证历史页链式互链完整。递归调用带 skipPrevRerender 防继续向前;skipIndexNow 不为补链再 ping。
@@ -78,6 +138,7 @@ export async function generateDailyPage(
   }
 
   if (!opts.skipIndexNow) {
+    await assertCurrentDailyReleaseAuthorization(env, date, persisted.release);
     const { siteBase } = getBases(env);
     await pingIndexNow(env, [
       `${siteBase}/daily/${date}`,
@@ -113,6 +174,10 @@ export async function backfillDailyPages(
   }
 
   if (!opts.dry && generatedUrls.length) {
+    const generatedDates = results.filter((result) => !result.skipped).map((result) => result.date);
+    await assertCurrentDailyReleaseSetAuthorization(env, generatedDates);
+    // Deliberately no await between the collection guard returning and fetch
+    // being started inside pingIndexNow.
     await pingIndexNow(env, [...generatedUrls, `${siteBase}/daily/`, `${siteBase}/sitemap.xml`]);
   }
   return results;

@@ -41,6 +41,13 @@ function meituanDateFromUrl(url: string): string | undefined {
 }
 
 const PAGE_INDEX: Record<string, PageIndexConfig> = {
+  // Anthropic: 官方无 RSS；从官方 sitemap 仅保留 /news/<slug>，详情页由 blog pipeline 抽取。
+  anthropic: {
+    method: "sitemap",
+    sitemaps: ["https://www.anthropic.com/sitemap.xml"],
+    isArticle: (u) => /^https:\/\/www\.anthropic\.com\/news\/[^/?#]+\/?$/.test(u),
+    recentN: 20,
+  },
   // AI21 Labs:WordPress 风 post-sitemap,只含文章 + 带 lastmod。
   ai21: {
     method: "sitemap",
@@ -92,7 +99,7 @@ export function hasPageIndexConfig(feedKey: string): boolean {
   return feedKey in PAGE_INDEX;
 }
 
-const SITEMAP_FETCH_MAX = 6; // sitemapindex 下钻时最多抓的子 sitemap 数(防爆)
+const SITEMAP_FETCH_MAX = 12; // sitemapindex 下钻时最多抓的子 sitemap 数(防爆)
 
 /** 从 block 取首个 <name>..</name> 内容(单行 XML 鲁棒)。 */
 function tagInner(block: string, name: string): string | null {
@@ -174,7 +181,13 @@ async function discoverViaSitemap(cfg: SitemapCfg): Promise<Array<{ loc: string;
     if (parsed.urls.length > 0) {
       collected.push(...parsed.urls);
     } else if (parsed.childSitemaps.length > 0) {
-      for (const child of parsed.childSitemaps.slice(0, SITEMAP_FETCH_MAX)) {
+      // Production sitemap indexes commonly put content/news shards after utility pages.
+      // Prefer article-looking shard names while retaining stable order inside each class.
+      const children = parsed.childSitemaps
+        .map((url, index) => ({ url, index, likelyArticles: /(?:news|blog|post|article|content)/i.test(url) }))
+        .sort((left, right) => Number(right.likelyArticles) - Number(left.likelyArticles) || left.index - right.index)
+        .slice(0, SITEMAP_FETCH_MAX);
+      for (const { url: child } of children) {
         const cxml = await throttledFetchText(child);
         if (cxml) collected.push(...parseSitemap(cxml).urls);
       }

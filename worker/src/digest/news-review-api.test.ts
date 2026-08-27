@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 vi.mock('./news-review', () => ({
+  authorizeNewsReviewBatchSnapshot: vi.fn(async (
+    env: unknown, date: string, _batch: unknown, ids: readonly string[], purpose: string,
+  ) => {
+    const policy = await import('./news-source-policy');
+    return policy.authorizeFormalNewsSet(env as never, date, ids, purpose);
+  }),
   createNewsReviewToken: vi.fn(async () => 'newer-token'),
   getActiveNewsReviewBatch: vi.fn(),
   getAppliedNewsReviewSelection: vi.fn(),
@@ -17,6 +23,7 @@ vi.mock('./codex-push', () => ({
   pushDailyStageToCodex: vi.fn(),
 }));
 vi.mock('./daily-page-run', () => ({ generateDailyPage: vi.fn() }));
+vi.mock('./news-source-policy', () => ({ authorizeFormalNewsSet: vi.fn() }));
 
 import { handleDailyNewsReviewApi } from './news-review-api';
 import {
@@ -30,6 +37,7 @@ import {
 } from './news-review';
 import { getDailyStageState, pushDailyStageToCodex } from './codex-push';
 import { generateDailyPage } from './daily-page-run';
+import { authorizeFormalNewsSet } from './news-source-policy';
 
 const batch = {
   review_date: '2026-07-30',
@@ -86,6 +94,10 @@ describe('daily news review API', () => {
     } as never);
     vi.mocked(pushDailyStageToCodex).mockResolvedValue({ ok: true } as never);
     vi.mocked(generateDailyPage).mockResolvedValue({} as never);
+    vi.mocked(authorizeFormalNewsSet).mockImplementation(async (_env, _date, ids) => ({
+      allowed_ids: [...ids],
+      decisions: ids.map((id) => ({ item_id: id, allowed: true, code: 'ALLOW_SCHEDULED_FORMAL' as const })),
+    }));
   });
 
   test('rejects requests that do not carry the HK-to-CF bearer secret', async () => {
@@ -121,6 +133,28 @@ describe('daily news review API', () => {
       editorial_revision: 7,
       editorial_content_hash: `sha256:${'a'.repeat(64)}`,
     });
+  });
+
+  test('active review response performs a final current projection and fails closed after mutation', async () => {
+    vi.mocked(authorizeFormalNewsSet).mockImplementation(async (_env, _date, ids, purpose) => ({
+      allowed_ids: purpose === 'review_api_final_projection'
+        ? ids.filter((id) => id !== 'news-2')
+        : [...ids],
+      decisions: ids.map((id) => id === 'news-2' && purpose === 'review_api_final_projection'
+        ? { item_id: id, allowed: false, code: 'DENY_SOURCE_DISABLED' as const }
+        : { item_id: id, allowed: true, code: 'ALLOW_SCHEDULED_FORMAL' as const }),
+    }));
+
+    const response = await handleDailyNewsReviewApi(
+      request('GET'), env(), Date.parse('2026-07-30T08:00:00Z'),
+    );
+    const payload = await response.json<Record<string, unknown>>();
+
+    expect((payload.candidates as Array<{ item_id: string }>).map((candidate) => candidate.item_id))
+      .not.toContain('news-2');
+    expect(payload.default_selected_ids).not.toContain('news-2');
+    expect(payload.published_selected_ids).not.toContain('news-2');
+    expect(payload.authorization_denied).toContainEqual({ item_id: 'news-2', code: 'DENY_SOURCE_DISABLED' });
   });
 
   test('GET returns a newly sanitized immutable revision without exposing an invalid manual snapshot', async () => {
@@ -184,6 +218,12 @@ describe('daily news review API', () => {
     vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
       batch: refreshed, changed: false, dropped_ids: [],
     } as never);
+    vi.mocked(authorizeFormalNewsSet).mockImplementation(async (_env, _date, ids) => ({
+      allowed_ids: ids.filter((id) => id !== manual.item_id),
+      decisions: ids.map((id) => id === manual.item_id
+        ? { item_id: id, allowed: false, code: 'DENY_UNVERIFIED_MANUAL' as const }
+        : { item_id: id, allowed: true, code: 'ALLOW_SCHEDULED_FORMAL' as const }),
+    }));
 
     const response = await handleDailyNewsReviewApi(request('GET'), env(), Date.parse('2026-07-30T08:00:00Z'));
     const payload = await response.json<Record<string, unknown>>();
@@ -196,6 +236,40 @@ describe('daily news review API', () => {
     expect(payload.candidates).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ lead_id: 'ml-stale-history' }),
     ]));
+  });
+
+  test('historical GET preserves the immutable row but projects current source/item authorization with reasons', async () => {
+    const requested = {
+      ...batch,
+      superseded_by: 'nr-20260730-fedcba654321',
+      batch_revision: 2,
+      lineage_id: '2026-07-30',
+      is_current: false,
+    };
+    const refreshed = {
+      ...batch,
+      batch_id: 'nr-20260730-fedcba654321',
+      batch_revision: 3,
+      lineage_id: '2026-07-30',
+      is_current: true,
+    };
+    vi.mocked(getNewsReviewBatch).mockResolvedValue(requested as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({ batch: refreshed, changed: false, dropped_ids: [] } as never);
+    vi.mocked(authorizeFormalNewsSet).mockImplementation(async (_env, _date, ids) => ({
+      allowed_ids: ids.filter((id) => id !== 'news-2'),
+      decisions: ids.map((id) => id === 'news-2'
+        ? { item_id: id, allowed: false, code: 'DENY_SOURCE_DISABLED' as const }
+        : { item_id: id, allowed: true, code: 'ALLOW_SCHEDULED_FORMAL' as const }),
+    }));
+
+    const response = await handleDailyNewsReviewApi(request('GET'), env(), Date.parse('2026-07-30T08:00:00Z'));
+    const payload = await response.json<Record<string, unknown>>();
+
+    expect((payload.candidates as Array<{ item_id: string }>).map((candidate) => candidate.item_id)).not.toContain('news-2');
+    expect(payload.default_selected_ids).not.toContain('news-2');
+    expect(payload.batch_selected_ids).not.toContain('news-2');
+    expect(payload.authorization_denied).toEqual([{ item_id: 'news-2', code: 'DENY_SOURCE_DISABLED' }]);
+    expect(requested.candidate_ids).toContain('news-2');
   });
 
   test('authenticated HK may resolve the active review link without a PushDeer capability', async () => {

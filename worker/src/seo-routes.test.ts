@@ -1,4 +1,41 @@
 import { describe, test, expect } from 'vitest';
+import { vi } from 'vitest';
+
+vi.mock('./digest/publication-release', () => {
+  async function summaries(env: any, limit?: number) {
+    const pages = (await env.DB.prepare(`SELECT date,title,item_count,generated_at,lastmod FROM daily_pages`).all()).results || [];
+    const videos = (await env.DB.prepare(`SELECT * FROM daily_videos`).all()).results || [];
+    const byDate = new Map(videos.map((video: any) => [video.date, video]));
+    const pageByDate = new Map(pages.map((page: any) => [page.date, page]));
+    const dates = [...new Set([...pages.map((page: any) => page.date), ...videos.map((video: any) => video.date)])]
+      .sort().reverse();
+    const rows = dates.map((date) => {
+      const page: any = pageByDate.get(date);
+      const video: any = byDate.get(date);
+      const timestamp = page?.lastmod || page?.generated_at || video?.updated_at || video?.uploaded_at;
+      return {
+        date, release_generation: 1, promoted_at_ms: Date.parse(timestamp),
+        title: page?.title || `AI 日报 ${date}`, item_count: page?.item_count || 0,
+        video: video || null,
+      };
+    });
+    return limit ? rows.slice(0, limit) : rows;
+  }
+  return {
+    listAuthorizedDailyReleaseSummaries: summaries,
+    readAuthorizedDailyPage: async (env: any, date: string) => {
+      const object = await env.READMES?.get(`daily/${date}.html`);
+      if (!object) throw new Error('not found');
+      const text = await new Response(object.body).text();
+      return { bytes: new TextEncoder().encode(text), release_generation: 1, metadata: {} };
+    },
+    readAuthorizedDailyVideo: async (env: any, date: string) => {
+      const release = (await summaries(env)).find((entry: any) => entry.date === date && entry.video);
+      if (!release) throw new Error('not found');
+      return { row: release.video, bytes: new Map(), release_generation: 1 };
+    },
+  };
+});
 import { isSeoPath, handleSeoRoute } from './seo-routes';
 import type { Env } from './index';
 
@@ -272,13 +309,13 @@ describe('handleSeoRoute 内容归档', () => {
 });
 
 describe('handleSeoRoute /daily/:date', () => {
-  test('合法日期 R2 命中 → 200 + text/html + Cache-Control 3600', async () => {
+  test('合法日期 authorized release 命中 → 200 + text/html + no-store', async () => {
     const r2 = makeR2(new Map([['daily/2026-07-06.html', '<!doctype html><title>x</title>']]));
     const resp = await handleSeoRoute(req('/daily/2026-07-06'), makeEnv({}, makeDb([]), r2));
     expect(resp).not.toBeNull();
     expect(resp!.status).toBe(200);
     expect(resp!.headers.get('Content-Type')).toBe('text/html; charset=utf-8');
-    expect(resp!.headers.get('Cache-Control')).toBe('public, max-age=3600');
+    expect(resp!.headers.get('Cache-Control')).toBe('private, no-store');
     expect(await resp!.text()).toContain('<!doctype html>');
   });
 
@@ -539,7 +576,7 @@ describe('handleSeoRoute /video/daily/:date', () => {
     expect(resp).not.toBeNull();
     expect(resp!.status).toBe(200);
     expect(resp!.headers.get('Content-Type')).toBe('text/html; charset=utf-8');
-    expect(resp!.headers.get('Cache-Control')).toBe('public, max-age=3600');
+    expect(resp!.headers.get('Cache-Control')).toBe('no-store');
 
     const body = await resp!.text();
     const canonical = `${SITE}${path}`;

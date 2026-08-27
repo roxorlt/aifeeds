@@ -8,6 +8,22 @@ import type { Env } from './index';
 import { ADMIN_SHARED_CSS, adminNavHtml, requireAuth, jsonRes } from './admin';
 import { CRON_SCHEDULE, getTaskDef } from './ops/cron-schedule';
 
+export function describeCronCadence(input: { frequency: string; bjt_times: string[] }): {
+  display_kind: 'cadence-band' | 'repeated-points' | 'point' | 'unknown';
+  frequency_label: string;
+} {
+  if (input.frequency === 'every-5-min' && input.bjt_times.length === 1 && input.bjt_times[0] === '*/5') {
+    return { display_kind: 'cadence-band', frequency_label: '每 5 分钟（288 次/日）' };
+  }
+  if (input.frequency === 'daily' && input.bjt_times.every((time) => /^\d{2}:\d{2}$/.test(time))) {
+    return { display_kind: 'point', frequency_label: '每日' };
+  }
+  if (['hourly-2x', 'hourly-1x', 'multi-tick'].includes(input.frequency)) {
+    return { display_kind: 'repeated-points', frequency_label: '小时内重复' };
+  }
+  return { display_kind: 'unknown', frequency_label: '未知频率' };
+}
+
 // ─── /api/admin/tasks?metric=<name>&... ───────────────────────────
 export async function handleAdminTasks(request: Request, env: Env): Promise<Response> {
   const guard = await requireAuth(request, env);
@@ -68,6 +84,7 @@ async function getSchedule(env: Env) {
       const s = statMap.get(def.name);
       return {
         ...def,
+        ...describeCronCadence(def),
         runs_24h: s?.runs_24h ?? 0,
         ok_24h: s?.ok_24h ?? 0,
         error_24h: s?.error_24h ?? 0,
@@ -331,6 +348,7 @@ function fmtBjt(unixMs) {
 function parseBjtTimes(times) {
   const slots = [];
   times.forEach(function(t) {
+    if (t === '*/5') return;
     if (t.startsWith('*:')) {
       // 每小时同一分钟
       const rest = t.slice(2);
@@ -400,6 +418,13 @@ function renderFishbone(tasks) {
       var color = CAT_COLORS[t.category] || '#888';
       var slots = parseBjtTimes(t.bjt_times);
       var hourly = isHourly(t.frequency);
+      if (t.frequency === 'every-5-min' && t.bjt_times.length === 1 && t.bjt_times[0] === '*/5') {
+        var bandY = laneY - 5;
+        svg += '<rect class="node" data-task="' + esc(t.name) + '" x="' + PAD_LEFT + '" y="' + bandY
+            + '" width="' + innerW + '" height="10" rx="5" fill="' + color + '" opacity="0.35">'
+            + '<title>' + esc(t.label) + ' @ 每 5 分钟（288 次/日）\\n' + esc(t.description) + '</title></rect>';
+        return;
+      }
       slots.forEach(function(h) {
         var cx = hourToX(h);
         var hasError = t.error_24h > 0;

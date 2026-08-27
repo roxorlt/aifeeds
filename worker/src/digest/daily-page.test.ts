@@ -6,6 +6,10 @@ vi.mock('./selection', () => ({
 }));
 vi.mock('./news-review', () => ({
   getAppliedNewsReviewSelection: vi.fn(async () => null),
+  getActiveNewsReviewBatch: vi.fn(async () => null),
+}));
+vi.mock('./publication-release', () => ({
+  listAuthorizedDailyReleaseSummaries: vi.fn(async () => []),
 }));
 
 import {
@@ -22,7 +26,8 @@ import {
 } from './daily-page';
 import type { DailyVideoRow } from './daily-video';
 import { selectTopForSource } from './selection';
-import { getAppliedNewsReviewSelection } from './news-review';
+import { getActiveNewsReviewBatch, getAppliedNewsReviewSelection } from './news-review';
+import { listAuthorizedDailyReleaseSummaries } from './publication-release';
 import type { Env } from '../index';
 import { DAILY_PAGE_INTRO_MAX, type DigestSource } from './config';
 import { clampSentences, renderItem, type RenderedItem, type RenderRow } from './render';
@@ -62,6 +67,8 @@ function mkData(over: Partial<DailyPageData> = {}): DailyPageData {
     sections: [{ source: 'x', label: '动态', items: [mkItem()] }],
     prevDate: null,
     nextDate: null,
+    formalNewsItemIds: [],
+    reviewBatch: null,
     ...over,
   };
 }
@@ -668,6 +675,10 @@ describe('buildDailyPageData', () => {
     vi.mocked(selectTopForSource).mockResolvedValue([]);
     vi.mocked(getAppliedNewsReviewSelection).mockReset();
     vi.mocked(getAppliedNewsReviewSelection).mockResolvedValue(null);
+    vi.mocked(getActiveNewsReviewBatch).mockReset();
+    vi.mocked(getActiveNewsReviewBatch).mockResolvedValue(null);
+    vi.mocked(listAuthorizedDailyReleaseSummaries).mockReset();
+    vi.mocked(listAuthorizedDailyReleaseSummaries).mockResolvedValue([]);
   });
 
   test('对应日期的日报页按人工选择的五条及顺序展示新闻', async () => {
@@ -676,6 +687,17 @@ describe('buildDailyPageData', () => {
     const rowsById = new Map([...defaultIds, ...reviewedIds].map((id, index) => [id, mkRow(id, index)]));
     setSelection({ news: defaultIds });
     vi.mocked(getAppliedNewsReviewSelection).mockResolvedValue(reviewedIds);
+    vi.mocked(getActiveNewsReviewBatch).mockResolvedValue({
+      review_date: '2026-07-30', batch_id: 'batch', batch_revision: 2,
+      candidate_ids: [...new Set([...defaultIds, ...reviewedIds])], candidates: [],
+      default_selected_ids: defaultIds, applied_selected_ids: reviewedIds,
+      selection_hash: 'hash', edit_revision: 1, publish_status: 'published',
+      publish_error: null, published_at: 1, notified_at: null, notification_hash: null,
+      auto_repaired_from_batch: null, auto_repaired_invalid_ids: [], superseded_by: null,
+      human_reviewed: true, supersedes_batch_id: null, revision_origin: 'scheduled_freeze',
+      lineage_id: '2026-07-30', is_current: true, candidate_generation: 3,
+      created_at: 1, expires_at: 2,
+    });
 
     const data = await buildDailyPageData(envWithDb(makeDbMock({ rowsById })), '2026-07-30');
 
@@ -748,17 +770,22 @@ describe('buildDailyPageData', () => {
     expect(noSubject!.subject).not.toBe('');
   });
 
-  test('prevDate / nextDate 从 daily_pages 相邻行读取', async () => {
+  test('prevDate / nextDate 只从通过当前 guard 的 release head 投影', async () => {
     const xIds = ['x_list:1'];
     const rowsById = new Map<string, RenderRow>([['x_list:1', mkRow('x_list:1', 1)]]);
     setSelection({ x: xIds });
+    vi.mocked(listAuthorizedDailyReleaseSummaries).mockResolvedValue([
+      { date: '2026-07-07' }, { date: '2026-07-06' }, { date: '2026-07-05' },
+    ] as never);
     const data = await buildDailyPageData(
-      envWithDb(makeDbMock({ rowsById, prevDate: '2026-07-05', nextDate: '2026-07-07' })),
+      envWithDb(makeDbMock({ rowsById, prevDate: '2000-01-01', nextDate: '2099-01-01' })),
       '2026-07-06',
     );
     expect(data!.prevDate).toBe('2026-07-05');
     expect(data!.nextDate).toBe('2026-07-07');
+    expect(listAuthorizedDailyReleaseSummaries).toHaveBeenCalledTimes(1);
 
+    vi.mocked(listAuthorizedDailyReleaseSummaries).mockResolvedValue([]);
     const noNeighbors = await buildDailyPageData(envWithDb(makeDbMock({ rowsById })), '2026-07-06');
     expect(noNeighbors!.prevDate).toBeNull();
     expect(noNeighbors!.nextDate).toBeNull();

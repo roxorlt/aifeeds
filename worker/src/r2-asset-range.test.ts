@@ -12,7 +12,13 @@ vi.mock('cloudflare:workers', () => ({
   },
 }));
 
+vi.mock('./digest/publication-release', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./digest/publication-release')>();
+  return { ...actual, readAuthorizedDailyVideoObject: vi.fn() };
+});
+
 import worker, { type Env } from './index';
+import { readAuthorizedDailyVideoObject } from './digest/publication-release';
 
 const KEY = 'podcast/seek-fixture.mp3';
 const ASSET = new TextEncoder().encode('0123456789');
@@ -74,13 +80,15 @@ function createBucket() {
 }
 
 async function requestAsset(
-  method: 'GET' | 'HEAD',
+  method: 'GET' | 'HEAD' | 'OPTIONS',
   bucket: R2Bucket,
   range?: string,
   key = KEY,
+  referer?: string,
 ): Promise<Response> {
   const headers = new Headers();
   if (range !== undefined) headers.set('Range', range);
+  if (referer !== undefined) headers.set('Referer', referer);
   return worker.fetch(
     new Request(`https://api.ai-feeds.com/r/${key}`, { method, headers }),
     { READMES: bucket } as unknown as Env,
@@ -98,6 +106,42 @@ function expectPublicAssetHeaders(response: Response): void {
 }
 
 describe('Worker /r/* HEAD and single byte-range contract', () => {
+  test('virtual daily video path uses the authorized full-byte reader before serving Range', async () => {
+    vi.mocked(readAuthorizedDailyVideoObject).mockResolvedValue({
+      bytes: ASSET, mime: 'video/mp4', sha256: 'a'.repeat(64), size: ASSET.byteLength,
+    });
+    const { bucket, head, get } = createBucket();
+    const id = 'b'.repeat(64);
+    const response = await requestAsset('GET', bucket, 'bytes=2-5', `daily-video/public/${id}/mp4`);
+    expect(response.status).toBe(206);
+    expect(await response.text()).toBe('2345');
+    expect(response.headers.get('Cache-Control')).toBe('private, no-store');
+    expect(readAuthorizedDailyVideoObject).toHaveBeenCalledWith(expect.anything(), id, 'mp4');
+    expect(head).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['GET', 'daily/versions/a/page.html', undefined, undefined],
+    ['HEAD', 'daily/publications/a/page.html', undefined, 'https://ai-feeds.com/daily/2026-08-27'],
+    ['GET', 'daily/2026-08-27.html', 'bytes=0-10', 'https://attacker.example/'],
+    ['GET', 'daily-video/candidates/a/video.mp4', 'bytes=0-10', undefined],
+    ['HEAD', 'daily-video/private/a/poster.jpg', undefined, 'https://api.ai-feeds.com/'],
+    ['GET', 'daily-video/a/video.mp4', undefined, 'https://aifeeds.workers.dev/'],
+    ['OPTIONS', 'daily/versions/a/page.html', undefined, undefined],
+  ] as const)(
+    '%s permanently hides publication namespace %s before any R2 read',
+    async (method, key, range, referer) => {
+      const { bucket, head, get } = createBucket();
+      const response = await requestAsset(method, bucket, range, key, referer);
+
+      expect(response.status).toBe(404);
+      expect(response.headers.get('Cache-Control')).toBe('no-store');
+      expect(head).not.toHaveBeenCalled();
+      expect(get).not.toHaveBeenCalled();
+    },
+  );
+
   test.each(['GET', 'HEAD'] as const)(
     '%s permanently hides private cc immutable page versions before any R2 read',
     async (method) => {

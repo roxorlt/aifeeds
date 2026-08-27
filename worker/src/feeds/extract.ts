@@ -233,8 +233,28 @@ function pageHeaders(referer?: string): Record<string, string> {
   return h;
 }
 
-/** 同 origin 串行 + 间隔门控 + jitter 的 fetch（拿 HTML 文本，永不 throw）。 */
-export async function throttledFetchText(url: string): Promise<string | null> {
+export interface ThrottledTextPage {
+  body: string;
+  nextUrl: string | null;
+}
+
+/** 从 RFC 8288 Link header 只解析 rel=next；相对 URL 按当前请求解析。 */
+export function nextPageUrlFromLinkHeader(header: string | null, requestUrl: string): string | null {
+  if (!header) return null;
+  for (const part of header.split(',')) {
+    const match = part.match(/^\s*<([^>]+)>\s*;([\s\S]+)$/);
+    if (!match || !/(?:^|;)\s*rel\s*=\s*["']?next["']?(?:\s*;|\s*$)/i.test(`;${match[2]}`)) continue;
+    try {
+      return new URL(match[1], requestUrl).toString();
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** 同 origin 串行 + 间隔门控 + jitter 的 fetch（保留分页 Link，永不 throw）。 */
+export async function throttledFetchTextPage(url: string): Promise<ThrottledTextPage | null> {
   let origin: string;
   try {
     origin = new URL(url).origin;
@@ -258,7 +278,10 @@ export async function throttledFetchText(url: string): Promise<string | null> {
         return null;
       }
       const body = await r.text();
-      return body;
+      return {
+        body,
+        nextUrl: nextPageUrlFromLinkHeader(r.headers.get('Link'), r.url || url),
+      };
     } catch (e) {
       console.warn(`[feeds:extract] ${url} fetch fail`, e);
       return null;
@@ -275,6 +298,11 @@ export async function throttledFetchText(url: string): Promise<string | null> {
     ),
   );
   return run;
+}
+
+/** 兼容既有调用方：只取正文，不暴露分页元数据。 */
+export async function throttledFetchText(url: string): Promise<string | null> {
+  return (await throttledFetchTextPage(url))?.body || null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

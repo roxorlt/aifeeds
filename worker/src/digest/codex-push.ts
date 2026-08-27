@@ -17,6 +17,7 @@ import {
   hasHumanReviewedNewsSelection,
   type VerifiedNewsReviewSelectionSnapshot,
 } from './news-review';
+import { authorizeFormalNewsSet } from './news-source-policy';
 
 const DEFAULT_DAILY_ENDPOINT = 'https://ai-feeds.cc/aifeeds/api/daily/ingest';
 const PUSH_TIMEOUT_MS = 30_000;
@@ -164,7 +165,10 @@ export async function buildDailyCodexPayload(
     )
       .bind(sk, source)
       .first<{ item_ids: string }>();
-    const ids = safeIds(pool?.item_ids ?? null);
+    const poolIds = safeIds(pool?.item_ids ?? null);
+    const ids = source === 'news'
+      ? (await authorizeFormalNewsSet(env, date, poolIds, 'codex_v1_build')).allowed_ids
+      : poolIds;
     if (!ids.length) continue;
     const rows = await fetchRows(env, ids);
     const items: CodexItem[] = [];
@@ -380,9 +384,12 @@ async function buildCodexSections(
     )
       .bind(sk, source)
       .first<{ item_ids: string }>();
-    const ids = source === 'news' && reviewedNewsIds
+    const selectedIds = source === 'news' && reviewedNewsIds
       ? reviewedNewsIds
       : safeIds(pool?.item_ids ?? null);
+    const ids = source === 'news'
+      ? (await authorizeFormalNewsSet(env, reviewDate, selectedIds, 'codex_staged_build')).allowed_ids
+      : selectedIds;
     if (!ids.length) continue;
     const rows = await fetchRows(env, ids);
     const items: CodexItem[] = [];
@@ -426,6 +433,32 @@ async function assertCurrentEditorialNewsReviewSnapshot(
   if (!current || stableJson(current) !== stableJson(locked)) {
     throw new Error('manual_news_finalize_snapshot_stale');
   }
+}
+
+async function assertCurrentLockedEditorialAuthorization(
+  env: Env,
+  date: string,
+  editorialDigest: DailyCodexPayload['digest'],
+): Promise<void> {
+  const ids = editorialDigest.sections.normal
+    .find((section) => section.source === 'news')?.items.map((item) => item.item_id) || [];
+  const authorized = await authorizeFormalNewsSet(env, date, ids, 'codex_finalize_locked');
+  if (stableJson(authorized.allowed_ids) !== stableJson(ids)) {
+    throw new Error('stale_editorial_authorization_requires_superseding_revision');
+  }
+}
+
+async function assertCurrentDigestFormalNewsAuthorization(
+  env: Env,
+  date: string,
+  digest: DailyCodexPayload['digest'],
+  errorCode: string,
+): Promise<void> {
+  const ids = digest.sections.normal
+    .find((section) => section.source === 'news')?.items.map((item) => item.item_id) || [];
+  if (!ids.length) return;
+  const current = await authorizeFormalNewsSet(env, date, ids, 'codex_pre_http_attempt');
+  if (stableJson(current.allowed_ids) !== stableJson(ids)) throw new Error(errorCode);
 }
 
 interface LockedStageSnapshot {
@@ -533,6 +566,7 @@ export async function buildStagedDailyCodexPayload(
   const lockedSnapshots = stage === 'finalize' ? await loadLockedStageSnapshots(env, date) : null;
   if (lockedSnapshots) {
     await assertCurrentEditorialNewsReviewSnapshot(env, date, lockedSnapshots.editorial.digest);
+    await assertCurrentLockedEditorialAuthorization(env, date, lockedSnapshots.editorial.digest);
   }
   const sections = lockedSnapshots
     ? combineLockedStageSections(lockedSnapshots)
@@ -623,27 +657,43 @@ function stagedDailyEndpoint(env: Env): string | null {
   return staging;
 }
 
-async function postDailyPayload(endpoint: string, token: string, body: string): Promise<Response> {
-  const attempt = async (): Promise<Response> => {
+async function postDailyPayload<T>(
+  endpoint: string,
+  token: string,
+  buildPayload: () => Promise<T>,
+  validatePayload?: (payload: T) => Promise<void>,
+): Promise<{ response: Response; payload: T }> {
+  const preparePayload = async (): Promise<T> => {
+    const payload = await buildPayload();
+    if (validatePayload) await validatePayload(payload);
+    return payload;
+  };
+  const sendPayload = async (payload: T): Promise<Response> => {
     const controller = new AbortController();
     const tid = setTimeout(() => controller.abort(), PUSH_TIMEOUT_MS);
     try {
-      return await fetch(endpoint, {
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body,
+        body: JSON.stringify(payload),
         signal: controller.signal,
       });
+      return response;
     } finally {
       clearTimeout(tid);
     }
   };
+  const firstPayload = await preparePayload();
+  let firstResponse: Response;
   try {
-    const first = await attempt();
-    return first.status >= 500 ? await attempt() : first;
+    firstResponse = await sendPayload(firstPayload);
   } catch {
-    return await attempt();
+    const retryPayload = await preparePayload();
+    return { response: await sendPayload(retryPayload), payload: retryPayload };
   }
+  if (firstResponse.status < 500) return { response: firstResponse, payload: firstPayload };
+  const retryPayload = await preparePayload();
+  return { response: await sendPayload(retryPayload), payload: retryPayload };
 }
 
 // v2 stage push:revision/hash 在网络调用前固化，成功响应后才写 pushed_at。Workflow
@@ -666,43 +716,40 @@ export async function pushDailyStageToCodex(
     }
   }
 
-  let payload: StagedDailyCodexPayload;
+  let posted: { response: Response; payload: StagedDailyCodexPayload };
   try {
-    payload = await buildStagedDailyCodexPayload(env, stage, {
-      date: dateOverride,
-      persistRevision: true,
-      ...(options.origin ? { origin: options.origin } : {}),
-    });
+    posted = await postDailyPayload(
+      endpoint,
+      env.X_CARD_SHARED_TOKEN,
+      async () => buildStagedDailyCodexPayload(env, stage, {
+        date: dateOverride,
+        persistRevision: true,
+        ...(options.origin ? { origin: options.origin } : {}),
+      }),
+      async (payload) => {
+        if (stage === 'editorial' || stage === 'finalize') {
+          await assertCurrentEditorialNewsReviewSnapshot(env, payload.date, payload.digest);
+          await assertCurrentDigestFormalNewsAuthorization(
+            env,
+            payload.date,
+            payload.digest,
+            stage === 'finalize'
+              ? 'stale_editorial_authorization_requires_superseding_revision'
+              : 'editorial_authorization_changed_before_send',
+          );
+        }
+      },
+    );
   } catch (error) {
-    const message = String(error).slice(0, 200);
-    await pushDeerAlert(env, '分批日报推 Codex 失败', `${stage} 构造 payload 异常: ${message}`).catch(() => {});
+    const raw = String(error).slice(0, 180);
+    const message = raw.includes('empty_stage:') || raw.includes('stale_editorial_')
+      ? raw
+      : `network: ${raw}`;
+    await pushDeerAlert(env, '分批日报推 Codex 失败', `${stage}: ${message}`).catch(() => {});
     return { ok: false, stage, error: message };
   }
-
+  const { response, payload } = posted;
   const total = payload.digest.sections.normal.reduce((count, section) => count + section.count, 0);
-  if (stage === 'finalize') {
-    try {
-      await assertCurrentEditorialNewsReviewSnapshot(env, payload.date, payload.digest);
-    } catch (error) {
-      const message = String(error).slice(0, 200);
-      await pushDeerAlert(env, '分批日报推 Codex 失败', `${payload.render_key}: ${message}`).catch(() => {});
-      return {
-        ok: false, stage, revision: payload.revision, content_hash: payload.content_hash,
-        origin: payload.origin, render_key: payload.render_key, total_items: total, error: message,
-      };
-    }
-  }
-  let response: Response;
-  try {
-    response = await postDailyPayload(endpoint, env.X_CARD_SHARED_TOKEN, JSON.stringify(payload));
-  } catch (error) {
-    const message = `network: ${String(error).slice(0, 160)}`;
-    await pushDeerAlert(env, '分批日报推 Codex 失败', `${payload.render_key}: ${message}`).catch(() => {});
-    return {
-      ok: false, stage, revision: payload.revision, content_hash: payload.content_hash,
-      render_key: payload.render_key, total_items: total, error: message,
-    };
-  }
   if (!response.ok) {
     const text = (await response.text().catch(() => '')).slice(0, 200);
     const error = `http_${response.status}: ${text}`;
@@ -751,53 +798,34 @@ export async function pushDailyToCodex(env: Env, slotHourBjt = 8, dateOverride?:
     return { ok: false, skipped: 'non_prod_blocked' };
   }
 
-  let payload: DailyCodexPayload;
+  const endpoint = env.DAILY_PUSH_ENDPOINT || DEFAULT_DAILY_ENDPOINT;
+  let posted: { response: Response; payload: DailyCodexPayload };
   try {
-    payload = await buildDailyCodexPayload(env, slotHourBjt, dateOverride);
+    posted = await postDailyPayload(
+      endpoint,
+      env.X_CARD_SHARED_TOKEN,
+      async () => {
+        const payload = await buildDailyCodexPayload(env, slotHourBjt, dateOverride);
+        const total = payload.digest.sections.normal.reduce((count, section) => count + section.count, 0);
+        if (!total) throw new Error('empty_pool');
+        return payload;
+      },
+      async (payload) => assertCurrentDigestFormalNewsAuthorization(
+        env,
+        payload.date,
+        payload.digest,
+        'news_authorization_changed_before_send',
+      ),
+    );
   } catch (e) {
-    const error = String(e).slice(0, 200);
-    await pushDeerAlert(env, '日报推 Codex 失败', `构造 payload 异常: ${error}`).catch(() => {});
+    const raw = String(e).slice(0, 180);
+    if (raw.includes('empty_pool')) return { ok: false, skipped: 'empty_pool' };
+    const error = `network: ${raw}`;
+    await pushDeerAlert(env, '日报推 Codex 失败', error).catch(() => {});
     return { ok: false, error };
   }
-
-  const total = payload.digest.sections.normal.reduce((n, s) => n + s.count, 0);
-  if (!total) return { ok: false, skipped: 'empty_pool', render_key: payload.render_key };
-
-  const endpoint = env.DAILY_PUSH_ENDPOINT || DEFAULT_DAILY_ENDPOINT;
-  const body = JSON.stringify(payload);
-
-  const attempt = async (): Promise<Response> => {
-    const controller = new AbortController();
-    const tid = setTimeout(() => controller.abort(), PUSH_TIMEOUT_MS);
-    try {
-      return await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${env.X_CARD_SHARED_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-        body,
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(tid);
-    }
-  };
-
-  let res: Response;
-  try {
-    res = await attempt();
-    if (res.status >= 500) res = await attempt(); // 5xx 重试一次
-  } catch (e) {
-    // 网络/超时:重试一次
-    try {
-      res = await attempt();
-    } catch (e2) {
-      const error = `network: ${String(e2).slice(0, 160)}`;
-      await pushDeerAlert(env, '日报推 Codex 失败', `${payload.render_key}: ${error}`).catch(() => {});
-      return { ok: false, error, render_key: payload.render_key, total_items: total };
-    }
-  }
+  const { response: res, payload } = posted;
+  const total = payload.digest.sections.normal.reduce((count, section) => count + section.count, 0);
 
   if (!res.ok) {
     const txt = (await res.text().catch(() => '')).slice(0, 200);

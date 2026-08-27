@@ -51,6 +51,9 @@ export type FeedFormat = "rss" | "atom" | "github-releases";
  */
 export type FetchStrategy = "native" | "page-scrape" | "headless";
 
+/** 列表发现的专用通道；缺省仍按 RSS/Atom 或 page-index 发现。 */
+export type FeedDiscoveryStrategy = "huggingface-models";
+
 /** 目标语言。当前仅支持 zh（与 X pipeline 一致）。 */
 export type FeedLang = "zh";
 
@@ -118,6 +121,8 @@ export interface FeedDef {
   cadence_hours: number;
   /** 详情页正文抓取策略。Phase 1 全部 'native'。 */
   fetch_strategy: FetchStrategy;
+  /** 只用于没有可枚举文章索引的官方模型仓库发现。 */
+  discovery_strategy?: FeedDiscoveryStrategy;
   /** 明确跳过涉华敏感 LLM 判定，直接写 extra.cn_sensitive=0（仅限可信白名单源）。 */
   skip_cn_sensitive?: boolean;
   /** 该 RSSHub 路由需要 Worker 通过 X-Weibo-Cookie 转发 WEIBO_COOKIES。 */
@@ -329,6 +334,8 @@ export interface BlogExtra
   /** = FeedDef.key（'openai'）。 */
   feed_key?: string;
   source_company?: string;
+  /** 从 FeedDef 持久化的编辑主体类型，正式候选池据此隔离 radar。 */
+  editorial_type?: EditorialType;
   /** 博客名（= FeedDef.name）。 */
   blog_name?: string;
   feed_url?: string;
@@ -371,6 +378,8 @@ export interface PodcastExtra
   /** = FeedDef.key（'lex-fridman'）。 */
   show_key?: string;
   source_company?: string;
+  /** 从 FeedDef 持久化的编辑主体类型，正式候选池据此隔离 radar。 */
+  editorial_type?: EditorialType;
   /** 节目名（= FeedDef.name）。 */
   show_name?: string;
   feed_url?: string;

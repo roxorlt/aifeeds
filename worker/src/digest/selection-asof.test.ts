@@ -82,9 +82,10 @@ describe('selectTopForSource asOfDate 锚点', () => {
   test('news 默认不传 asOfDate:窗口用 now,无日期 bind', async () => {
     const caps = await capture('news');
     const c = caps[0];
-    expect(c.sql).toContain("AND datetime(scraped_at) >= datetime('now','-3 day')");
+    expect(c.sql).toContain("AND datetime(i.scraped_at) >= datetime('now','-3 day')");
     expect(c.sql).not.toContain("'+1 day'");
-    expect(c.binds).toEqual([]);
+    expect(c.binds).toHaveLength(1);
+    expect(JSON.parse(String(c.binds[0]))).toEqual(expect.any(Array));
   });
 
   // ── asOfDate 锚点路径 ──
@@ -112,11 +113,13 @@ describe('selectTopForSource asOfDate 锚点', () => {
   test('news 传 asOfDate:窗口锚到该日晨自然跑窗口 + 日期 bind', async () => {
     const caps = await capture('news', { asOfDate: '2026-07-01' });
     const c = caps[0];
-    expect(c.sql).toContain("datetime(scraped_at) >= datetime(?, '-3 day')");
-    expect(c.sql).toContain("datetime(scraped_at) < datetime(?)");
+    expect(c.sql).toContain("datetime(i.scraped_at) >= datetime((SELECT as_of FROM bounds), '-3 day')");
+    expect(c.sql).toContain('datetime(i.scraped_at) < datetime((SELECT as_of FROM bounds))');
     expect(c.sql).not.toContain("'+1 day'");
     expect(c.sql).not.toContain("datetime('now'");
-    expect(c.binds).toEqual(['2026-07-01', '2026-07-01']);
+    expect(c.binds).toHaveLength(2);
+    expect(JSON.parse(String(c.binds[0]))).toEqual(expect.any(Array));
+    expect(c.binds[1]).toBe('2026-07-01');
   });
 
   // ── 语义级不变式:anchored(D) 必须等于 D 日晨自然跑窗口 ──
@@ -137,12 +140,17 @@ describe('selectTopForSource asOfDate 锚点', () => {
       // news 走 selectNewsByScore(主查询 = caps[0]);其余源单条查询 = caps[last]。
       const anchoredSql = source === 'news' ? anchoredCaps[0].sql : anchoredCaps[anchoredCaps.length - 1].sql;
       const defaultSql = source === 'news' ? defaultCaps[0].sql : defaultCaps[defaultCaps.length - 1].sql;
-      const timeExprTail = source === 'gh' ? ')' : 'datetime(scraped_at)';
+      const timeExprTail = source === 'gh'
+        ? ')'
+        : source === 'news'
+          ? 'datetime(i.scraped_at)'
+          : 'datetime(scraped_at)';
+      const anchoredDateExpr = source === 'news' ? '(SELECT as_of FROM bounds)' : '?';
       // 上界恰为 datetime(?),绝不带 '+1 day'
-      expect(anchoredSql).toContain(`${timeExprTail} < datetime(?)`);
+      expect(anchoredSql).toContain(`${timeExprTail} < datetime(${anchoredDateExpr})`);
       expect(anchoredSql).not.toContain("'+1 day'");
       // 下界偏移 '-N day' 锚定路径与默认路径逐字一致(仅锚点由 ? / 'now' 不同)
-      expect(anchoredSql).toContain(`${timeExprTail} >= datetime(?, '-${windowDays} day')`);
+      expect(anchoredSql).toContain(`${timeExprTail} >= datetime(${anchoredDateExpr}, '-${windowDays} day')`);
       expect(defaultSql).toContain(`${timeExprTail} >= datetime('now','-${windowDays} day')`);
     }
   });

@@ -43,10 +43,25 @@ import {
   parseFeed,
 } from './feeds/parse';
 import { discoverPageIndex, hasPageIndexConfig } from './feeds/page-index';
+import { discoverZaiOrgModels } from './feeds/zai-models';
+import {
+  markWorkflowPending,
+  markWorkflowTriggered,
+  runFeedWorkflowRecovery,
+  type FeedWorkflowRecoveryResult,
+} from './feeds/dedup';
 import { canonicalize, idHashOf, urlHashOf } from './feeds/extract';
 import { parseSeenSet } from './x-list-cursor';
 import { partitionForCatchup } from './x-list-cursor';
-import { notifyWeiboCookieInvalid } from './notifier';
+import { notifyWeiboCookieInvalid, pushDeerWarning } from './notifier';
+import {
+  produceWorkflowRetryExhaustedWarnings,
+  readWarningCanonicalReadiness,
+  releaseWarningOutboxLegacyBridgeReservations,
+  resolveWarningOutboxLegacyBridge,
+  type WarningOutboxBridgeResult,
+  type WarningOutboxProducerResult,
+} from './ops/warning-outbox';
 
 /** blog catch-up 分流阈值：最新 N 条立即 trigger，其余 pending_workflow=1 平摊(§5.5)。 */
 const BLOG_CATCHUP_THRESHOLD = 50;
@@ -125,7 +140,9 @@ async function ingestOneBlogFeed(
   // Phase 3 page-scrape:无 RSS 的源走 sitemap 列表发现(discoverPageIndex),产出
   // 与 parseFeed 同构的 ParsedFeedItem[];其余走 RSS/Atom(fetchFeedXml + parseFeed)。
   let parsedItems: ParsedFeedItem[];
-  if (feed.fetch_strategy === 'page-scrape' && hasPageIndexConfig(feed.key)) {
+  if (feed.discovery_strategy === 'huggingface-models') {
+    parsedItems = await discoverZaiOrgModels(feed);
+  } else if (feed.fetch_strategy === 'page-scrape' && hasPageIndexConfig(feed.key)) {
     parsedItems = await discoverPageIndex(feed);
   } else {
     const xml = await fetchFeedXml(
@@ -197,6 +214,7 @@ async function ingestOneBlogFeed(
         JSON.stringify({
           feed_id: feed.id,
           feed_key: feed.key,
+          editorial_type: feed.editorial_type,
           guid: e.guid,
           canonical_url: e.canonicalUrl,
           url_hash: e.urlHash,
@@ -223,6 +241,7 @@ async function ingestOneBlogFeed(
         feed_id: feed.id,
         feed_key: feed.key,
         source_company: feed.source_company,
+        editorial_type: feed.editorial_type,
         blog_name: feed.name,
         feed_url: feed.feed_url,
         fetch_strategy: feed.fetch_strategy,
@@ -332,7 +351,10 @@ export async function triggerBlogWorkflowForItem(
   itemId: string,
   signals: BlogTriggerSignals,
 ): Promise<TriggerResult> {
-  if (!env.BLOG_PIPELINE_WORKFLOW) return 'binding_missing';
+  if (!env.BLOG_PIPELINE_WORKFLOW) {
+    await markWorkflowPending(env, itemId, 'WORKFLOW_BINDING_MISSING');
+    return 'binding_missing';
+  }
 
   const nowUnix = Math.floor(Date.now() / 1000);
   try {
@@ -362,14 +384,100 @@ export async function triggerBlogWorkflowForItem(
         skipCnSensitive: signals.skipCnSensitive,
       },
     });
+    await markWorkflowTriggered(env, itemId);
     return 'triggered';
   } catch (e) {
     if (String(e).toLowerCase().includes('already exists')) {
+      await markWorkflowTriggered(env, itemId);
       return 'already_exists';
     }
     console.error(`[blog-trigger] create failed for ${itemId}:`, e);
+    await markWorkflowPending(env, itemId, 'WORKFLOW_CREATE_FAILED');
     return 'failed';
   }
+}
+
+export type BlogWorkflowRecoveryResult = FeedWorkflowRecoveryResult & {
+  warning_mode: 'legacy' | 'bridge' | 'outbox';
+  warning_bridge?: WarningOutboxBridgeResult;
+  warning_outbox?: WarningOutboxProducerResult;
+};
+
+/** 每小时独立恢复至少 30 分钟仍未完成的 blog workflow，避免手工 backfill 才能修复。 */
+export async function runBlogWorkflowRecovery(env: Env): Promise<BlogWorkflowRecoveryResult> {
+  const producerEnabled = env.WARNING_OUTBOX_PRODUCER_ENABLED === '1';
+  const drainEnabled = env.WARNING_OUTBOX_DRAIN_ENABLED === '1';
+  const canonicalReady = producerEnabled && drainEnabled
+    ? (await readWarningCanonicalReadiness(env, 'blog')).ready
+    : false;
+  const targetAuthority = producerEnabled && drainEnabled && canonicalReady;
+  const legacyAuthority = !producerEnabled || (producerEnabled && drainEnabled && !canonicalReady);
+  let bridgeResult: WarningOutboxBridgeResult = {
+    status: 'ok', suppressed_ids: [], legacy_ids: [], alert_legacy_owned: 0,
+    alert_bridge_suppressed: 0, bridge_duplicate_possible: 0,
+  };
+  let bridgeError: unknown;
+  const recovery = await runFeedWorkflowRecovery(env, {
+    sourceType: 'blog',
+    trigger: (itemId, extra) => triggerBlogWorkflowForItem(env, itemId, {
+      fetchStrategy: (extra.fetch_strategy as BlogTriggerSignals['fetchStrategy']) || 'native',
+      hasNativeFulltext: isFullEnoughHtml(
+        (extra.rss_content_html as string | undefined)
+          || (extra.body_markdown as string | undefined),
+      ),
+      skipCnSensitive: extra.skip_cn_sensitive === true,
+    }),
+    ...(legacyAuthority ? { onExhausted: async ({ itemIds, attempts, alertPeriod }: {
+      itemIds: string[]; attempts: number; alertPeriod: string;
+    }) => {
+      let legacyIds = itemIds;
+      if (drainEnabled) {
+        try {
+          bridgeResult = await resolveWarningOutboxLegacyBridge(env, 'blog', itemIds, alertPeriod);
+          legacyIds = bridgeResult.legacy_ids;
+        } catch (error) {
+          bridgeError = error;
+          return false;
+        }
+      }
+      if (legacyIds.length === 0) return true;
+      const delivered = await pushDeerWarning(
+        env, '博客 workflow 自愈重试耗尽',
+        `${legacyIds.length} 条博客项已达到 ${attempts} 次自动重试上限（UTC ${alertPeriod}）：${legacyIds.slice(0, 10).join(', ')}`,
+      );
+      if (!delivered && drainEnabled) {
+        try {
+          await releaseWarningOutboxLegacyBridgeReservations(env, 'blog', legacyIds, alertPeriod);
+        } catch (error) {
+          bridgeError = error;
+        }
+      }
+      return delivered;
+    } } : {}),
+  });
+  if (bridgeError) {
+    throw new Error(`warning_outbox_bridge_lookup_failed: ${String(bridgeError)}`);
+  }
+  if (!producerEnabled) {
+    return drainEnabled
+      ? { ...recovery, warning_mode: 'bridge', warning_bridge: bridgeResult }
+      : { ...recovery, warning_mode: 'legacy' };
+  }
+  const outbox = await produceWorkflowRetryExhaustedWarnings(env, 'blog');
+  if (!targetAuthority) {
+    return {
+      ...recovery,
+      warning_mode: drainEnabled ? 'bridge' : 'outbox',
+      ...(drainEnabled ? { warning_bridge: bridgeResult } : {}),
+      warning_outbox: outbox,
+    };
+  }
+  return {
+    ...recovery,
+    exhausted_alerts: outbox.alert_enqueued,
+    warning_mode: 'outbox',
+    warning_outbox: outbox,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -85,8 +85,8 @@ import {
 // 官方新闻源（blog 厂商博客 + podcast AI 播客，Phase 1 2026-06-09）。
 // runBlogFetch/runPodcastFetch 内部已幂等 ensureFeedSources，cron slot 直接调。
 // backfill 兜底（workflow_completed_at IS NULL 重 trigger）经 /api/enrich/run 暴露。
-import { runBlogFetch, runBlogBackfill, triggerBlogWorkflowForItem, isFullEnoughHtml } from './blog';
-import { runPodcastFetch, runPodcastBackfill } from './podcast';
+import { runBlogFetch, runBlogBackfill, runBlogWorkflowRecovery, triggerBlogWorkflowForItem, isFullEnoughHtml } from './blog';
+import { runPodcastFetch, runPodcastBackfill, runPodcastWorkflowRecovery } from './podcast';
 import type { BlogExtra, BlogTriggerSignals } from './feeds/types';
 import {
   classifySensitivityForFeeds,
@@ -120,7 +120,9 @@ import {
   pushDailyToCodex,
   type DailyCodexStage,
 } from './digest/codex-push';
-import { drainDailyVideoGc, handleDailyVideoUpload } from './digest/daily-video';
+import { handleDailyVideoUpload } from './digest/daily-video';
+import { isPrivateDailyPublicationKey, parseVirtualDailyVideoKey } from './digest/publication-gateway';
+import { readAuthorizedDailyVideoObject } from './digest/publication-release';
 import { rebuildDigestPoolSnapshot, rebuildDigestPoolStage } from './digest/pool-rebuild';
 import { routeDigestCronWorkflows } from './digest/node-run';
 import { generateDailyPage, backfillDailyPages } from './digest/daily-page-run';
@@ -134,6 +136,18 @@ import { handleItemRoute } from './seo/item-routes';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
 import { runHfDailyFetch, triggerHfPaperWorkflowForItem } from './scrapers/hf-paper';
 import { routeSourceCronActions, type SourceCronAction } from './ops/cron-routing';
+import {
+  drainWarningOutbox,
+  retainWarningOutbox,
+  runWarningCanonicalBackfill,
+  serializeWarningCronObservation,
+} from './ops/warning-outbox';
+import {
+  drainPublicationCapacityWarningOutbox,
+  producePublicationCapacityWarnings,
+  retainPublicationCapacityWarningOutbox,
+  serializePublicationCapacityCronObservation,
+} from './ops/publication-capacity-outbox';
 import {
   drainGithubPending,
   drainHfPending,
@@ -185,7 +199,7 @@ import { serveAdminDashboardHtml, handleAdminAnalytics } from './admin-dashboard
 import { serveAdminOpsHtml, handleAdminOps, handleXCardManual, handleXCardRepush } from './admin-ops';
 import { runOpsBaseline } from './ops/baseline';
 import { runOpsDetect } from './ops/detect';
-import { recordCronRun } from './cron-runs';
+import { recordCronRun, recordCronRunRequired } from './cron-runs';
 import { serveAdminTasksHtml, handleAdminTasks } from './admin-tasks';
 import { serveAdminSubscriptionsHtml, handleAdminSubscriptions } from './admin-subscriptions';
 import { serveAdminFeedbackHtml } from './admin-feedback';
@@ -234,6 +248,11 @@ const EVENT_FINGERPRINT_BACKFILL_KV_KEY = 'ops:feed-event-fingerprint-backfill:a
 
 export interface Env {
   DB: D1Database;
+  WARNING_OUTBOX_PRODUCER_ENABLED?: string;
+  WARNING_OUTBOX_DRAIN_ENABLED?: string;
+  WARNING_CANONICAL_BACKFILL_ENABLED?: string;
+  PUBLICATION_CAPACITY_WARNING_PRODUCER_ENABLED?: string;
+  PUBLICATION_CAPACITY_WARNING_DRAIN_ENABLED?: string;
   AUTH_KV: KVNamespace;
   CF_VERSION_METADATA?: WorkerVersionMetadata;
   INGEST_TOKEN: string;
@@ -335,6 +354,9 @@ export interface Env {
   DAILY_NEWS_REVIEW_SECRET?: string;       // HK 审核代理与当日审核链接共用 HMAC secret
   DAILY_NEWS_REVIEW_ENABLED?: string;      // '1'=冻结 Top10 + PushDeer 审核通知 + 接受当日人工修订
   DAILY_PAGE_ENABLED?: string;            // 早8点自动生成 SEO 静态日报页总开关(node-run Phase 4):'1'=开;不设/其他=关(手动 mode=daily-page 不受此限)
+  DAILY_PUBLICATION_RESERVATION_ENABLED?: string;
+  DAILY_PUBLICATION_PUT_ENABLED?: string;
+  DAILY_PUBLICATION_PROMOTION_ENABLED?: string;
   CC_MIRROR_ENABLED?: string;             // '1'=启用 .cc 内容镜像生成/同步链；缺省关闭
   CC_SITE_BASE?: string;                  // .cc 静态内容 canonical 域；默认 https://ai-feeds.cc
   CC_SYNC_SECRET?: string;                 // .cc VPS 增量同步专用 HMAC secret；不得复用 BRIDGE_SECRET
@@ -540,15 +562,112 @@ function withCorsAndRequestId(resp: Response, request: Request, env: Env): Respo
 
 // 互相重叠的 source cron 必须作为独立 action 执行，不能再放进下方带大量 early-return
 // 的 legacy mode dispatcher。这样 :20/:50 的 HDX、HF、blog/weibo/podcast 不会彼此遮蔽。
+function workflowRecoveryObservationError(result: {
+  warning_outbox?: {
+    status: string;
+    invalid_gate_combination: boolean;
+    alert_enqueue_failed: number;
+    alert_integrity_errors: number;
+  };
+}): string | null {
+  const outbox = result.warning_outbox;
+  if (!outbox) return null;
+  if (outbox.invalid_gate_combination) return 'warning_outbox_invalid_gate_combination';
+  if (outbox.status === 'partial' || outbox.alert_enqueue_failed > 0 || outbox.alert_integrity_errors > 0) {
+    return `warning_outbox_partial:enqueue_failed=${outbox.alert_enqueue_failed},integrity_errors=${outbox.alert_integrity_errors}`;
+  }
+  return null;
+}
+
 async function runScheduledSourceAction(env: Env, action: SourceCronAction): Promise<void> {
   switch (action) {
-    case 'daily-video-gc': {
+    case 'publication-capacity-warning-produce': {
+      const result = await recordCronRunRequired(
+        env,
+        { name: 'publication-capacity-warning-produce', source: 'common', category: 'system' },
+        () => producePublicationCapacityWarnings(env),
+        (observation) => observation.status === 'partial' || observation.status === 'error'
+          ? observation.error_code || 'publication_capacity_warning_produce_partial'
+          : null,
+        serializePublicationCapacityCronObservation,
+      );
+      console.log('[cron] publication-capacity-warning-produce:', JSON.stringify(result));
+      return;
+    }
+    case 'publication-capacity-warning-drain': {
+      const result = await recordCronRunRequired(
+        env,
+        { name: 'publication-capacity-warning-drain', source: 'common', category: 'system' },
+        () => drainPublicationCapacityWarningOutbox(env),
+        (observation) => observation.status === 'partial' || observation.status === 'error'
+          ? observation.error_code || 'publication_capacity_warning_drain_partial'
+          : null,
+        serializePublicationCapacityCronObservation,
+      );
+      console.log('[cron] publication-capacity-warning-drain:', JSON.stringify(result));
+      return;
+    }
+    case 'publication-capacity-warning-retention': {
+      const result = await recordCronRunRequired(
+        env,
+        { name: 'publication-capacity-warning-retention', source: 'common', category: 'cleanup' },
+        () => retainPublicationCapacityWarningOutbox(env),
+        (observation) => observation.status === 'partial' || observation.status === 'error'
+          ? observation.error_code || 'publication_capacity_warning_retention_partial'
+          : null,
+        serializePublicationCapacityCronObservation,
+      );
+      console.log('[cron] publication-capacity-warning-retention:', JSON.stringify(result));
+      return;
+    }
+    case 'warning-outbox-drain': {
+      const result = await recordCronRunRequired(
+        env,
+        { name: 'warning-outbox-drain', source: 'common', category: 'system' },
+        () => drainWarningOutbox(env),
+        (observation) => observation.status === 'partial' || observation.status === 'error'
+          ? observation.error_code || 'warning_outbox_drain_partial'
+          : null,
+        serializeWarningCronObservation,
+      );
+      console.log('[cron] warning-outbox-drain:', JSON.stringify(result));
+      return;
+    }
+    case 'warning-outbox-retention': {
+      const result = await recordCronRunRequired(
+        env,
+        { name: 'warning-outbox-retention', source: 'common', category: 'cleanup' },
+        () => retainWarningOutbox(env),
+        (observation) => observation.status === 'partial' || observation.status === 'error'
+          ? observation.error_code || 'warning_outbox_retention_partial'
+          : null,
+        serializeWarningCronObservation,
+      );
+      console.log('[cron] warning-outbox-retention:', JSON.stringify(result));
+      return;
+    }
+    case 'warning-subject-backfill-blog':
+    case 'warning-subject-backfill-podcast': {
+      const sourceType = action === 'warning-subject-backfill-blog' ? 'blog' : 'podcast';
+      const result = await recordCronRunRequired(
+        env,
+        { name: action, source: sourceType, category: 'backfill' },
+        () => runWarningCanonicalBackfill(env, sourceType),
+        (observation) => observation.status === 'partial' || observation.status === 'error'
+          ? observation.error_code || 'warning_canonical_backfill_partial'
+          : null,
+        serializeWarningCronObservation,
+      );
+      console.log(`[cron] ${action}:`, JSON.stringify(result));
+      return;
+    }
+    case 'warning-digest': {
       const result = await recordCronRun(
         env,
-        { name: 'daily-video-gc', source: 'daily-video', category: 'cleanup' },
-        () => drainDailyVideoGc(env, { limit: 100 }),
+        { name: 'warning-digest', source: 'common', category: 'system' },
+        () => sendDailyWarningDigest(env),
       );
-      console.log('[cron] daily-video-gc:', JSON.stringify(result));
+      console.log('[cron] warning-digest:', JSON.stringify(result));
       return;
     }
     case 'github-pending-drain': {
@@ -624,6 +743,17 @@ async function runScheduledSourceAction(env: Env, action: SourceCronAction): Pro
       await notifyCronSummary(env, '厂商博客抓取', result as unknown as Record<string, unknown>);
       return;
     }
+    case 'blog-workflow-recovery': {
+      const result = await recordCronRunRequired(
+        env,
+        { name: 'blog-workflow-recovery', source: 'blog', category: 'backfill' },
+        () => runBlogWorkflowRecovery(env),
+        workflowRecoveryObservationError,
+        serializeWarningCronObservation,
+      );
+      console.log('[cron] blog-workflow-recovery result:', JSON.stringify(result));
+      return;
+    }
     case 'podcast-fetch': {
       const result = await recordCronRun(
         env,
@@ -632,6 +762,17 @@ async function runScheduledSourceAction(env: Env, action: SourceCronAction): Pro
       );
       console.log('[cron] podcast-fetch result:', JSON.stringify(result));
       await notifyCronSummary(env, 'AI 播客抓取', result as unknown as Record<string, unknown>);
+      return;
+    }
+    case 'podcast-workflow-recovery': {
+      const result = await recordCronRunRequired(
+        env,
+        { name: 'podcast-workflow-recovery', source: 'podcast', category: 'backfill' },
+        () => runPodcastWorkflowRecovery(env),
+        workflowRecoveryObservationError,
+        serializeWarningCronObservation,
+      );
+      console.log('[cron] podcast-workflow-recovery result:', JSON.stringify(result));
       return;
     }
   }
@@ -663,6 +804,16 @@ export default {
       && path.startsWith('/api/cc-sync/')
     ) {
       return (await handleCcSyncRoute(request, env))!;
+    }
+
+    // Physical daily publication/media objects are private on every host and
+    // for every method. Public routes perform D1-head authorization and full
+    // byte verification; the generic R2 gateway must never serve these keys.
+    if (path.startsWith('/r/')) {
+      const r2Key = path.slice(3);
+      if (isPrivateDailyPublicationKey(r2Key) || isPrivateCcPageKey(r2Key)) {
+        return privateR2NotFound();
+      }
     }
 
     // CORS preflight
@@ -1030,7 +1181,9 @@ export default {
       }
       if (path.startsWith('/r/') && (request.method === 'GET' || request.method === 'HEAD')) {
         const r2Key = path.slice(3);
-        if (isPrivateCcPageKey(r2Key)) return privateR2NotFound();
+        const virtualVideo = parseVirtualDailyVideoKey(r2Key);
+        if (virtualVideo) return handleAuthorizedDailyVideoAsset(request, env, virtualVideo);
+        if (isPrivateDailyPublicationKey(r2Key) || isPrivateCcPageKey(r2Key)) return privateR2NotFound();
         return handleR2Asset(request, env, r2Key);
       }
       // ─── PH admin debug endpoints ──────────────────────────────
@@ -1939,8 +2092,8 @@ export default {
     }
 
     // [SEO] 缺页兜底检查(#4 第二道):UTC 01:00 —— 晚于早 8 点(UTC 0 点)自然跑一小时。
-    // 查 D1 daily_pages 今天(BJT)那行 generated_at 是否晚于今天 UTC 0 点(=今天真生成了);
-    // 无行 / 陈旧行 → PushDeer 告警「[SEO] 今日日报页未生成」(KV 标记当天只告一次)。
+    // 只承认通过当前 formal/batch guard 的 release head，promoted_at 必须晚于今天 UTC 0 点；
+    // 无有效 head / 陈旧 head → PushDeer 告警「[SEO] 今日日报页未生成」(KV 标记当天只告一次)。
     // 仅 DAILY_PAGE_ENABLED='1' 时启用(功能没开时本就不生成,不该告警)。独立 waitUntil,不阻塞主 cron。
     if (hour === 1 && minute === 0 && env.DAILY_PAGE_ENABLED === '1') {
       ctx.waitUntil(
@@ -2158,12 +2311,6 @@ export default {
           // 早 7 点发,user 起床看,不打扰半夜睡眠。
           // 没 warning + 无 alert 不推(empty 不打扰)。
           if (hour === 23 && minute === 0) {
-            const r1 = await recordCronRun(
-              env,
-              { name: 'warning-digest', source: 'common', category: 'system' },
-              () => sendDailyWarningDigest(env),
-            );
-            console.log(`[cron] warning-digest result:`, JSON.stringify(r1));
             const r2 = await recordCronRun(
               env,
               { name: 'daily-health-checks', source: 'common', category: 'system' },
@@ -4801,6 +4948,7 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
         feed_id: old.feed_id as string | undefined,
         feed_key: old.show_key as string | undefined,
         source_company: old.source_company as string | undefined,
+        editorial_type: old.editorial_type as BlogExtra['editorial_type'],
         blog_name: old.show_name as string | undefined,
         feed_url: old.feed_url as string | undefined,
         fetch_strategy: fetchStrategy,
@@ -6058,6 +6206,7 @@ function r2AssetHeaders(obj: R2Object): Headers {
 }
 
 async function handleR2Asset(request: Request, env: Env, key: string): Promise<Response> {
+  if (isPrivateDailyPublicationKey(key) || isPrivateCcPageKey(key)) return privateR2NotFound();
   // `.cc` page versions are deliberately retained as private immutable objects
   // so future HMAC sync/event replay can fetch historical hashes through the R2
   // binding. They must never be exposed by the anonymous `/r/*` asset gateway,
@@ -6113,6 +6262,45 @@ async function handleR2Asset(request: Request, env: Env, key: string): Promise<R
   if (!obj) return new Response('not found', { status: 404 });
 
   return new Response(obj.body, { status: 200, headers: r2AssetHeaders(obj) });
+}
+
+async function handleAuthorizedDailyVideoAsset(
+  request: Request,
+  env: Env,
+  target: { video_publication_id: string; role: 'mp4' | 'poster' | 'vtt' },
+): Promise<Response> {
+  try {
+    const object = await readAuthorizedDailyVideoObject(
+      env, target.video_publication_id, target.role,
+    );
+    const headers = new Headers({
+      'Content-Type': object.mime,
+      'Cache-Control': 'private, no-store',
+      'Access-Control-Allow-Origin': '*',
+      'Timing-Allow-Origin': '*',
+      'Accept-Ranges': 'bytes',
+      ETag: `"${object.sha256}"`,
+      'Content-Length': String(object.size),
+    });
+    if (request.method === 'HEAD') return new Response(null, { status: 200, headers });
+    const range = request.headers.get('Range');
+    if (range === null) return new Response(object.bytes, { status: 200, headers });
+    const parsed = parseSingleByteRange(range, object.size);
+    if (!parsed) {
+      headers.set('Content-Range', `bytes */${object.size}`);
+      headers.delete('Content-Length');
+      return new Response(null, { status: 416, headers });
+    }
+    const end = parsed.offset + parsed.length - 1;
+    headers.set('Content-Range', `bytes ${parsed.offset}-${end}/${object.size}`);
+    headers.set('Content-Length', String(parsed.length));
+    return new Response(object.bytes.slice(parsed.offset, parsed.offset + parsed.length), {
+      status: 206,
+      headers,
+    });
+  } catch {
+    return privateR2NotFound();
+  }
 }
 
 function isPrivateCcPageKey(key: string): boolean {

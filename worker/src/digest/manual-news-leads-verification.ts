@@ -49,6 +49,9 @@ export interface PersistedManualVerificationRow {
   invalidated_at: number | null;
   assessment_json?: string;
   review_date?: string;
+  lead_status?: string;
+  lead_confirmed_at?: number | null;
+  lead_version?: number;
 }
 
 export interface VerifiedPersistedManualAssessment {
@@ -411,7 +414,8 @@ async function loadVerifiedManualAssessmentInternal(
        v.verification_key_id, v.canonical_digest,
        v.hmac_sha256, v.verification_json, v.processing_owner, v.processing_attempt,
        v.creation_nonce, v.status, v.reason, v.created_at, v.invalidated_at,
-       a.assessment_json, l.review_date
+       a.assessment_json, l.review_date, l.status AS lead_status,
+       l.confirmed_at AS lead_confirmed_at, l.version AS lead_version
      FROM manual_news_assessment_verifications v
      JOIN manual_news_event_assessments a
        ON a.lead_id = v.lead_id AND a.assessment_version = v.assessment_version
