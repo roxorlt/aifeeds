@@ -2,6 +2,12 @@ import type { Env } from '../index';
 import { pushDeerMessage } from '../notifier';
 import { mergeManualLeadCandidate } from './manual-news-leads';
 import {
+  authorizeFormalNewsSet,
+  formalNewsFinalGuardBindings,
+  formalNewsFinalGuardSqlPredicate,
+  type FormalNewsAuthorizationResult,
+} from './news-source-policy';
+import {
   loadVerifiedManualAssessment,
   MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL,
   manualVerificationSnapshotGuardBindings,
@@ -322,17 +328,22 @@ async function readAppliedNewsReviewSelection(env: Env, date: string): Promise<s
 }
 
 export async function getAppliedNewsReviewSelection(env: Env, date: string): Promise<string[] | null> {
+  let sanitizedBatch: NewsReviewBatch | null = null;
   try {
-    const active = await getActiveNewsReviewBatch(env, date);
-    if (active?.candidates.some(isManualCandidateSnapshot)) {
-      await sanitizeCurrentNewsReviewBatch(env, date);
-    }
+    // Applied selections are production inputs for email, static daily pages, and
+    // staged video payloads. Always revalidate the current snapshot against full
+    // item provenance; a generic legacy id cannot reveal source_ref/feed identity.
+    sanitizedBatch = (await sanitizeCurrentNewsReviewBatch(env, date)).batch;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const isRolloutSchemaGap = /(?:no such table|no such column):?\s*[\w.]+/i.test(message);
     if (message !== 'news_review_batch_not_found' && !isRolloutSchemaGap) throw error;
   }
-  return readAppliedNewsReviewSelection(env, date);
+  const applied = await readAppliedNewsReviewSelection(env, date);
+  if (!applied || !sanitizedBatch) return applied;
+  return (await authorizeNewsReviewBatchSnapshot(
+    env, date, sanitizedBatch, applied, 'applied_selection_final_projection',
+  )).allowed_ids;
 }
 
 // HK 推送来源标记用：当日 lineage 的当前批次是否携带人审序列。表/列在 rollout 窗口
@@ -352,7 +363,7 @@ export async function hasHumanReviewedNewsSelection(env: Env, date: string): Pro
   }
 }
 
-export async function getPublishedNewsReviewSelection(
+async function readRawPublishedNewsReviewSelection(
   env: Env,
   date: string,
   currentBatch: NewsReviewBatch,
@@ -370,6 +381,57 @@ export async function getPublishedNewsReviewSelection(
     // Initial rollout or a pre-migration batch has no previous snapshot.
   }
   return currentBatch.default_selected_ids;
+}
+
+export async function getPublishedNewsReviewSelection(
+  env: Env,
+  date: string,
+  currentBatch: NewsReviewBatch,
+): Promise<string[]> {
+  const raw = await readRawPublishedNewsReviewSelection(env, date, currentBatch);
+  return (await authorizeNewsReviewBatchSnapshot(
+    env, date, currentBatch, raw, 'published_selection',
+  )).allowed_ids;
+}
+
+/**
+ * Binds a review row and its complete outward item authorization in one final
+ * SQL snapshot. Historical rows remain immutable, but their projection is not
+ * a transferable capability when the current item/source/manual proof changes.
+ */
+export async function authorizeNewsReviewBatchSnapshot(
+  env: Env,
+  date: string,
+  batch: NewsReviewBatch,
+  itemIds: readonly string[],
+  purpose: string,
+): Promise<FormalNewsAuthorizationResult> {
+  const authorization = await authorizeFormalNewsSet(env, date, itemIds, purpose);
+  if (stableJson(authorization.allowed_ids) !== stableJson(itemIds)) return authorization;
+  const guard = formalNewsFinalGuardSqlPredicate();
+  const current = await env.DB.prepare(
+    `/* news_review:batch_formal_final_guard */ SELECT 1 AS ok
+       FROM daily_news_review_batches b
+      WHERE b.review_date=? AND b.lineage_id=? AND b.batch_id=?
+        AND b.batch_revision=? AND b.is_current=? AND b.edit_revision=?
+        AND b.candidate_generation=? AND b.candidate_ids=? AND b.default_selected_ids=?
+        AND COALESCE(b.applied_selected_ids,'')=? AND COALESCE(b.selection_hash,'')=?
+        AND b.superseded_by IS ? AND ${guard}`,
+  ).bind(
+    date, batch.lineage_id, batch.batch_id, batch.batch_revision, batch.is_current ? 1 : 0,
+    batch.edit_revision, batch.candidate_generation, JSON.stringify(batch.candidate_ids),
+    JSON.stringify(batch.default_selected_ids),
+    batch.applied_selected_ids === null ? '' : JSON.stringify(batch.applied_selected_ids),
+    batch.selection_hash || '', batch.superseded_by,
+    ...formalNewsFinalGuardBindings(authorization),
+  ).first<{ ok: number }>();
+  if (Number(current?.ok || 0) === 1) return authorization;
+  return {
+    allowed_ids: [],
+    decisions: authorization.decisions.map((decision) => decision.allowed
+      ? { item_id: decision.item_id, allowed: false, code: 'DENY_AUTHORIZATION_STALE' as const }
+      : decision),
+  };
 }
 
 export interface FreezeNewsReviewBatchResult {
@@ -429,11 +491,23 @@ async function freezeNewsReviewBatchAtGeneration(
   );
   const effectiveCandidates = preserved.candidates;
   const candidateIds = effectiveCandidates.map((candidate) => candidate.item_id);
+  const freezeAuthorization = await authorizeFormalNewsSet(
+    env, date, candidateIds, 'review_freeze_final_guard',
+  );
+  if (stableJson(freezeAuthorization.allowed_ids) !== stableJson(candidateIds)) {
+    throw new Error('news_review_formal_authorization_stale');
+  }
   const validatedDefault = validateNewsReviewSelection(preserved.default_selected_ids, candidateIds);
   if (!validatedDefault.ok) throw new Error(`invalid_default_selection:${validatedDefault.error}`);
   if (previous
     && stableJson(previous.candidates) === stableJson(effectiveCandidates)
     && stableJson(previous.default_selected_ids) === stableJson(validatedDefault.selected_ids)) {
+    const unchangedAuthorization = await authorizeNewsReviewBatchSnapshot(
+      env, date, previous, candidateIds, 'review_freeze_unchanged_guard',
+    );
+    if (stableJson(unchangedAuthorization.allowed_ids) !== stableJson(candidateIds)) {
+      throw new Error('news_review_formal_authorization_stale');
+    }
     return {
       batch: previous,
       created: false,
@@ -451,13 +525,21 @@ async function freezeNewsReviewBatchAtGeneration(
   const existing = await getNewsReviewBatch(env, date, batchId);
   if (existing) {
     const current = existing.is_current ? existing : await getActiveNewsReviewBatch(env, date);
-    if (current) return {
-      batch: current,
-      created: false,
-      superseded_batch_id: null,
-      auto_repaired: !!current.auto_repaired_from_batch,
-      auto_repaired_invalid_ids: current.auto_repaired_invalid_ids,
-    };
+    if (current) {
+      const existingAuthorization = await authorizeNewsReviewBatchSnapshot(
+        env, date, current, current.candidate_ids, 'review_freeze_existing_guard',
+      );
+      if (stableJson(existingAuthorization.allowed_ids) !== stableJson(current.candidate_ids)) {
+        throw new Error('news_review_formal_authorization_stale');
+      }
+      return {
+        batch: current,
+        created: false,
+        superseded_batch_id: null,
+        auto_repaired: !!current.auto_repaired_from_batch,
+        auto_repaired_invalid_ids: current.auto_repaired_invalid_ids,
+      };
+    }
   }
   const previousPublishedIds = previous
     ? await getPublishedNewsReviewSelection(env, date, previous)
@@ -480,6 +562,13 @@ async function freezeNewsReviewBatchAtGeneration(
     ? 'pending'
     : (inheritsHumanSelection ? previous!.publish_status : 'not_requested');
   const publishedAt = !repair.required && inheritsHumanSelection ? previous!.published_at : null;
+  const writeAuthorization = await authorizeFormalNewsSet(
+    env, date, candidateIds, 'review_freeze_write_guard',
+  );
+  if (stableJson(writeAuthorization.allowed_ids) !== stableJson(candidateIds)) {
+    throw new Error('news_review_formal_authorization_stale');
+  }
+  const formalWriteGuard = formalNewsFinalGuardSqlPredicate();
   const insert = env.DB.prepare(
     `/* news_review:insert_revision_cas */ INSERT INTO daily_news_review_batches (
        review_date, batch_id, candidate_ids, candidates_json, default_selected_ids,
@@ -492,9 +581,13 @@ async function freezeNewsReviewBatchAtGeneration(
        WHERE review_date = ? AND lineage_id = ? AND generation = ?)
      AND ${previous
        ? `EXISTS (SELECT 1 FROM daily_news_review_batches
-            WHERE review_date = ? AND lineage_id = ? AND batch_id = ? AND batch_revision = ? AND is_current = 1)`
+            WHERE review_date = ? AND lineage_id = ? AND batch_id = ? AND batch_revision = ? AND is_current = 1
+              AND edit_revision=? AND candidate_generation=? AND candidate_ids=? AND default_selected_ids=?
+              AND COALESCE(applied_selected_ids,'')=? AND COALESCE(selection_hash,'')=?
+              AND superseded_by IS NULL)`
        : `NOT EXISTS (SELECT 1 FROM daily_news_review_batches
             WHERE review_date = ? AND lineage_id = ? AND is_current = 1)`}
+     AND ${formalWriteGuard}
      ON CONFLICT(review_date, batch_id) DO NOTHING`,
   ).bind(
     date, batchId, JSON.stringify(candidateIds), JSON.stringify(effectiveCandidates),
@@ -503,7 +596,14 @@ async function freezeNewsReviewBatchAtGeneration(
     repair.required ? previous!.batch_id : null, repair.required ? JSON.stringify(repair.invalid_ids) : null,
     now, newsReviewExpiresAt(date), batchRevision, previous?.batch_id || null, date, previous ? 0 : 1,
     candidateGeneration, publishedAt, humanReviewed ? 1 : 0, date, date, candidateGeneration,
-    date, date, ...(previous ? [previous.batch_id, previous.batch_revision] : []),
+    date, date, ...(previous ? [
+      previous.batch_id, previous.batch_revision, previous.edit_revision,
+      previous.candidate_generation, JSON.stringify(previous.candidate_ids),
+      JSON.stringify(previous.default_selected_ids),
+      previous.applied_selected_ids === null ? '' : JSON.stringify(previous.applied_selected_ids),
+      previous.selection_hash || '',
+    ] : []),
+    ...formalNewsFinalGuardBindings(writeAuthorization),
   );
   const statements: D1PreparedStatement[] = [insert];
   if (previous) {
@@ -523,7 +623,15 @@ async function freezeNewsReviewBatchAtGeneration(
       ).bind(date, date, batchId, date, previous.batch_id, batchId),
     );
   }
-  await env.DB.batch(statements);
+  const writes = await env.DB.batch(statements) as Array<{ meta?: { changes?: number } }>;
+  if (Number(writes[0]?.meta?.changes || 0) !== 1) {
+    const failedAuthorization = await authorizeFormalNewsSet(
+      env, date, candidateIds, 'review_freeze_cas_failure_guard',
+    );
+    if (stableJson(failedAuthorization.allowed_ids) !== stableJson(candidateIds)) {
+      throw new Error('news_review_formal_authorization_stale');
+    }
+  }
   const inserted = await getNewsReviewBatch(env, date, batchId);
   const active = inserted?.is_current ? inserted : await getActiveNewsReviewBatch(env, date);
   if (!active) {
@@ -589,11 +697,23 @@ export async function submitNewsReviewSelection(
   const validation = validateNewsReviewSelection(input.selected_ids, batch.candidate_ids);
   if (!validation.ok) return { ok: false, status: 400, error: validation.error, batch };
   const selectedIds = validation.selected_ids;
+  const selectedAuthorization = await authorizeFormalNewsSet(
+    env, input.date, selectedIds, 'review_submit_final_guard',
+  );
+  if (stableJson(selectedAuthorization.allowed_ids) !== stableJson(selectedIds)) {
+    return { ok: false, status: 409, error: 'stale_candidate', batch: sanitized.batch };
+  }
   const hash = await newsReviewSelectionHash(selectedIds);
   const effectiveIds = batch.applied_selected_ids
     || await getPublishedNewsReviewSelection(env, input.date, batch);
   const effectiveHash = await newsReviewSelectionHash(effectiveIds);
   if (hash === effectiveHash) {
+    const unchangedAuthorization = await authorizeNewsReviewBatchSnapshot(
+      env, input.date, batch, batch.candidate_ids, 'review_submit_unchanged_guard',
+    );
+    if (stableJson(unchangedAuthorization.allowed_ids) !== stableJson(batch.candidate_ids)) {
+      return { ok: false, status: 409, error: 'stale_candidate', batch: sanitized.batch };
+    }
     return {
       ok: true,
       changed: false,
@@ -607,16 +727,32 @@ export async function submitNewsReviewSelection(
     : '1 = 1';
   const verificationBindings = sanitized.manual_verifications.flatMap((snapshot) =>
     manualVerificationSnapshotGuardBindings(snapshot.lead_id, snapshot.verification));
+  const writeAuthorization = await authorizeFormalNewsSet(
+    env, input.date, batch.candidate_ids, 'review_submit_write_guard',
+  );
+  if (stableJson(writeAuthorization.allowed_ids) !== stableJson(batch.candidate_ids)) {
+    return { ok: false, status: 409, error: 'stale_candidate', batch: sanitized.batch };
+  }
+  const formalWriteGuard = formalNewsFinalGuardSqlPredicate();
   const writeStatement = env.DB.prepare(
     `UPDATE daily_news_review_batches SET
        applied_selected_ids = ?, selection_hash = ?, edit_revision = edit_revision + 1,
        publish_status = 'pending', publish_error = NULL, published_at = NULL,
        human_reviewed = 1
      WHERE review_date = ? AND lineage_id = ? AND batch_id = ?
-       AND is_current = 1 AND superseded_by IS NULL AND ${verificationGuard}`,
+       AND is_current = 1 AND superseded_by IS NULL
+       AND batch_revision=? AND edit_revision=? AND candidate_generation=?
+       AND candidate_ids=? AND default_selected_ids=?
+       AND COALESCE(applied_selected_ids,'')=? AND COALESCE(selection_hash,'')=?
+       AND ${verificationGuard} AND ${formalWriteGuard}`,
   ).bind(
     JSON.stringify(selectedIds), hash, input.date, input.date, input.batch_id,
+    batch.batch_revision, batch.edit_revision, batch.candidate_generation,
+    JSON.stringify(batch.candidate_ids), JSON.stringify(batch.default_selected_ids),
+    batch.applied_selected_ids === null ? '' : JSON.stringify(batch.applied_selected_ids),
+    batch.selection_hash || '',
     ...verificationBindings,
+    ...formalNewsFinalGuardBindings(writeAuthorization),
   );
   const [write] = await env.DB.batch([writeStatement]) as Array<{ meta?: { changes?: number } }>;
   if (Number(write.meta?.changes || 0) !== 1) {
@@ -666,12 +802,22 @@ interface NewsReviewPoolMetaCandidate {
 
 interface NewsReviewItemRow {
   id: string;
+  source_id: string | null;
   source_ref: string | null;
   title: string | null;
   content: string | null;
   content_translated: string | null;
   url: string | null;
   extra: string | null;
+}
+
+async function readScheduledNewsItemPolicy(
+  env: Env,
+  date: string,
+  itemIds: readonly string[],
+): Promise<Map<string, boolean>> {
+  const result = await authorizeFormalNewsSet(env, date, itemIds, 'review_sanitizer');
+  return new Map(result.decisions.map((row) => [row.item_id, row.allowed]));
 }
 
 function isManualCandidateSnapshot(candidate: Pick<NewsReviewCandidate, 'item_id' | 'origin' | 'lead_id'>): boolean {
@@ -789,18 +935,25 @@ export async function getVerifiedNewsReviewSelectionSnapshot(
   }
   const selectedIds = await getPublishedNewsReviewSelection(env, date, sanitized.batch);
   const candidateIds = new Set(sanitized.batch.candidate_ids);
-  if (!selectedIds.length || selectedIds.some((id) => !candidateIds.has(id))) {
+  if (selectedIds.some((id) => !candidateIds.has(id))) {
     throw new Error('news_review_verified_selection_invalid');
+  }
+  if (!selectedIds.length) {
+    return {
+      batch_id: sanitized.batch.batch_id,
+      batch_revision: sanitized.batch.batch_revision,
+      selection_hash: await newsReviewSelectionHash([]),
+      selected_ids: [],
+      manual_verifications: [],
+    };
   }
   const verificationByLead = new Map(sanitized.manual_verifications.map((entry) => [entry.lead_id, entry.verification]));
   const manualVerifications: VerifiedNewsReviewManualProofRef[] = [];
-  const selectedManualSnapshots: Array<{ lead_id: string; verification: PersistedManualVerificationRow }> = [];
   for (const itemId of selectedIds) {
     if (!itemId.startsWith('blog:manual:')) continue;
     const leadId = itemId.slice('blog:manual:'.length);
     const verification = verificationByLead.get(leadId);
     if (!verification) throw new Error('news_review_manual_verification_missing');
-    selectedManualSnapshots.push({ lead_id: leadId, verification });
     manualVerifications.push({
       item_id: itemId,
       lead_id: leadId,
@@ -810,31 +963,10 @@ export async function getVerifiedNewsReviewSelectionSnapshot(
     });
   }
 
-  // One immediate DB read binds item visibility and every active proof to the
-  // same current snapshot. A later item/proof mutation is checked again by the
-  // consumer immediately before finalization/network I/O.
-  const itemPlaceholders = selectedIds.map(() => '?').join(',');
-  const verificationGuard = selectedManualSnapshots.length
-    ? selectedManualSnapshots.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
-    : '1 = 1';
-  const row = await env.DB.prepare(
-    `/* news_review:verified_selection_guard */ SELECT COUNT(DISTINCT id) AS count
-     FROM items WHERE id IN (${itemPlaceholders}) AND deleted_at IS NULL
-       AND EXISTS (SELECT 1 FROM daily_news_review_batches current
-         WHERE current.review_date = ? AND current.lineage_id = ?
-           AND current.batch_id = ? AND current.batch_revision = ? AND current.is_current = 1
-           AND current.edit_revision = ? AND COALESCE(current.selection_hash, '') = ?
-           AND COALESCE(current.applied_selected_ids, '') = ?)
-       AND ${verificationGuard}`,
-  ).bind(
-    ...selectedIds,
-    date, date, sanitized.batch.batch_id, sanitized.batch.batch_revision,
-    sanitized.batch.edit_revision, sanitized.batch.selection_hash || '',
-    sanitized.batch.applied_selected_ids === null ? '' : JSON.stringify(sanitized.batch.applied_selected_ids),
-    ...selectedManualSnapshots.flatMap((entry) =>
-      manualVerificationSnapshotGuardBindings(entry.lead_id, entry.verification)),
-  ).first<{ count: number }>();
-  if (Number(row?.count || 0) !== new Set(selectedIds).size) {
+  const finalAuthorization = await authorizeNewsReviewBatchSnapshot(
+    env, date, sanitized.batch, selectedIds, 'verified_selection_final_guard',
+  );
+  if (stableJson(finalAuthorization.allowed_ids) !== stableJson(selectedIds)) {
     throw new Error('news_review_verified_selection_stale');
   }
   return {
@@ -860,9 +992,22 @@ async function sanitizeCurrentNewsReviewBatchAttempt(
   const candidates: NewsReviewCandidate[] = [];
   const droppedIds = [...accumulatedDroppedIds];
   const manualVerifications: Array<{ lead_id: string; verification: PersistedManualVerificationRow }> = [];
+  const scheduledPolicy = await readScheduledNewsItemPolicy(
+    env,
+    date,
+    current.candidates
+      .filter((candidate) => !isManualCandidateSnapshot(candidate))
+      .map((candidate) => candidate.item_id),
+  );
   for (const candidate of current.candidates) {
     if (!isManualCandidateSnapshot(candidate)) {
-      candidates.push(candidate);
+      // Keep the id-only guard for snapshots whose backing row has disappeared,
+      // and use the batch-read shared SQL predicate whenever durable identity exists.
+      if (scheduledPolicy.get(candidate.item_id) !== true) {
+        droppedIds.push(candidate.item_id);
+      } else {
+        candidates.push(candidate);
+      }
       continue;
     }
     const leadId = manualCandidateLeadId(candidate);
@@ -915,6 +1060,16 @@ async function sanitizeCurrentNewsReviewBatchAttempt(
     : '1 = 1';
   const verificationBindings = manualVerifications.flatMap((snapshot) =>
     manualVerificationSnapshotGuardBindings(snapshot.lead_id, snapshot.verification));
+  const sanitizeWriteAuthorization = await authorizeFormalNewsSet(
+    env, date, candidateIds, 'review_sanitize_write_guard',
+  );
+  if (stableJson(sanitizeWriteAuthorization.allowed_ids) !== stableJson(candidateIds)) {
+    if (attempt >= 2) throw new Error('news_review_formal_authorization_stale');
+    return sanitizeCurrentNewsReviewBatchAttempt(
+      env, date, now, attempt + 1, initialId, [...new Set(droppedIds)],
+    );
+  }
+  const formalWriteGuard = formalNewsFinalGuardSqlPredicate();
   const statements = [
     env.DB.prepare(
       `/* news_review:sanitize_insert_cas */ INSERT INTO daily_news_review_batches (
@@ -928,8 +1083,10 @@ async function sanitizeCurrentNewsReviewBatchAttempt(
          ?, ?, ?, ?, ?, ?, 0, ?, ?
        WHERE EXISTS (SELECT 1 FROM daily_news_review_batches
          WHERE review_date = ? AND lineage_id = ? AND batch_id = ?
-           AND batch_revision = ? AND is_current = 1)
-       AND ${verificationGuard}
+           AND batch_revision = ? AND is_current = 1 AND edit_revision=?
+           AND candidate_generation=? AND candidate_ids=? AND default_selected_ids=?
+           AND COALESCE(applied_selected_ids,'')=? AND COALESCE(selection_hash,'')=?)
+       AND ${verificationGuard} AND ${formalWriteGuard}
        ON CONFLICT(review_date, batch_id) DO NOTHING`,
     ).bind(
       date, batchId, JSON.stringify(candidateIds), JSON.stringify(candidates), JSON.stringify(defaultSelected),
@@ -938,8 +1095,13 @@ async function sanitizeCurrentNewsReviewBatchAttempt(
       current.batch_id, JSON.stringify(droppedIds), now, current.expires_at, batchRevision,
       current.batch_id, current.revision_origin, date, current.candidate_generation,
       current.human_reviewed ? 1 : 0,
-      date, date, current.batch_id, current.batch_revision,
+      date, date, current.batch_id, current.batch_revision, current.edit_revision,
+      current.candidate_generation, JSON.stringify(current.candidate_ids),
+      JSON.stringify(current.default_selected_ids),
+      current.applied_selected_ids === null ? '' : JSON.stringify(current.applied_selected_ids),
+      current.selection_hash || '',
       ...verificationBindings,
+      ...formalNewsFinalGuardBindings(sanitizeWriteAuthorization),
     ),
     env.DB.prepare(
       `/* news_review:sanitize_supersede_cas */ UPDATE daily_news_review_batches
@@ -1100,12 +1262,17 @@ export async function freezeNewsReviewBatchFromPool(
   const auditById = new Map(auditRows.map((candidate) => [String(candidate.id || ''), candidate]));
   const placeholders = candidateIds.map(() => '?').join(',');
   const itemResult = await env.DB.prepare(
-    `SELECT id, source_ref, title, content, content_translated, url, extra
+    `SELECT id, source_id, source_ref, title, content, content_translated, url, extra
      FROM items WHERE id IN (${placeholders})`,
   ).bind(...candidateIds).all<NewsReviewItemRow>();
   const itemById = new Map((itemResult.results || []).map((row) => [row.id, row]));
-  const scheduledCandidateIds = candidateIds.filter((itemId) =>
+  const rawScheduledCandidateIds = candidateIds.filter((itemId) =>
     !itemId.startsWith('blog:manual:') && itemById.get(itemId)?.source_ref !== 'manual_lead');
+  const scheduledAuthorization = await authorizeFormalNewsSet(
+    env, date, rawScheduledCandidateIds, 'review_freeze_from_pool',
+  );
+  const scheduledAllowed = new Set(scheduledAuthorization.allowed_ids);
+  const scheduledCandidateIds = rawScheduledCandidateIds.filter((itemId) => scheduledAllowed.has(itemId));
   let candidates: NewsReviewCandidate[] = scheduledCandidateIds.map((itemId) => {
     const item = itemById.get(itemId);
     const audit = auditById.get(itemId);

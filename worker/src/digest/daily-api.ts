@@ -24,6 +24,7 @@ import { fetchCandidates } from './pool-rebuild';
 import { renderItem, type RenderRow, type RenderedItem } from './render';
 import { bjtDateStr, getBases } from './lib';
 import { SOURCE_LABELS } from './templates';
+import { authorizeFormalNewsSet } from './news-source-policy';
 
 function jsonRes(body: unknown, status = 200, extraHeaders: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -114,6 +115,7 @@ async function buildSnapshotSections(
   env: Env,
   sources: DigestSource[],
   slotKey: string,
+  reviewDate: string,
   density: Density,
   apiBase: string,
   verbose: boolean,
@@ -121,9 +123,18 @@ async function buildSnapshotSections(
   const sections: DailySection[] = [];
   for (const source of DIGEST_SOURCE_ORDER) {
     if (!sources.includes(source)) continue;
-    const ids = await fetchSnapshotIds(env, slotKey, source, density);
+    const snapshotIds = await fetchSnapshotIds(env, slotKey, source, density);
+    let ids = source === 'news'
+      ? (await authorizeFormalNewsSet(env, reviewDate, snapshotIds, 'daily_api_snapshot')).allowed_ids
+      : snapshotIds;
     if (!ids.length) continue;
     const rows = await fetchRows(env, ids);
+    if (source === 'news') {
+      ids = (await authorizeFormalNewsSet(
+        env, reviewDate, ids, 'daily_api_snapshot_final_projection',
+      )).allowed_ids;
+    }
+    if (!ids.length) continue;
     sections.push(buildSection(source, ids, rows, apiBase, verbose));
   }
   return sections;
@@ -169,10 +180,10 @@ export async function handleDigestDaily(request: Request, env: Env): Promise<Res
     }
     const sk = `${date}-${String(slotHour).padStart(2, '0')}`;
     const normalSecs = wantNormal
-      ? await buildSnapshotSections(env, wantSources, sk, 'normal', apiBase, verbose)
+      ? await buildSnapshotSections(env, wantSources, sk, date, 'normal', apiBase, verbose)
       : [];
     const curatedSecs = wantCurated
-      ? await buildSnapshotSections(env, wantSources, sk, 'curated', apiBase, verbose)
+      ? await buildSnapshotSections(env, wantSources, sk, date, 'curated', apiBase, verbose)
       : [];
     return jsonRes({
       meta: {

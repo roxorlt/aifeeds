@@ -8,7 +8,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
+
+vi.mock('./news-source-policy', () => ({
+  formalNewsFinalGuardSqlPredicate: () => '1=1',
+  formalNewsFinalGuardBindings: () => [],
+  authorizeFormalNewsSet: vi.fn(async (_env: unknown, _date: string, ids: readonly string[]) => ({
+    allowed_ids: ids.filter((id) => !id.startsWith('blog:weibo-hot-tech:')),
+    decisions: ids.map((id) => ({
+      item_id: id,
+      allowed: !id.startsWith('blog:weibo-hot-tech:'),
+      code: id.startsWith('blog:weibo-hot-tech:')
+        ? 'DENY_LEGACY_RADAR_ITEM_ID'
+        : 'ALLOW_SCHEDULED_FORMAL',
+    })),
+  })),
+}));
 
 import type { Env } from '../index';
 import {
@@ -222,6 +237,53 @@ describe('human review beats automatic ranking', () => {
 
     expect(refrozen.batch.applied_selected_ids).toEqual(['auto-8', 'auto-4']);
     await expect(getAppliedNewsReviewSelection(env, DATE)).resolves.toEqual(['auto-8', 'auto-4']);
+  });
+
+  test('an already frozen human selection is revalidated and drops a legacy radar identity', async () => {
+    const { db, env } = state();
+    const morning = scheduled('auto', 6);
+    for (const candidate of morning) {
+      db.sqlite.prepare(
+        `INSERT INTO items (id, source_type, source_id, source_ref, title, content, url, extra)
+         VALUES (?, 'blog', ?, NULL, ?, ?, ?, ?)`,
+      ).run(
+        candidate.item_id,
+        candidate.item_id,
+        candidate.title,
+        candidate.summary,
+        `https://example.com/${candidate.item_id}`,
+        JSON.stringify({ feed_id: 'blog:qbitai', feed_key: 'qbitai', editorial_type: 'third-party-media' }),
+      );
+    }
+    await freezeNewsReviewBatch(
+      env,
+      DATE,
+      morning,
+      morning.slice(0, 5).map((item) => item.item_id),
+      100,
+    );
+    const active = (await getActiveNewsReviewBatch(env, DATE))!;
+    const radarId = 'blog:weibo-hot-tech:legacy-radar';
+    const historicalCandidates = morning.map((candidate, index) => index === 0
+      ? { ...candidate, item_id: radarId, source: '微博' }
+      : candidate);
+    db.sqlite.prepare(
+      `UPDATE daily_news_review_batches
+          SET candidate_ids=?, candidates_json=?, default_selected_ids=?, applied_selected_ids=?,
+              selection_hash='legacy-radar-snapshot', human_reviewed=1
+        WHERE review_date=? AND batch_id=?`,
+    ).run(
+      JSON.stringify(historicalCandidates.map((candidate) => candidate.item_id)),
+      JSON.stringify(historicalCandidates),
+      JSON.stringify(historicalCandidates.slice(0, 5).map((candidate) => candidate.item_id)),
+      JSON.stringify([radarId, 'auto-2']),
+      DATE,
+      active.batch_id,
+    );
+
+    await expect(getAppliedNewsReviewSelection(env, DATE)).resolves.toEqual(['auto-2']);
+    expect((await getActiveNewsReviewBatch(env, DATE))?.candidate_ids)
+      .not.toContain(radarId);
   });
 
   test('a day without any human review keeps the previous fully automatic behaviour', async () => {

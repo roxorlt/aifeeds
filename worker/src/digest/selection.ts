@@ -11,6 +11,11 @@
 // 设计文档:roxor-main-design-20260528-090625.md
 
 import type { Env } from '../index';
+import {
+  buildFormalNewsRegistryJson,
+  FORMAL_NEWS_REGISTRY_CTE,
+  formalNewsScheduledSqlPredicate,
+} from './news-source-policy';
 import { scoreFeedNewsItemForOrdering } from '../feeds/ranking';
 import type { DigestSource } from './config';
 import { callDeepSeekJson, DEEPSEEK_PRO } from '../hf-paper/llm';
@@ -241,25 +246,28 @@ export async function selectNewsByScoreWithAudit(
   limit: number,
   options: SelectTopOptions = {},
 ): Promise<{ ids: string[]; audit: NewsSelectionAudit }> {
-  const cat = `json_extract(extra,'$.ai_category')`;
-  const co = `json_extract(extra,'$.source_company')`;
-  const tzh = `json_extract(extra,'$.title_zh')`;
+  const cat = `json_extract(i.extra,'$.ai_category')`;
+  const co = `json_extract(i.extra,'$.source_company')`;
+  const tzh = `json_extract(i.extra,'$.title_zh')`;
   // 时间窗:默认锚 now(逐字节保持原样);传 asOfDate=D 时锚到 D 日 00:00 UTC(= 当日晨自然跑时刻),
   // 上界=datetime(D)(不加 '+1 day',与通用路径同构),下界回退 3 天。anchored(D) ≡ 当日自然跑窗口。
   const asOf = options.asOfDate;
   const windowClause = asOf
-    ? `datetime(scraped_at) >= datetime(?, '-3 day')
-      AND datetime(scraped_at) < datetime(?)`
-    : `datetime(scraped_at) >= datetime('now','-3 day')`;
+    ? `datetime(i.scraped_at) >= datetime((SELECT as_of FROM bounds), '-3 day')
+      AND datetime(i.scraped_at) < datetime((SELECT as_of FROM bounds))`
+    : `datetime(i.scraped_at) >= datetime('now','-3 day')`;
   const sql = `
-    SELECT id, title, source_type, content, content_translated, extra, published_at
-    FROM items
-    WHERE source_type IN ('blog','podcast')
-      AND is_relevant = 1
+    WITH ${FORMAL_NEWS_REGISTRY_CTE}${asOf ? ', bounds AS (SELECT ? AS as_of)' : ''}
+    SELECT i.id, i.title, i.source_type, i.content, i.content_translated, i.extra, i.published_at
+    FROM items i
+    JOIN registry r ON r.id=json_extract(
+      CASE WHEN i.extra IS NOT NULL AND json_valid(i.extra)=1 THEN i.extra ELSE '{}' END,
+      '$.feed_id')
+    JOIN sources s ON s.id=r.id
+    WHERE i.source_type IN ('blog','podcast')
+      AND i.is_relevant = 1
       AND ${windowClause}
-      AND deleted_at IS NULL
-      -- radar 仅供人工核验，不得进入正式候选、日报视频或自动推送。
-      AND COALESCE(json_extract(extra,'$.editorial_type'),'') != 'radar'
+      AND ${formalNewsScheduledSqlPredicate('i', 'r', 's')}
       -- 噪音过滤①:slow-news / "没什么大事" 填充帖(如 smol.ai 的 "[AINews] not much
       -- happened today")。措辞很特定,按原标题英文匹配(对中文重写鲁棒),几乎不误伤真新闻。
       AND lower(COALESCE(title,'')) NOT LIKE '%not much happened%'
@@ -281,8 +289,8 @@ export async function selectNewsByScoreWithAudit(
         )
       )`;
   const rows = asOf
-    ? await env.DB.prepare(sql).bind(asOf, asOf).all<NewsCandidateDbRow>()
-    : await env.DB.prepare(sql).all<NewsCandidateDbRow>();
+    ? await env.DB.prepare(sql).bind(buildFormalNewsRegistryJson(), asOf).all<NewsCandidateDbRow>()
+    : await env.DB.prepare(sql).bind(buildFormalNewsRegistryJson()).all<NewsCandidateDbRow>();
   const candidates = (rows.results || []).map(newsCandidateFromDbRow);
   const scored = scoreNewsCandidatesForDigest(candidates);
   const eventDeduped = options.strictCrossDayEventDedup
@@ -463,14 +471,19 @@ async function fetchNewsCandidatesByIds(env: Env, ids: string[]): Promise<NewsCa
   // 否则 30 天窗口中较早但仍有效的同事件记录会随机漏掉。
   for (let start = 0; start < uniqueIds.length; start += D1_ID_BATCH_SIZE) {
     const batch = uniqueIds.slice(start, start + D1_ID_BATCH_SIZE);
-    const placeholders = batch.map(() => '?').join(',');
     const result = await env.DB.prepare(
-      `SELECT id, title, source_type, content, content_translated, extra, published_at
-         FROM items
-        WHERE id IN (${placeholders})
-          AND source_type IN ('blog','podcast')
-          AND deleted_at IS NULL`,
-    ).bind(...batch).all<NewsCandidateDbRow>();
+      `WITH ${FORMAL_NEWS_REGISTRY_CTE},
+       requested AS (SELECT value AS id FROM json_each(?))
+       SELECT i.id, i.title, i.source_type, i.content, i.content_translated, i.extra, i.published_at
+         FROM requested q
+         JOIN items i ON i.id=q.id
+         JOIN registry r ON r.id=json_extract(
+           CASE WHEN i.extra IS NOT NULL AND json_valid(i.extra)=1 THEN i.extra ELSE '{}' END,
+           '$.feed_id')
+         JOIN sources s ON s.id=r.id
+        WHERE i.source_type IN ('blog','podcast')
+          AND ${formalNewsScheduledSqlPredicate('i', 'r', 's')}`,
+    ).bind(buildFormalNewsRegistryJson(), JSON.stringify(batch)).all<NewsCandidateDbRow>();
     rows.push(...(result.results || []));
   }
   return rows.map(newsCandidateFromDbRow);
@@ -988,6 +1001,14 @@ function deriveEventFingerprint(
 
   addIf(/\blaunch(?:es|ed)?\b|\brelease(?:s|d)?\b|\bintroduc(?:e|es|ing|ed)\b|发布|推出|上线/, 'launch', actionTokens);
   addIf(/\bopen[-\s]?(?:source|weight)(?:s|d|ed)?\b|开源|开放权重/, 'open-weight', actionTokens);
+  // 媒体常用“publishes <model> weights on Hugging Face”复述开放权重动作，
+  // 但不写 open-source/open-weight。限定“发布/上传 + weights + Hugging Face”同句，
+  // 避免把 API 上线、普通 benchmark 或仅提到参数权重的报道泛化为开源。
+  addIf(
+    /\b(?:publish(?:es|ed|ing)?|releas(?:e|es|ed|ing)|upload(?:s|ed|ing)?)\b[^!?\n]{0,100}\b(?:model\s+)?weights?\b[^!?\n]{0,60}\b(?:on\s+)?hugging\s*face\b/,
+    'open-weight',
+    actionTokens,
+  );
   addIf(/\bintegrat(?:e|es|ed|ion)\b|\brun(?:s|ning)? on\b|\bbrings\b|接入|集成|运行|可用/, 'integration', actionTokens);
   addIf(/\bprice|pricing|cheap|cheaper|cost\b|定价|低成本|便宜/, 'pricing', actionTokens);
 
@@ -1103,7 +1124,7 @@ function normalizeStructuredValue(value: string): string {
 }
 
 const structuredObjectConnectorWords = new Set([
-  'a', 'an', 'and', 'by', 'for', 'in', 'of', 'on', 'the', 'to', 'with',
+  'a', 'an', 'and', 'by', 'for', 'in', 'model', 'models', 'of', 'on', 'the', 'to', 'with',
 ]);
 
 function normalizeStructuredObjectIdentity(value: string): string {
@@ -1171,6 +1192,7 @@ function specificObjectTokens(tokens: Set<string>): Set<string> {
 }
 
 function sameNewsEvent(left: TokenProfile, right: TokenProfile): boolean {
+  if (sameStructuredReleaseLifecycle(left, right)) return true;
   const structuredSame = sameStructuredEventFingerprint(left.fingerprint, right.fingerprint);
   if (structuredSame !== undefined) return structuredSame;
   if (shouldSeparateByEventFingerprint(left.fingerprint, right.fingerprint)) return false;
@@ -1188,14 +1210,35 @@ function sameNewsEvent(left: TokenProfile, right: TokenProfile): boolean {
   return false;
 }
 
+function sameStructuredReleaseLifecycle(left: TokenProfile, right: TokenProfile): boolean {
+  if (left.releaseStage === 'unknown' || right.releaseStage === 'unknown' || left.releaseStage === right.releaseStage) {
+    return false;
+  }
+  const l = highConfidenceStructuredFingerprint(left);
+  const r = highConfidenceStructuredFingerprint(right);
+  return Boolean(
+    l
+    && r
+    && l.eventType === 'model-release'
+    && r.eventType === 'model-release'
+    && l.primaryObjectIdentity
+    && l.primaryObjectIdentity === r.primaryObjectIdentity
+    && (!l.primaryActor || !r.primaryActor || l.primaryActor === r.primaryActor)
+    && (!l.objectFamily || !r.objectFamily || l.objectFamily === r.objectFamily)
+    && (!l.objectVersion || !r.objectVersion || l.objectVersion === r.objectVersion),
+  );
+}
+
 function canUseTokenFallbackWithSingleHighConfidenceFingerprint(
   left: TokenProfile,
   right: TokenProfile,
 ): boolean {
   const leftStructured = highConfidenceStructuredFingerprint(left);
   const rightStructured = highConfidenceStructuredFingerprint(right);
-  // 双边高置信指纹继续完全由 sameStructuredEventFingerprint 判定，不能在此放宽。
-  if (Boolean(leftStructured) === Boolean(rightStructured)) return true;
+  // 双边高置信指纹只能由 sameStructuredEventFingerprint 的显式 true 判为同事件。
+  // 走到这里代表结构字段不足或存在未归一化差异，必须 fail-open，禁止再用 token 合并。
+  if (leftStructured && rightStructured) return false;
+  if (!leftStructured && !rightStructured) return true;
 
   const structured = leftStructured || rightStructured;
   const unstructured = leftStructured ? right : left;
@@ -1264,6 +1307,22 @@ function sameStructuredEventFingerprint(left: DerivedEventFingerprint, right: De
   if (!l || !r) return undefined;
   if (l.confidence < 0.75 || r.confidence < 0.75) return undefined;
   if (policyStagesConflict(l.policyStage, r.policyStage)) return false;
+
+  // 同 family/version/action 仍不足以证明同一模型对象。双边高置信时完整
+  // primary_object 是授权级 identity：GLM-5.3、Flash、Air 必须分别保留。
+  if (
+    l.primaryObjectIdentity
+    && r.primaryObjectIdentity
+    && l.primaryObjectIdentity !== r.primaryObjectIdentity
+    && l.objectFamily
+    && r.objectFamily
+    && l.objectFamily === r.objectFamily
+    && l.objectVersion
+    && r.objectVersion
+    && l.objectVersion === r.objectVersion
+  ) {
+    return false;
+  }
 
   // 两边都有高置信结构化指纹时，主体/对象身份的明确冲突优先于泛关键词兜底。
   // 否则 Kimi K3 开源与 GPT-5.6 Copilot 集成会仅因都含有 AI/model/推出

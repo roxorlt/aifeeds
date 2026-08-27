@@ -65,6 +65,73 @@ export async function recordCronRun<T>(
   }
 }
 
+/**
+ * Recovery/outbox actions require the observation row itself to be durable.
+ * Unlike the general recorder, an insert failure or a classified partial
+ * result fails the action after preserving the complete result when possible.
+ */
+export async function recordCronRunRequired<T>(
+  env: Env,
+  task: CronTaskMeta,
+  fn: () => Promise<T>,
+  classifyResultError: (result: T) => string | null = () => null,
+  serializeResult: (result: T) => string | Promise<string> = (value) => JSON.stringify(value),
+): Promise<T> {
+  const startedAt = Date.now();
+  let result: T | null = null;
+  let taskFailure: unknown;
+  try {
+    result = await fn();
+  } catch (error) {
+    taskFailure = error;
+  }
+  let serializedResult: string | null = null;
+  let serializationError: string | null = null;
+  if (result != null) {
+    try {
+      serializedResult = await serializeResult(result);
+      if (new TextEncoder().encode(serializedResult).byteLength > 4000
+        || serializedResult.includes('"error_code":"CRON_RESULT_OVERSIZE"')) {
+        serializationError = 'CRON_RESULT_OVERSIZE';
+        serializedResult = JSON.stringify({ status: 'error', error_code: serializationError });
+      }
+    } catch {
+      serializationError = 'CRON_RESULT_SERIALIZATION_FAILED';
+      serializedResult = JSON.stringify({ status: 'error', error_code: serializationError });
+    }
+  }
+  const classifiedError = serializationError || (result == null ? null : classifyResultError(result));
+  const error = taskFailure
+    ? (taskFailure instanceof Error ? `${taskFailure.name}: ${taskFailure.message}` : String(taskFailure))
+    : classifiedError;
+  const finishedAt = Date.now();
+  try {
+    await env.DB.prepare(
+      `INSERT INTO cron_runs
+         (task_name, source, category, started_at, finished_at, status,
+          duration_ms, subrequests, items_count, result_json, error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      task.name,
+      task.source ?? null,
+      task.category,
+      startedAt,
+      finishedAt,
+      error ? 'error' : 'ok',
+      finishedAt - startedAt,
+      extractSubreq(result),
+      extractItemsCount(result),
+      serializedResult,
+      error,
+    ).run();
+  } catch (recordError) {
+    throw new Error(`cron_run_record_failed:${task.name}: ${String(recordError)}`);
+  }
+  if (taskFailure) throw taskFailure;
+  if (classifiedError) throw new Error(classifiedError);
+  return result as T;
+}
+
 function extractSubreq(r: unknown): number | null {
   if (!r || typeof r !== 'object') return null;
   const o = r as Record<string, unknown>;

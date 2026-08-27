@@ -16,6 +16,23 @@ describe('staged daily worker wiring', () => {
     expect(indexSource).toContain("mode === 'daily-codex-push'");
   });
 
+  test('manual v1 and staged repush routes only delegate to final-guarded build/push helpers', () => {
+    const v1 = indexSource.slice(
+      indexSource.indexOf("mode === 'daily-codex-push'"),
+      indexSource.indexOf("mode === 'daily-codex-stage'"),
+    );
+    expect(v1).toContain('buildDailyCodexPayload(env, 8, dateParam)');
+    expect(v1).toContain('pushDailyToCodex(env, 8, dateParam)');
+    expect(v1).not.toContain('fetch(');
+
+    const stagedStart = indexSource.indexOf("mode === 'daily-codex-stage'");
+    const stagedEnd = indexSource.indexOf('\n  if (mode ===', stagedStart + 1);
+    const staged = indexSource.slice(stagedStart, stagedEnd);
+    expect(staged).toContain('buildStagedDailyCodexPayload(env, stage, { date })');
+    expect(staged).toContain('pushDailyStageToCodex(env, stage, date');
+    expect(staged).not.toContain('fetch(');
+  });
+
   test('HK review proxy has a dedicated authenticated API route', () => {
     expect(indexSource).toContain("path === '/api/digest/daily-news-review'");
     expect(indexSource).toContain('handleDailyNewsReviewApi(request, env)');

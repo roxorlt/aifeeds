@@ -1,4 +1,92 @@
-import { afterEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+
+const publicationMocks = vi.hoisted(() => ({
+  sequence: 0,
+  current: null as any,
+  pageHtml: '',
+  reservations: new Map<string, any>(),
+  materialized: [] as Array<{ type: string; publication_id: string; roles: string[] }>,
+  finalAuthorization: vi.fn(async (..._args: any[]) => undefined),
+  authorizationState: {
+    sourceEnabled: true,
+    registryIdentity: 'official-v1',
+    manualProofNonce: 'proof-v1',
+    batchRevision: 1,
+  },
+}));
+
+vi.mock('./publication-storage', () => ({
+  reserveAppendOnlyPublication: vi.fn(async (_env: unknown, input: any) => {
+    const publication_id = (++publicationMocks.sequence).toString(16).padStart(64, '0');
+    const roles = input.objects.map((object: any) => object.object_role);
+    const reservation = {
+      reservation_token: publication_id, publication_id,
+      publication_date: input.publication_date, publication_type: input.publication_type,
+      slot_no: 1, business_revision_id: input.business_revision_id, attempt_key: publication_id,
+      manifest: {
+        manifest_digest: publication_id,
+        objects: roles.map((role: string) => ({ object_role: role, sha256: role.repeat(64).slice(0, 64) })),
+      },
+    };
+    publicationMocks.reservations.set(publication_id, { input, reservation });
+    return { status: 'reserved', reservation };
+  }),
+}));
+
+vi.mock('./publication-release', () => ({
+  loadCurrentDailyReleaseForBuild: vi.fn(async () => publicationMocks.current),
+  readAuthorizedDailyPage: vi.fn(async () => {
+    if (!publicationMocks.current) throw new Error('not found');
+    return { bytes: new TextEncoder().encode(publicationMocks.pageHtml), release_generation: 1, metadata: {} };
+  }),
+  materializeAppendOnlyPublication: vi.fn(async (_env: unknown, reservation: any, bytes: any) => {
+    publicationMocks.materialized.push({
+      type: reservation.publication_type, publication_id: reservation.publication_id, roles: Object.keys(bytes),
+    });
+    if (reservation.publication_type === 'page') publicationMocks.pageHtml = new TextDecoder().decode(bytes.html);
+  }),
+  promoteDailyRelease: vi.fn(async (_env: unknown, pagePublicationId: string) => {
+    const page = publicationMocks.reservations.get(pagePublicationId);
+    const videoId = page.input.release_binding.bound_video_publication_id;
+    const video = publicationMocks.reservations.get(videoId);
+    const now = Date.now();
+    const videoMetadata = video.input.metadata;
+    const objectByRole = new Map(video.input.objects.map((object: any) => [object.object_role, object]));
+    const row = {
+      date: page.input.publication_date,
+      title: videoMetadata.title,
+      description: videoMetadata.description,
+      duration_seconds: videoMetadata.duration_millis / 1000,
+      mp4_key: `daily-video/public/${videoId}/mp4`,
+      mp4_sha256: await crypto.subtle.digest('SHA-256', (objectByRole.get('mp4') as any).bytes).then((digest) =>
+        [...new Uint8Array(digest)].map((v) => v.toString(16).padStart(2, '0')).join('')),
+      mp4_size: (objectByRole.get('mp4') as any).bytes.byteLength,
+      poster_key: `daily-video/public/${videoId}/poster`,
+      poster_sha256: await crypto.subtle.digest('SHA-256', (objectByRole.get('poster') as any).bytes).then((digest) =>
+        [...new Uint8Array(digest)].map((v) => v.toString(16).padStart(2, '0')).join('')),
+      poster_size: (objectByRole.get('poster') as any).bytes.byteLength,
+      vtt_key: `daily-video/public/${videoId}/vtt`,
+      vtt_sha256: await crypto.subtle.digest('SHA-256', (objectByRole.get('vtt') as any).bytes).then((digest) =>
+        [...new Uint8Array(digest)].map((v) => v.toString(16).padStart(2, '0')).join('')),
+      vtt_size: (objectByRole.get('vtt') as any).bytes.byteLength,
+      uploaded_at: new Date(now).toISOString(), updated_at: new Date(now).toISOString(),
+    };
+    const head = {
+      date: page.input.publication_date,
+      release_generation: page.input.release_binding.base_release_generation + 1,
+      page_publication_id: pagePublicationId, video_publication_id: videoId,
+      video_mode: 'joint_new', page_manifest_digest: page.reservation.manifest.manifest_digest,
+      video_manifest_digest: video.reservation.manifest.manifest_digest, promoted_at_ms: now,
+    };
+    publicationMocks.current = {
+      head, page_metadata: page.input.metadata, formal_news_item_ids: page.input.formal_news_item_ids,
+      formal_guard_expected: page.input.formal_guard_expected, review_batch: page.input.review_batch,
+      video: row,
+    };
+    return { ...head, status: 'published' };
+  }),
+  assertCurrentDailyReleaseAuthorization: publicationMocks.finalAuthorization,
+}));
 import {
   DAILY_VIDEO_LIMITS,
   drainDailyVideoGc,
@@ -10,6 +98,41 @@ import {
 const SITE = 'https://ai-feeds.com';
 const API = 'https://api.ai-feeds.com';
 const TOKEN = 'shared-secret';
+
+beforeEach(() => {
+  publicationMocks.sequence = 0;
+  publicationMocks.current = null;
+  publicationMocks.pageHtml = '';
+  publicationMocks.reservations.clear();
+  publicationMocks.materialized.length = 0;
+  publicationMocks.authorizationState.sourceEnabled = true;
+  publicationMocks.authorizationState.registryIdentity = 'official-v1';
+  publicationMocks.authorizationState.manualProofNonce = 'proof-v1';
+  publicationMocks.authorizationState.batchRevision = 1;
+  publicationMocks.finalAuthorization.mockReset();
+  publicationMocks.finalAuthorization.mockImplementation(async (_env, _date, expected) => {
+    const current = publicationMocks.current?.head;
+    if (!current || (expected && (
+      current.release_generation !== expected.release_generation
+      || current.page_publication_id !== expected.page_publication_id
+      || current.page_manifest_digest !== expected.page_manifest_digest
+      || current.video_publication_id !== expected.video_publication_id
+      || current.video_manifest_digest !== expected.video_manifest_digest
+    ))) throw new Error('PUBLICATION_OUTWARD_AUTHORIZATION_STALE:head');
+    if (!publicationMocks.authorizationState.sourceEnabled) {
+      throw new Error('PUBLICATION_OUTWARD_AUTHORIZATION_STALE:source_disabled');
+    }
+    if (publicationMocks.authorizationState.registryIdentity !== 'official-v1') {
+      throw new Error('PUBLICATION_OUTWARD_AUTHORIZATION_STALE:registry_identity');
+    }
+    if (publicationMocks.authorizationState.manualProofNonce !== 'proof-v1') {
+      throw new Error('PUBLICATION_OUTWARD_AUTHORIZATION_STALE:manual_proof');
+    }
+    if (publicationMocks.authorizationState.batchRevision !== 1) {
+      throw new Error('PUBLICATION_OUTWARD_AUTHORIZATION_STALE:review_batch');
+    }
+  });
+});
 
 function jpeg(width = 1600, height = 900): Uint8Array {
   return new Uint8Array([
@@ -67,11 +190,23 @@ function makeR2(events: Event[] = []) {
   };
 }
 
-function seedDailyPage(r2: ReturnType<typeof makeR2>, date = '2026-07-14'): void {
-  r2.store.set(
-    `daily/${date}.html`,
-    '<!doctype html><html><head><script type="application/ld+json">{"@context":"https://schema.org","@type":"CollectionPage"}</script></head><body><main>daily</main></body></html>',
-  );
+function seedDailyPage(
+  r2: ReturnType<typeof makeR2>,
+  date = '2026-07-14',
+  video: DailyVideoRow | null = null,
+): void {
+  publicationMocks.pageHtml = '<!doctype html><html><head><script type="application/ld+json">{"@context":"https://schema.org","@type":"CollectionPage"}</script></head><body><main>daily</main></body></html>';
+  publicationMocks.current = {
+    head: {
+      date, release_generation: 1, page_publication_id: 'a'.repeat(64),
+      video_publication_id: video ? 'c'.repeat(64) : null,
+      video_mode: video ? 'joint_new' : 'none', page_manifest_digest: 'b'.repeat(64),
+      video_manifest_digest: video ? 'd'.repeat(64) : null, promoted_at_ms: 1,
+    },
+    page_metadata: { title: 'AI Daily', item_count: 1 },
+    formal_news_item_ids: [], formal_guard_expected: [], review_batch: null, video,
+  };
+  r2.store.set(`daily/${date}.html`, publicationMocks.pageHtml);
 }
 
 function makeDb(events: Event[] = [], initial: DailyVideoRow | null = null, failUpsert = false) {
@@ -152,6 +287,9 @@ function makeEnv(db: unknown = makeDb(), r2: unknown = makeR2()) {
     SITE_BASE: SITE,
     API_BASE: API,
     X_CARD_SHARED_TOKEN: TOKEN,
+    DAILY_PUBLICATION_RESERVATION_ENABLED: '1',
+    DAILY_PUBLICATION_PUT_ENABLED: '1',
+    DAILY_PUBLICATION_PROMOTION_ENABLED: '1',
   };
 }
 
@@ -209,7 +347,7 @@ describe('daily video content-addressed persistence', () => {
     vi.useRealTimers();
   });
 
-  test('missing daily HTML returns 409 before any media put or D1 upsert', async () => {
+  test('missing unified daily release returns 409 before any publication or D1 upsert', async () => {
     const events: Event[] = [];
     const r2 = makeR2(events);
     const db = makeDb(events);
@@ -217,13 +355,13 @@ describe('daily video content-addressed persistence', () => {
     const resp = await handleDailyVideoUpload(request(uploadForm()), makeEnv(db, r2) as never);
 
     expect(resp.status).toBe(409);
-    expect(await resp.json()).toEqual({ error: 'daily page not found' });
+    expect(await resp.json()).toEqual({ error: 'daily release not found' });
     expect(events.filter((event) => event.kind === 'put')).toHaveLength(0);
     expect(events.filter((event) => event.kind === 'upsert')).toHaveLength(0);
     expect(db.row).toBeNull();
   });
 
-  test('multipart upload writes SHA-256 immutable keys and upserts complete D1 metadata', async () => {
+  test('multipart upload publishes immutable virtual keys and upserts complete D1 metadata', async () => {
     vi.setSystemTime(new Date('2026-07-14T08:09:10.000Z'));
     const events: Event[] = [];
     const r2 = makeR2(events);
@@ -239,12 +377,19 @@ describe('daily video content-addressed persistence', () => {
     expect(resp.status).toBe(201);
     const body = await resp.json() as { ok: boolean; video: DailyVideoRow };
     expect(body.ok).toBe(true);
-    expect(body.video.mp4_key).toBe(`daily-video/2026-07-14/${hashes[0]}.mp4`);
-    expect(body.video.poster_key).toBe(`daily-video/2026-07-14/${hashes[1]}.jpg`);
-    expect(body.video.vtt_key).toBe(`daily-video/2026-07-14/${hashes[2]}.vtt`);
+    const publicationId = body.video.mp4_key.split('/')[2];
+    expect(body.video.mp4_key).toBe(`daily-video/public/${publicationId}/mp4`);
+    expect(body.video.poster_key).toBe(`daily-video/public/${publicationId}/poster`);
+    expect(body.video.vtt_key).toBe(`daily-video/public/${publicationId}/vtt`);
+    expect(body.video).toMatchObject({
+      mp4_sha256: hashes[0], poster_sha256: hashes[1], vtt_sha256: hashes[2],
+    });
     expect(body.video.duration_seconds).toBe(125.25);
     expect(body.video.uploaded_at).toBe('2026-07-14T08:09:10.000Z');
-    expect(r2.store.has(body.video.mp4_key)).toBe(true);
+    expect(publicationMocks.materialized).toEqual([
+      { type: 'video', publication_id: publicationId, roles: ['mp4', 'poster', 'vtt'] },
+      { type: 'page', publication_id: expect.any(String), roles: ['html'] },
+    ]);
     expect(db.row).toMatchObject(body.video);
     expect(events.map((e) => e.kind)).toContain('upsert');
   });
@@ -267,7 +412,7 @@ describe('daily video content-addressed persistence', () => {
     expect(events.filter((e) => e.kind === 'delete')).toHaveLength(0);
   });
 
-  test('replacement queues superseded keys for at least 48 hours without deleting R2 objects', async () => {
+  test('replacement advances the unified head without enqueueing or deleting superseded objects', async () => {
     vi.setSystemTime(new Date('2026-07-14T08:09:10.000Z'));
     const events: Event[] = [];
     const old: DailyVideoRow = {
@@ -278,7 +423,7 @@ describe('daily video content-addressed persistence', () => {
       uploaded_at: '2026-07-13T00:00:00.000Z', updated_at: '2026-07-13T00:00:00.000Z',
     };
     const r2 = makeR2(events);
-    seedDailyPage(r2);
+    seedDailyPage(r2, '2026-07-14', old);
     r2.store.set(old.mp4_key, new ArrayBuffer(1));
     r2.store.set(old.poster_key, new ArrayBuffer(1));
     r2.store.set(old.vtt_key, new ArrayBuffer(1));
@@ -287,13 +432,8 @@ describe('daily video content-addressed persistence', () => {
     const resp = await handleDailyVideoUpload(request(uploadForm({ title: 'new' })), makeEnv(db, r2) as never);
     expect(resp.status).toBe(200);
     const upsertAt = events.findIndex((e) => e.kind === 'upsert');
-    const gcEvents = events.filter((event) => event.kind === 'gc-enqueue');
     expect(upsertAt).toBeGreaterThanOrEqual(0);
-    expect(events.findIndex((event) => event.kind === 'gc-enqueue')).toBeGreaterThan(upsertAt);
-    expect(gcEvents.map((event) => event.key).sort()).toEqual(
-      [old.mp4_key, old.poster_key, old.vtt_key].sort(),
-    );
-    expect(gcEvents.every((event) => event.args?.[1] === '2026-07-16T08:09:10.000Z')).toBe(true);
+    expect(events.filter((event) => event.kind === 'gc-enqueue')).toHaveLength(0);
     expect(events.filter((event) => event.kind === 'delete')).toHaveLength(0);
     expect(r2.store.has(old.mp4_key)).toBe(true);
     expect(r2.store.has(old.poster_key)).toBe(true);
@@ -311,6 +451,8 @@ describe('daily video content-addressed persistence', () => {
     } satisfies DailyVideoRow;
     const r2 = makeR2(events);
     const original = '<!doctype html><html><head><script type="application/ld+json">{"@context":"https://schema.org","@type":"CollectionPage"}</script></head><body><main>old</main></body></html>';
+    seedDailyPage(r2, '2026-07-14', old);
+    publicationMocks.pageHtml = original;
     r2.store.set('daily/2026-07-14.html', original);
     const resp = await handleDailyVideoUpload(
       request(uploadForm()),
@@ -323,33 +465,32 @@ describe('daily video content-addressed persistence', () => {
     expect(events.filter((e) => e.kind === 'delete')).toHaveLength(0);
   });
 
-  test('upload activates D1 metadata before patching an existing historical daily snapshot', async () => {
+  test('upload materializes video and patched page before the unified head promotion projection', async () => {
     const events: Event[] = [];
     const r2 = makeR2(events);
     const original = '<!doctype html><html><head><script type="application/ld+json">{"@context":"https://schema.org","@type":"CollectionPage","name":"old"}</script></head><body><main><p>历史正文</p></main></body></html>';
+    seedDailyPage(r2);
+    publicationMocks.pageHtml = original;
     r2.store.set('daily/2026-07-14.html', original);
     const db = makeDb(events);
 
     const resp = await handleDailyVideoUpload(request(uploadForm()), makeEnv(db, r2) as never);
     expect(resp.status).toBe(201);
     expect(await resp.json()).toMatchObject({ ok: true, pagePatched: true });
-    const patched = String(r2.store.get('daily/2026-07-14.html'));
+    const patched = publicationMocks.pageHtml;
     expect(patched).toContain('daily-video:player:start');
     expect(patched).toContain('daily-video:json-ld:start');
     expect(patched).toContain('<p>历史正文</p>');
-    const pagePutAt = events.findIndex((e) => e.kind === 'put' && e.key === 'daily/2026-07-14.html');
-    const upsertAt = events.findIndex((e) => e.kind === 'upsert');
-    expect(pagePutAt).toBeGreaterThanOrEqual(0);
-    expect(pagePutAt).toBeGreaterThan(upsertAt);
+    expect(publicationMocks.materialized.map((entry) => entry.type)).toEqual(['video', 'page']);
+    expect(events.filter((event) => event.kind === 'put')).toHaveLength(0);
+    expect(events.filter((event) => event.kind === 'upsert')).toHaveLength(1);
   });
 
   test('patched page timestamps are updated and IndexNow receives the watch page plus discovery URLs', async () => {
     const events: Event[] = [];
     const r2 = makeR2(events);
-    r2.store.set(
-      'daily/2026-07-14.html',
-      '<!doctype html><html><head><script type="application/ld+json">{"@context":"https://schema.org","@type":"CollectionPage"}</script></head><body><main>x</main></body></html>',
-    );
+    seedDailyPage(r2);
+    publicationMocks.pageHtml = '<!doctype html><html><head><script type="application/ld+json">{"@context":"https://schema.org","@type":"CollectionPage"}</script></head><body><main>x</main></body></html>';
     const db = makeDb(events);
     const fetchMock = vi.fn(async () => new Response('ok', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
@@ -359,9 +500,12 @@ describe('daily video content-addressed persistence', () => {
     expect(resp.status).toBe(201);
     const pageUpdate = events.find((event) => event.kind === 'daily-page-update');
     expect(pageUpdate).toBeTruthy();
-    expect(pageUpdate!.sql).toMatch(/SET lastmod = \? WHERE date = \?/);
+    expect(pageUpdate!.sql).toMatch(/SET lastmod = \? WHERE date = \? AND EXISTS/);
     expect(pageUpdate!.sql).not.toContain('generated_at');
-    expect(pageUpdate!.args).toHaveLength(2);
+    expect(pageUpdate!.args).toHaveLength(6);
+    expect(pageUpdate!.args?.slice(0, 2)).toEqual([
+      expect.stringMatching(/^2026-08-27T/), '2026-07-14',
+    ]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(JSON.parse(String(init.body)).urlList).toEqual([
@@ -372,10 +516,56 @@ describe('daily video content-addressed persistence', () => {
       `${SITE}/sitemap.xml`,
     ]);
   });
+
+  test('upload success and IndexNow are both suppressed when the authoritative final reread fails', async () => {
+    const events: Event[] = [];
+    const r2 = makeR2(events);
+    seedDailyPage(r2);
+    const fetchMock = vi.fn(async () => new Response('ok', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    publicationMocks.finalAuthorization.mockRejectedValueOnce(
+      new Error('PUBLICATION_OUTWARD_AUTHORIZATION_STALE:item_source_manual_proof_or_batch_mutated'),
+    );
+
+    const response = await handleDailyVideoUpload(
+      request(uploadForm()),
+      { ...makeEnv(makeDb(events), r2), INDEXNOW_KEY: 'index-key' } as never,
+    );
+
+    expect(response.status).toBe(500);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['head supersede', () => { publicationMocks.current.head.release_generation += 1; }],
+    ['source disabled', () => { publicationMocks.authorizationState.sourceEnabled = false; }],
+    ['registry identity changed', () => { publicationMocks.authorizationState.registryIdentity = 'radar-v2'; }],
+    ['manual proof invalidated', () => { publicationMocks.authorizationState.manualProofNonce = 'proof-invalidated'; }],
+    ['review batch superseded', () => { publicationMocks.authorizationState.batchRevision = 2; }],
+  ])('IndexNow HTTP callback mutates concrete %s state: post-HTTP reread prevents upload success', async (_label, mutate) => {
+    const events: Event[] = [];
+    const r2 = makeR2(events);
+    seedDailyPage(r2);
+    const fetchMock = vi.fn(async () => {
+      mutate();
+      return new Response('ok', { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await handleDailyVideoUpload(
+      request(uploadForm()),
+      { ...makeEnv(makeDb(events), r2), INDEXNOW_KEY: 'index-key' } as never,
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(publicationMocks.finalAuthorization).toHaveBeenCalledTimes(2);
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: 'daily video upload failed' });
+  });
 });
 
-describe('daily video garbage collection', () => {
-  test('drain deletes only expired unreferenced keys up to the limit, then removes their queue rows', async () => {
+describe('daily video append-only retention', () => {
+  test('the compatibility drain is inert and never deletes or dequeues historical objects', async () => {
     const events: Event[] = [];
     const r2 = makeR2(events);
     const db = makeDb(events);
@@ -392,69 +582,19 @@ describe('daily video garbage collection', () => {
       r2_key: 'future.mp4', delete_after: '2026-07-15T00:00:00.000Z', enqueued_at: '2026-07-13T00:00:00.000Z',
     });
 
-    await drainDailyVideoGc(makeEnv(db, r2) as never, {
+    const result = await drainDailyVideoGc(makeEnv(db, r2) as never, {
       limit: 1,
       now: new Date('2026-07-14T00:00:00.000Z'),
     });
 
-    expect(events.filter((event) => event.kind === 'delete').map((event) => event.key)).toEqual(['expired-a.mp4']);
-    expect(events.findIndex((event) => event.kind === 'gc-dequeue')).toBeGreaterThan(
-      events.findIndex((event) => event.kind === 'delete'),
-    );
-    expect(db.gc.has('expired-a.mp4')).toBe(false);
+    expect(result).toEqual({ processed: 0, deleted: 0, clearedReferenced: 0, failed: 0 });
+    expect(events.filter((event) => event.kind === 'delete')).toHaveLength(0);
+    expect(events.filter((event) => event.kind === 'gc-dequeue')).toHaveLength(0);
+    expect(db.gc.has('expired-a.mp4')).toBe(true);
     expect(db.gc.has('expired-b.mp4')).toBe(true);
     expect(db.gc.has('future.mp4')).toBe(true);
-    expect(r2.store.has('expired-a.mp4')).toBe(false);
+    expect(r2.store.has('expired-a.mp4')).toBe(true);
     expect(r2.store.has('expired-b.mp4')).toBe(true);
     expect(r2.store.has('future.mp4')).toBe(true);
-  });
-
-  test('drain clears a referenced key from the queue without deleting its R2 object', async () => {
-    const events: Event[] = [];
-    const current: DailyVideoRow = {
-      date: '2026-07-14', title: 'current', description: 'current', duration_seconds: 1,
-      mp4_key: 'still-current.mp4', mp4_sha256: 'current', mp4_size: 1,
-      poster_key: 'current.jpg', poster_sha256: 'current', poster_size: 1,
-      vtt_key: 'current.vtt', vtt_sha256: 'current', vtt_size: 1,
-      uploaded_at: '2026-07-14T00:00:00.000Z', updated_at: '2026-07-14T00:00:00.000Z',
-    };
-    const r2 = makeR2(events);
-    const db = makeDb(events, current);
-    r2.store.set(current.mp4_key, new ArrayBuffer(1));
-    db.gc.set(current.mp4_key, {
-      r2_key: current.mp4_key, delete_after: '2026-07-13T00:00:00.000Z', enqueued_at: '2026-07-11T00:00:00.000Z',
-    });
-
-    await drainDailyVideoGc(makeEnv(db, r2) as never, {
-      limit: 10,
-      now: new Date('2026-07-14T00:00:00.000Z'),
-    });
-
-    expect(events.some((event) => event.kind === 'delete' && event.key === current.mp4_key)).toBe(false);
-    expect(events.some((event) => event.kind === 'gc-dequeue' && event.key === current.mp4_key)).toBe(true);
-    expect(db.gc.has(current.mp4_key)).toBe(false);
-    expect(r2.store.has(current.mp4_key)).toBe(true);
-  });
-
-  test('drain leaves the queue row intact when R2 deletion fails', async () => {
-    const events: Event[] = [];
-    const key = 'retry-later.mp4';
-    const r2 = makeR2(events);
-    const db = makeDb(events);
-    r2.store.set(key, new ArrayBuffer(1));
-    r2.failDeletes.add(key);
-    db.gc.set(key, {
-      r2_key: key, delete_after: '2026-07-13T00:00:00.000Z', enqueued_at: '2026-07-11T00:00:00.000Z',
-    });
-
-    await drainDailyVideoGc(makeEnv(db, r2) as never, {
-      limit: 10,
-      now: new Date('2026-07-14T00:00:00.000Z'),
-    });
-
-    expect(events.some((event) => event.kind === 'delete' && event.key === key)).toBe(true);
-    expect(events.some((event) => event.kind === 'gc-dequeue' && event.key === key)).toBe(false);
-    expect(db.gc.has(key)).toBe(true);
-    expect(r2.store.has(key)).toBe(true);
   });
 });

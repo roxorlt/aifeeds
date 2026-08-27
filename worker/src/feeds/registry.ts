@@ -2,7 +2,7 @@
 //
 // FEED_REGISTRY = curated 的可订阅 feed 清单（增删源改这里，不动 migration）。
 // 设计文档 §3.1：2026-06-09 逐条实测可直连的 ~24 源（feed_url 用 verifiedFeedUrl 列真实地址）。
-//   - 10 国外博客原生 RSS（含 Anthropic 第三方桥）+ 2 国内原生（Qwen 旧站 / 美团）
+//   - 国外博客以官方 RSS/page-scrape 为主（Anthropic 已改官方 sitemap）+ 国内官方源
 //   - 1 GitHub Releases（MiniCPM，归 source_type='blog'）
 //   - 11 播客 feed（A 档 5 个有原生文字稿）
 //   - (Phase 2,2026-06-22) +4 国内播客,经 HK VPS 自托管 RSSHub 小宇宙路由（via='rsshub'）→ 共 28
@@ -268,12 +268,12 @@ const DOMESTIC_BLOGS: FeedDef[] = [
     cc_policy: "deny",
     editorial_type: "official",
     via: "native",
-    feed_url: "https://huggingface.co/api/models?author=zai-org&sort=lastModified&direction=-1&limit=50",
+    feed_url: "https://huggingface.co/api/models?author=zai-org&sort=createdAt&direction=-1&limit=50",
     cadence_hours: 2,
     fetch_strategy: "native",
     discovery_strategy: "huggingface-models",
     site_base: "https://huggingface.co/zai-org",
-    notes: "官方 Hugging Face zai-org 模型列表；仅首次发现仓库时入库，普通 lastModified 更新不造新事件",
+    notes: "官方 Hugging Face zai-org 模型列表；Link cursor 最多 5 页；以 API 不可变 _id 去重且只认 createdAt，改名/更新/旧仓转公开不造新事件",
   },
   {
     id: "blog:qwen",

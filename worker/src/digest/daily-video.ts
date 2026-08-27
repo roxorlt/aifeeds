@@ -1,21 +1,30 @@
 // 每日日报视频上传核心。
 // index.ts 只需把 POST 路由交给 handleDailyVideoUpload(request, env)；鉴权、multipart
-// 校验、内容寻址 R2 写入、D1 幂等 UPSERT 与旧对象延迟清理均封装在本模块。
+// 校验、append-only private R2 PUT、统一 page/video release promotion 与兼容 projection
+// 均封装在本模块。业务运行时不提供 publication DELETE。
 
 import type { Env } from '../index';
 import { patchDailyPageVideoHtml } from './daily-page';
+import { canonicalBusinessRevision } from './publication-canonical';
+import { reserveAppendOnlyPublication } from './publication-storage';
+import {
+  assertCurrentDailyReleaseAuthorization,
+  loadCurrentDailyReleaseForBuild,
+  materializeAppendOnlyPublication,
+  promoteDailyRelease,
+  readAuthorizedDailyPage,
+} from './publication-release';
 
 export const DAILY_VIDEO_LIMITS = {
   mp4: 64 * 1024 * 1024,
-  poster: 5 * 1024 * 1024,
-  vtt: 2 * 1024 * 1024,
+  poster: 8 * 1024 * 1024,
+  vtt: 1 * 1024 * 1024,
 } as const;
 
 const MAX_DURATION_SECONDS = 8 * 60 * 60;
 const MAX_TITLE_CHARS = 200;
 const MAX_DESCRIPTION_CHARS = 5000;
 const INDEXNOW_ENDPOINT = 'https://api.indexnow.org/indexnow';
-const DAILY_VIDEO_GC_DELAY_MS = 48 * 60 * 60 * 1000;
 
 type DailyVideoFileKind = keyof typeof DAILY_VIDEO_LIMITS;
 
@@ -44,6 +53,9 @@ export interface DailyVideoEnv {
   SITE_BASE?: string;
   API_BASE?: string;
   INDEXNOW_KEY?: string;
+  DAILY_PUBLICATION_RESERVATION_ENABLED?: string;
+  DAILY_PUBLICATION_PUT_ENABLED?: string;
+  DAILY_PUBLICATION_PROMOTION_ENABLED?: string;
 }
 
 export interface DailyVideoGcDrainOptions {
@@ -58,10 +70,6 @@ export interface DailyVideoGcDrainResult {
   failed: number;
 }
 
-interface DailyVideoGcRow {
-  r2_key: string;
-  delete_after: string;
-}
 
 interface UploadParts {
   date: string;
@@ -195,89 +203,12 @@ function isWebVtt(bytes: ArrayBuffer): boolean {
   return prefix.startsWith('WEBVTT');
 }
 
-async function putImmutable(
-  bucket: R2Bucket,
-  key: string,
-  bytes: ArrayBuffer,
-  contentType: string,
-): Promise<void> {
-  const existing = await bucket.head(key);
-  if (existing) return;
-  await bucket.put(key, bytes, {
-    httpMetadata: { contentType, cacheControl: 'public, max-age=31536000, immutable' },
-    customMetadata: { source: 'daily-video', sha256: key.slice(key.lastIndexOf('/') + 1, key.lastIndexOf('.')) },
-  });
-}
-
-export async function loadDailyVideo(env: DailyVideoEnv, date: string): Promise<DailyVideoRow | null> {
-  return env.DB.prepare(`SELECT * FROM daily_videos WHERE date = ?`).bind(date).first<DailyVideoRow>();
-}
-
 export async function drainDailyVideoGc(
-  env: DailyVideoEnv,
-  options: DailyVideoGcDrainOptions,
+  _env: DailyVideoEnv,
+  _options: DailyVideoGcDrainOptions,
 ): Promise<DailyVideoGcDrainResult> {
-  if (!env.READMES) throw new Error('R2 not configured');
-  const limit = Number.isFinite(options.limit) ? Math.max(0, Math.floor(options.limit)) : 0;
-  const result: DailyVideoGcDrainResult = {
-    processed: 0,
-    deleted: 0,
-    clearedReferenced: 0,
-    failed: 0,
-  };
-  if (limit === 0) return result;
-
-  const now = options.now instanceof Date ? options.now : new Date(options.now ?? Date.now());
-  if (Number.isNaN(now.getTime())) throw new Error('invalid GC time');
-  const due = await env.DB.prepare(
-    `SELECT r2_key, delete_after
-     FROM daily_video_gc
-     WHERE delete_after <= ?
-     ORDER BY delete_after ASC
-     LIMIT ?`,
-  ).bind(now.toISOString(), limit).all<DailyVideoGcRow>();
-
-  for (const item of due.results || []) {
-    result.processed++;
-    const referenced = await env.DB.prepare(
-      `SELECT 1 AS referenced
-       FROM daily_videos
-       WHERE mp4_key = ? OR poster_key = ? OR vtt_key = ?
-       LIMIT 1`,
-    ).bind(item.r2_key, item.r2_key, item.r2_key).first<{ referenced: number }>();
-    if (referenced) {
-      await env.DB.prepare(`DELETE FROM daily_video_gc WHERE r2_key = ?`).bind(item.r2_key).run();
-      result.clearedReferenced++;
-      continue;
-    }
-
-    try {
-      await env.READMES.delete(item.r2_key);
-    } catch {
-      result.failed++;
-      continue;
-    }
-    await env.DB.prepare(`DELETE FROM daily_video_gc WHERE r2_key = ?`).bind(item.r2_key).run();
-    result.deleted++;
-  }
-  return result;
-}
-
-async function patchExistingDailyPage(
-  env: DailyVideoEnv,
-  video: DailyVideoRow,
-): Promise<boolean> {
-  const key = `daily/${video.date}.html`;
-  const object = await env.READMES!.get(key);
-  if (!object) return false;
-  const original = await object.text();
-  const patched = patchDailyPageVideoHtml(original, video, env as Env);
-  if (patched !== original) {
-    await env.READMES!.put(key, patched, {
-      httpMetadata: { contentType: 'text/html; charset=utf-8' },
-    });
-  }
-  return true;
+  // Append-only publication objects are never deleted by the business runtime.
+  return { processed: 0, deleted: 0, clearedReferenced: 0, failed: 0 };
 }
 
 function sameUpload(a: DailyVideoRow | null, b: DailyVideoRow): boolean {
@@ -290,7 +221,16 @@ function sameUpload(a: DailyVideoRow | null, b: DailyVideoRow): boolean {
     && a.vtt_sha256 === b.vtt_sha256;
 }
 
-async function upsertMetadata(env: DailyVideoEnv, row: DailyVideoRow): Promise<void> {
+async function upsertMetadata(
+  env: DailyVideoEnv,
+  row: DailyVideoRow,
+  release: {
+    release_generation: number;
+    page_publication_id: string;
+    video_publication_id: string | null;
+    video_manifest_digest: string | null;
+  },
+): Promise<void> {
   await env.DB.prepare(
     `INSERT INTO daily_videos (
        date, title, description, duration_seconds,
@@ -298,7 +238,13 @@ async function upsertMetadata(env: DailyVideoEnv, row: DailyVideoRow): Promise<v
        poster_key, poster_sha256, poster_size,
        vtt_key, vtt_sha256, vtt_size,
        uploaded_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       WHERE EXISTS (SELECT 1 FROM daily_release_heads h
+         JOIN append_only_publications p ON p.publication_id=h.page_publication_id
+         JOIN append_only_publications v ON v.publication_id=h.video_publication_id
+        WHERE h.date=? AND h.release_generation=? AND h.page_publication_id=?
+          AND h.video_publication_id=? AND h.video_manifest_digest=?
+          AND p.state='published' AND v.state='published')
      ON CONFLICT(date) DO UPDATE SET
        title = excluded.title,
        description = excluded.description,
@@ -313,20 +259,42 @@ async function upsertMetadata(env: DailyVideoEnv, row: DailyVideoRow): Promise<v
        vtt_sha256 = excluded.vtt_sha256,
        vtt_size = excluded.vtt_size,
        uploaded_at = excluded.uploaded_at,
-       updated_at = excluded.updated_at`,
+       updated_at = excluded.updated_at
+     WHERE EXISTS (SELECT 1 FROM daily_release_heads h
+       JOIN append_only_publications p ON p.publication_id=h.page_publication_id
+       JOIN append_only_publications v ON v.publication_id=h.video_publication_id
+      WHERE h.date=excluded.date AND h.release_generation=? AND h.page_publication_id=?
+        AND h.video_publication_id=? AND h.video_manifest_digest=?
+        AND p.state='published' AND v.state='published')`,
   ).bind(
     row.date, row.title, row.description, row.duration_seconds,
     row.mp4_key, row.mp4_sha256, row.mp4_size,
     row.poster_key, row.poster_sha256, row.poster_size,
     row.vtt_key, row.vtt_sha256, row.vtt_size,
     row.uploaded_at, row.updated_at,
+    row.date, release.release_generation, release.page_publication_id,
+    release.video_publication_id, release.video_manifest_digest,
+    release.release_generation, release.page_publication_id,
+    release.video_publication_id, release.video_manifest_digest,
   ).run();
 }
 
-async function markDailyPageVideoPublished(env: DailyVideoEnv, row: DailyVideoRow): Promise<void> {
+async function markDailyPageVideoPublished(
+  env: DailyVideoEnv,
+  row: DailyVideoRow,
+  release: { release_generation: number; page_publication_id: string; video_publication_id: string | null },
+): Promise<void> {
   await env.DB.prepare(
-    `UPDATE daily_pages SET lastmod = ? WHERE date = ?`,
-  ).bind(row.updated_at, row.date).run();
+    `UPDATE daily_pages SET lastmod = ? WHERE date = ? AND EXISTS (
+      SELECT 1 FROM daily_release_heads h
+       JOIN append_only_publications p ON p.publication_id=h.page_publication_id
+       JOIN append_only_publications v ON v.publication_id=h.video_publication_id
+      WHERE h.date=? AND h.release_generation=? AND h.page_publication_id=?
+        AND h.video_publication_id=? AND p.state='published' AND v.state='published')`,
+  ).bind(
+    row.updated_at, row.date, row.date, release.release_generation,
+    release.page_publication_id, release.video_publication_id,
+  ).run();
 }
 
 export function dailyVideoIndexNowUrls(env: DailyVideoEnv, date: string): string[] {
@@ -362,32 +330,21 @@ async function submitDailyVideoIndexNow(env: DailyVideoEnv, date: string): Promi
   }
 }
 
-async function queueSuperseded(
-  env: DailyVideoEnv,
-  previous: DailyVideoRow | null,
-  current: DailyVideoRow,
-): Promise<void> {
-  if (!previous) return;
-  const keep = new Set([current.mp4_key, current.poster_key, current.vtt_key]);
-  const deleteAfter = new Date(Date.parse(current.updated_at) + DAILY_VIDEO_GC_DELAY_MS).toISOString();
-  for (const key of new Set([previous.mp4_key, previous.poster_key, previous.vtt_key])) {
-    if (keep.has(key)) continue;
-    await env.DB.prepare(
-      `INSERT INTO daily_video_gc (r2_key, delete_after, enqueued_at)
-       VALUES (?, ?, ?)
-       ON CONFLICT(r2_key) DO UPDATE SET
-         delete_after = excluded.delete_after,
-         enqueued_at = excluded.enqueued_at`,
-    ).bind(key, deleteAfter, current.updated_at).run();
-  }
-}
-
 export async function handleDailyVideoUpload(request: Request, env: DailyVideoEnv): Promise<Response> {
   if (request.method !== 'POST') return json({ error: 'method not allowed' }, 405, { Allow: 'POST' });
   if (!hasDailyVideoBearer(request, env.X_CARD_SHARED_TOKEN)) {
     return json({ error: 'unauthorized' }, 401, { 'WWW-Authenticate': 'Bearer' });
   }
   if (!env.READMES) return json({ error: 'R2 not configured' }, 503);
+  const reservationEnabled = env.DAILY_PUBLICATION_RESERVATION_ENABLED === '1';
+  const putEnabled = env.DAILY_PUBLICATION_PUT_ENABLED === '1';
+  const promotionEnabled = env.DAILY_PUBLICATION_PROMOTION_ENABLED === '1';
+  if ((putEnabled && !reservationEnabled) || (promotionEnabled && (!reservationEnabled || !putEnabled))) {
+    return json({ error: 'invalid daily publication gates' }, 503);
+  }
+  if (!reservationEnabled || !putEnabled || !promotionEnabled) {
+    return json({ error: 'daily publication disabled' }, 503);
+  }
 
   let form: FormData;
   try {
@@ -412,51 +369,114 @@ export async function handleDailyVideoUpload(request: Request, env: DailyVideoEn
       return json({ error: 'poster must be a valid 16:9 JPEG' }, 400);
     }
     if (!isWebVtt(vttBytes)) return json({ error: 'vtt must start with WEBVTT' }, 400);
-    const dailyPageKey = `daily/${parsed.date}.html`;
-    if (!await env.READMES.head(dailyPageKey)) {
-      return json({ error: 'daily page not found' }, 409);
-    }
-
     const [mp4Hash, posterHash, vttHash] = await Promise.all([
       sha256Hex(mp4Bytes), sha256Hex(posterBytes), sha256Hex(vttBytes),
     ]);
-    const previous = await loadDailyVideo(env, parsed.date);
-    const now = new Date().toISOString();
-    const sameAssets = !!previous
-      && previous.mp4_sha256 === mp4Hash
-      && previous.poster_sha256 === posterHash
-      && previous.vtt_sha256 === vttHash;
+    const current = await loadCurrentDailyReleaseForBuild(env as Env, parsed.date);
+    if (!current) return json({ error: 'daily release not found' }, 409);
+    const currentVideo = current.video;
+    const proposedIdentity: DailyVideoRow = {
+      date: parsed.date, title: parsed.title, description: parsed.description,
+      duration_seconds: parsed.duration,
+      mp4_key: '', mp4_sha256: mp4Hash, mp4_size: mp4Bytes.byteLength,
+      poster_key: '', poster_sha256: posterHash, poster_size: posterBytes.byteLength,
+      vtt_key: '', vtt_sha256: vttHash, vtt_size: vttBytes.byteLength,
+      uploaded_at: '', updated_at: '',
+    };
+    if (sameUpload(currentVideo, proposedIdentity)) {
+      await assertCurrentDailyReleaseAuthorization(env as Env, parsed.date, current.head);
+      return json({ ok: true, unchanged: true, pagePatched: false, video: currentVideo }, 200);
+    }
+    const durationMillis = Math.round(parsed.duration * 1000);
+    const videoBusinessRevision = await canonicalBusinessRevision({
+      schema_version: 1, kind: 'daily_video', date: parsed.date,
+      title: parsed.title, description: parsed.description, duration_millis: durationMillis,
+      mp4_sha256: mp4Hash, mp4_size: mp4Bytes.byteLength,
+      poster_sha256: posterHash, poster_size: posterBytes.byteLength,
+      vtt_sha256: vttHash, vtt_size: vttBytes.byteLength,
+      base_release_generation: current.head.release_generation,
+      base_page_publication_id: current.head.page_publication_id,
+    });
+    const videoReservation = await reserveAppendOnlyPublication({ DB: env.DB }, {
+      publication_date: parsed.date, publication_type: 'video',
+      business_revision_id: videoBusinessRevision,
+      objects: [
+        { object_role: 'mp4', mime: 'video/mp4', bytes: mp4Bytes },
+        { object_role: 'poster', mime: 'image/jpeg', bytes: posterBytes },
+        { object_role: 'vtt', mime: 'text/vtt; charset=utf-8', bytes: vttBytes },
+      ],
+      metadata: {
+        title: parsed.title, description: parsed.description, duration_millis: durationMillis,
+      },
+      release_binding: { base_release_generation: current.head.release_generation },
+    });
+    const stableTimestamp = `${parsed.date}T00:00:00.000Z`;
+    const videoPublicationId = videoReservation.reservation.publication_id;
     const row: DailyVideoRow = {
       date: parsed.date,
       title: parsed.title,
       description: parsed.description,
       duration_seconds: parsed.duration,
-      mp4_key: `daily-video/${parsed.date}/${mp4Hash}.mp4`,
+      mp4_key: `daily-video/public/${videoPublicationId}/mp4`,
       mp4_sha256: mp4Hash,
       mp4_size: mp4Bytes.byteLength,
-      poster_key: `daily-video/${parsed.date}/${posterHash}.jpg`,
+      poster_key: `daily-video/public/${videoPublicationId}/poster`,
       poster_sha256: posterHash,
       poster_size: posterBytes.byteLength,
-      vtt_key: `daily-video/${parsed.date}/${vttHash}.vtt`,
+      vtt_key: `daily-video/public/${videoPublicationId}/vtt`,
       vtt_sha256: vttHash,
       vtt_size: vttBytes.byteLength,
-      uploaded_at: sameAssets && previous ? previous.uploaded_at : now,
-      updated_at: now,
+      uploaded_at: stableTimestamp,
+      updated_at: stableTimestamp,
     };
-    const unchanged = sameUpload(previous, row);
 
-    await Promise.all([
-      putImmutable(env.READMES, row.mp4_key, mp4Bytes, 'video/mp4'),
-      putImmutable(env.READMES, row.poster_key, posterBytes, 'image/jpeg'),
-      putImmutable(env.READMES, row.vtt_key, vttBytes, 'text/vtt; charset=utf-8'),
-    ]);
-    await upsertMetadata(env, row);
-    await queueSuperseded(env, previous, row);
-    const pagePatched = await patchExistingDailyPage(env, row);
-    if (pagePatched) await markDailyPageVideoPublished(env, row);
+    const currentPage = await readAuthorizedDailyPage(env as Env, parsed.date);
+    const patchedHtml = patchDailyPageVideoHtml(
+      new TextDecoder().decode(currentPage.bytes), row, env as Env,
+    );
+    const pageBytes = new TextEncoder().encode(patchedHtml);
+    const pageBusinessRevision = await canonicalBusinessRevision({
+      schema_version: 1, kind: 'daily_page_video_joint', date: parsed.date,
+      html: patchedHtml, video_publication_id: videoPublicationId,
+      video_manifest_digest: videoReservation.reservation.manifest.manifest_digest,
+      base_release_generation: current.head.release_generation,
+      base_page_publication_id: current.head.page_publication_id,
+    });
+    const pageReservation = await reserveAppendOnlyPublication({ DB: env.DB }, {
+      publication_date: parsed.date, publication_type: 'page',
+      business_revision_id: pageBusinessRevision,
+      objects: [{ object_role: 'html', mime: 'text/html; charset=utf-8', bytes: pageBytes }],
+      metadata: current.page_metadata,
+      formal_news_item_ids: current.formal_news_item_ids,
+      formal_guard_expected: current.formal_guard_expected,
+      review_batch: current.review_batch,
+      release_binding: {
+        video_mode: 'joint_new',
+        bound_video_publication_id: videoPublicationId,
+        bound_video_digest: videoReservation.reservation.manifest.manifest_digest,
+        base_release_generation: current.head.release_generation,
+        base_page_publication_id: current.head.page_publication_id,
+        base_video_publication_id: current.head.video_publication_id,
+        base_video_digest: current.head.video_manifest_digest,
+      },
+    });
+    await materializeAppendOnlyPublication(env as Env, videoReservation.reservation, {
+      mp4: mp4Bytes, poster: posterBytes, vtt: vttBytes,
+    });
+    await materializeAppendOnlyPublication(env as Env, pageReservation.reservation, { html: pageBytes });
+    const release = await promoteDailyRelease(env as Env, pageReservation.reservation.publication_id);
+    const now = new Date(release.promoted_at_ms).toISOString();
+    row.uploaded_at = now;
+    row.updated_at = now;
+    await upsertMetadata(env, row, release);
+    await markDailyPageVideoPublished(env, row, release);
+    await assertCurrentDailyReleaseAuthorization(env as Env, row.date, release);
     await submitDailyVideoIndexNow(env, row.date);
+    // The HTTP callback can race a head/source/manual-proof/review mutation.
+    // A successful upload response therefore requires a post-attempt reread too.
+    await assertCurrentDailyReleaseAuthorization(env as Env, row.date, release);
 
-    return json({ ok: true, unchanged, pagePatched, video: row }, previous ? 200 : 201);
+    return json({ ok: true, unchanged: false, pagePatched: true, video: row }, currentVideo ? 200 : 201);
   } catch (error) {
     console.error(`[daily-video] upload failed: ${String(error).slice(0, 240)}`);
     return json({ error: 'daily video upload failed' }, 500);

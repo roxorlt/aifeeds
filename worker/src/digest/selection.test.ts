@@ -792,14 +792,14 @@ test('selectNewsByScoreWithAudit does not truncate matching events after the fir
           return statement;
         },
         async all<T>() {
-          if (/FROM items\s+WHERE source_type IN/.test(sql)) {
+          if (/FROM items i/.test(sql) && !/requested AS/.test(sql)) {
             return { results: [currentRow] as T[] };
           }
           if (/FROM digest_pool/.test(sql)) {
             return { results: ledgerIds.map((id) => ({ id })) as T[] };
           }
-          if (/WHERE id IN/.test(sql)) {
-            const ids = binds.map(String);
+          if (/requested AS/.test(sql)) {
+            const ids = JSON.parse(String(binds[1] || '[]')) as string[];
             if (ids.length > 80) {
               throw new Error('D1_ERROR: too many SQL variables');
             }
@@ -824,7 +824,7 @@ test('selectNewsByScoreWithAudit does not truncate matching events after the fir
   assert.deepEqual(result.ids, []);
 });
 
-test('selectNewsByScoreWithAudit explicitly excludes radar items from formal news candidates', async () => {
+test('selectNewsByScoreWithAudit fail-closes a historical radar item whose editorial_type is missing', async () => {
   let selectionSql = '';
   const radarRow = {
     id: 'blog:weibo-hot-tech:radar-lead',
@@ -836,7 +836,6 @@ test('selectNewsByScoreWithAudit explicitly excludes radar items from formal new
     extra: JSON.stringify({
       feed_key: 'weibo-hot-tech',
       source_company: '微博',
-      editorial_type: 'radar',
       ai_category: 'model-release',
       ai_summary_zh: '仅作为待核验的雷达线索。',
     }),
@@ -850,7 +849,10 @@ test('selectNewsByScoreWithAudit explicitly excludes radar items from formal new
         async all<T>() {
           if (sql.includes('FROM items')) {
             selectionSql = sql;
-            return { results: (sql.includes("$.editorial_type") ? [] : [radarRow]) as T[] };
+            const hasLegacyIdentityGuard = sql.includes("$.feed_key")
+              && sql.includes('weibo-hot-tech')
+              && sql.includes('source_ref');
+            return { results: (hasLegacyIdentityGuard ? [] : [radarRow]) as T[] };
           }
           return { results: [] as T[] };
         },
@@ -862,6 +864,8 @@ test('selectNewsByScoreWithAudit explicitly excludes radar items from formal new
   const result = await selectNewsByScoreWithAudit({ DB: db } as never, 5);
 
   assert.match(selectionSql, /editorial_type/);
+  assert.match(selectionSql, /weibo-hot-tech/);
+  assert.match(selectionSql, /source_ref/);
   assert.deepEqual(result.ids, []);
 });
 
@@ -1048,6 +1052,179 @@ test('suppressCrossDayRepeatedNewsEvents removes an unstructured cross-source re
   const filteredIds = suppressCrossDayRepeatedNewsEvents(candidates, prior).map((item) => item.id);
 
   assert.deepEqual(filteredIds, []);
+});
+
+test('suppressCrossDayRepeatedNewsEvents treats publishing GLM-5.3 Flash weights on Hugging Face as the same open-weight action', () => {
+  const candidates = [
+    row({
+      id: 'blog:zai:glm-53-flash-open-weights',
+      title: 'GLM-5.3 Flash native multimodal open-weight release',
+      sourceCompany: 'Z.ai',
+      sourceKey: 'zai',
+      aiCategory: 'model-release',
+      aiSummaryZh: '智谱发布 GLM-5.3 Flash，原生支持多模态并开放权重。',
+      eventFingerprint: {
+        eventType: 'model_release',
+        primaryActor: 'Z.ai',
+        primaryObject: 'GLM-5.3 Flash',
+        objectFamily: 'GLM',
+        objectVariant: 'Flash',
+        objectVersion: '5.3',
+        action: 'open_source',
+        canonicalEvent: 'Z.ai releases GLM-5.3 Flash as a native multimodal open-weight model',
+        confidence: 0.96,
+      },
+    }),
+  ];
+  const prior = [
+    row({
+      id: 'blog:media:glm-53-flash-hf-weights',
+      title: 'Z.ai publishes GLM-5.3 Flash weights on Hugging Face',
+      sourceCompany: '机器之心',
+      aiCategory: 'model-release',
+      aiSummaryZh: 'Z.ai publishes GLM-5.3 Flash weights on Hugging Face.',
+    }),
+  ];
+
+  assert.deepEqual(suppressCrossDayRepeatedNewsEvents(candidates, prior).map((item) => item.id), []);
+});
+
+test('suppressCrossDayRepeatedNewsEvents keeps GLM-5.3 Flash API availability distinct from its open-weight release', () => {
+  const candidates = [
+    row({
+      id: 'blog:zai:glm-53-flash-open-weights',
+      title: 'GLM-5.3 Flash native multimodal open-weight release',
+      sourceCompany: 'Z.ai',
+      aiCategory: 'model-release',
+      aiSummaryZh: '智谱发布 GLM-5.3 Flash，原生支持多模态并开放权重。',
+      eventFingerprint: {
+        eventType: 'model_release', primaryActor: 'Z.ai', primaryObject: 'GLM-5.3 Flash',
+        objectFamily: 'GLM', objectVariant: 'Flash', objectVersion: '5.3', action: 'open_source',
+        canonicalEvent: 'Z.ai releases GLM-5.3 Flash as a native multimodal open-weight model', confidence: 0.96,
+      },
+    }),
+  ];
+  const prior = [
+    row({
+      id: 'blog:media:glm-53-flash-api',
+      title: 'Z.ai launches GLM-5.3 Flash API for developers',
+      sourceCompany: '机器之心',
+      aiCategory: 'product',
+      aiSummaryZh: 'Z.ai launches the GLM-5.3 Flash API for developers.',
+    }),
+  ];
+
+  assert.deepEqual(
+    suppressCrossDayRepeatedNewsEvents(candidates, prior).map((item) => item.id),
+    ['blog:zai:glm-53-flash-open-weights'],
+  );
+});
+
+test('bilateral high-confidence GLM-5.3 Flash fingerprints keep their strict same-action result', () => {
+  const fingerprint = {
+    eventType: 'model_release', primaryActor: 'Z.ai', primaryObject: 'GLM-5.3 Flash',
+    objectFamily: 'GLM', objectVariant: 'Flash', objectVersion: '5.3', action: 'open_source',
+    canonicalEvent: 'Z.ai releases GLM-5.3 Flash as a native multimodal open-weight model', confidence: 0.96,
+  };
+  const candidates = [row({
+    id: 'blog:zai:glm-53-flash', title: 'GLM-5.3 Flash open weights', sourceCompany: 'Z.ai',
+    aiCategory: 'model-release', eventFingerprint: fingerprint,
+  })];
+  const prior = [row({
+    id: 'blog:media:glm-53-flash', title: 'Z.ai opens GLM-5.3 Flash weights', sourceCompany: '机器之心',
+    aiCategory: 'model-release', eventFingerprint: { ...fingerprint },
+  })];
+
+  assert.deepEqual(suppressCrossDayRepeatedNewsEvents(candidates, prior).map((item) => item.id), []);
+});
+
+test('bilateral high-confidence fingerprints keep GLM-5.3 Flash and Air as distinct variants', () => {
+  const fingerprint = (variant: string) => ({
+    eventType: 'model_release', primaryActor: 'Z.ai', primaryObject: `GLM-5.3 ${variant}`,
+    objectFamily: 'GLM', objectVariant: variant, objectVersion: '5.3', action: 'open_source',
+    canonicalEvent: `Z.ai releases GLM-5.3 ${variant} open weights`, confidence: 0.96,
+  });
+  const candidates = [row({
+    id: 'blog:media:glm-53-flash', title: 'GLM-5.3 Flash open weights', sourceCompany: '机器之心',
+    aiCategory: 'model-release', eventFingerprint: fingerprint('Flash'),
+  })];
+  const prior = [row({
+    id: 'blog:media:glm-53-air', title: 'GLM-5.3 Air open weights', sourceCompany: '量子位',
+    aiCategory: 'model-release', eventFingerprint: fingerprint('Air'),
+  })];
+
+  assert.deepEqual(
+    suppressCrossDayRepeatedNewsEvents(candidates, prior).map((item) => item.id),
+    ['blog:media:glm-53-flash'],
+  );
+});
+
+test('bilateral high-confidence fingerprints keep GLM-5.3 base and Flash as distinct objects', () => {
+  const base = {
+    eventType: 'model_release', primaryActor: 'Z.ai', primaryObject: 'GLM-5.3',
+    objectFamily: 'GLM', objectVariant: '', objectVersion: '5.3', action: 'open_source',
+    canonicalEvent: 'Z.ai releases GLM-5.3 open weights', confidence: 0.96,
+  };
+  const candidates = [row({
+    id: 'blog:media:glm-53-flash-object', title: 'GLM-5.3 Flash open weights', sourceCompany: '机器之心',
+    aiCategory: 'model-release', eventFingerprint: {
+      ...base, primaryObject: 'GLM-5.3 Flash', objectVariant: 'Flash',
+      canonicalEvent: 'Z.ai releases GLM-5.3 Flash open weights',
+    },
+  })];
+  const prior = [row({
+    id: 'blog:media:glm-53-base', title: 'GLM-5.3 open weights', sourceCompany: '量子位',
+    aiCategory: 'model-release', eventFingerprint: base,
+  })];
+
+  assert.deepEqual(
+    suppressCrossDayRepeatedNewsEvents(candidates, prior).map((item) => item.id),
+    ['blog:media:glm-53-flash-object'],
+  );
+});
+
+test('bilateral high-confidence fingerprints do not token-fallback across API, benchmark, or release stage', () => {
+  const common = {
+    primaryActor: 'Z.ai', primaryObject: 'GLM-5.3 Flash', objectFamily: 'GLM',
+    objectVariant: 'Flash', objectVersion: '5.3', confidence: 0.96,
+  };
+  const candidates = [
+    row({
+      id: 'blog:media:glm-api', title: 'GLM-5.3 Flash API opens to developers', sourceCompany: '机器之心',
+      aiCategory: 'product', eventFingerprint: {
+        ...common, eventType: 'product', action: 'api_release',
+        canonicalEvent: 'Z.ai opens GLM-5.3 Flash API access',
+      },
+    }),
+    row({
+      id: 'blog:media:glm-released', title: 'GLM-5.3 Flash open weights released today', sourceCompany: '机器之心',
+      aiCategory: 'model-release', eventFingerprint: {
+        ...common, eventType: 'model_release', action: 'open_source',
+        canonicalEvent: 'Z.ai releases GLM-5.3 Flash open weights today',
+      },
+    }),
+  ];
+  const prior = [
+    row({
+      id: 'blog:media:glm-benchmark', title: 'GLM-5.3 Flash benchmark evaluation', sourceCompany: '量子位',
+      aiCategory: 'benchmark', eventFingerprint: {
+        ...common, eventType: 'benchmark_eval', action: 'benchmark',
+        canonicalEvent: 'GLM-5.3 Flash benchmark evaluation results',
+      },
+    }),
+    row({
+      id: 'blog:media:glm-preview', title: 'GLM-5.3 Flash will release open weights soon', sourceCompany: '量子位',
+      aiCategory: 'model-release', eventFingerprint: {
+        ...common, eventType: 'model_release', action: 'open_source',
+        canonicalEvent: 'Z.ai will release GLM-5.3 Flash open weights soon',
+      },
+    }),
+  ];
+
+  assert.deepEqual(
+    suppressCrossDayRepeatedNewsEvents(candidates, prior).map((item) => item.id),
+    ['blog:media:glm-api', 'blog:media:glm-released'],
+  );
 });
 
 test('suppressCrossDayRepeatedNewsEvents fails open when an unstructured GLM-5.3 Flash story does not establish a compatible release action', () => {

@@ -99,7 +99,7 @@ export function hasPageIndexConfig(feedKey: string): boolean {
   return feedKey in PAGE_INDEX;
 }
 
-const SITEMAP_FETCH_MAX = 6; // sitemapindex 下钻时最多抓的子 sitemap 数(防爆)
+const SITEMAP_FETCH_MAX = 12; // sitemapindex 下钻时最多抓的子 sitemap 数(防爆)
 
 /** 从 block 取首个 <name>..</name> 内容(单行 XML 鲁棒)。 */
 function tagInner(block: string, name: string): string | null {
@@ -181,7 +181,13 @@ async function discoverViaSitemap(cfg: SitemapCfg): Promise<Array<{ loc: string;
     if (parsed.urls.length > 0) {
       collected.push(...parsed.urls);
     } else if (parsed.childSitemaps.length > 0) {
-      for (const child of parsed.childSitemaps.slice(0, SITEMAP_FETCH_MAX)) {
+      // Production sitemap indexes commonly put content/news shards after utility pages.
+      // Prefer article-looking shard names while retaining stable order inside each class.
+      const children = parsed.childSitemaps
+        .map((url, index) => ({ url, index, likelyArticles: /(?:news|blog|post|article|content)/i.test(url) }))
+        .sort((left, right) => Number(right.likelyArticles) - Number(left.likelyArticles) || left.index - right.index)
+        .slice(0, SITEMAP_FETCH_MAX);
+      for (const { url: child } of children) {
         const cxml = await throttledFetchText(child);
         if (cxml) collected.push(...parseSitemap(cxml).urls);
       }

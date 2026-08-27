@@ -25,7 +25,8 @@ import { SOURCE_LABELS, escapeHtml } from './templates';
 import { buildDigestSubjectFallback } from './subject';
 import { getBases } from './lib';
 import type { DailyVideoRow } from './daily-video';
-import { getAppliedNewsReviewSelection } from './news-review';
+import { getActiveNewsReviewBatch, getAppliedNewsReviewSelection } from './news-review';
+import { listAuthorizedDailyReleaseSummaries } from './publication-release';
 
 // 日报页展示源与顺序:沿用 DIGEST_SOURCE_ORDER 剔除 clawhub(2026-06-21 退出订阅日报)。
 export const DAILY_PAGE_SOURCES: DigestSource[] = DIGEST_SOURCE_ORDER.filter((s) => s !== 'clawhub');
@@ -40,8 +41,24 @@ export interface DailyPageData {
   date: string; // YYYY-MM-DD(BJT)
   subject: string; // 当日 LLM 主题,缺失时 fallback 文案
   sections: DailyPageSection[]; // news→ph→gh→hf-paper→x,空源已剔除
-  prevDate: string | null; // daily_pages 中相邻已生成日期(date 之前最近一行)
+  prevDate: string | null; // 当前授权 release heads 中 date 之前最近一日
   nextDate: string | null; // date 之后最近一行,通常 null → 渲染为指向 /daily/ 归档
+  formalNewsItemIds: string[];
+  reviewBatch: DailyPageReviewBatchSnapshot | null;
+}
+
+export interface DailyPageReviewBatchSnapshot {
+  [key: string]: unknown;
+  batch_id: string;
+  batch_revision: number;
+  is_current: 1;
+  edit_revision: number;
+  candidate_generation: number;
+  candidate_ids_json: string;
+  default_selected_ids_json: string;
+  applied_selected_ids_json: string;
+  selection_hash: string;
+  superseded_by: string | null;
 }
 
 // 一次拉齐渲染所需全字段(RenderRow)。与 daily-api / codex-push 的 fetchRows 同构。
@@ -80,19 +97,13 @@ async function loadSubject(env: Env, date: string, sections: DailyPageSection[])
   return buildDigestSubjectFallback(titles);
 }
 
-// 相邻已生成日期:prevDate = 严格早于 date 的最近一行;nextDate = 严格晚于 date 的最近一行。
+// 相邻已发布日期：只使用通过当前 formal/batch/release guard 的 head 投影。
+// 裸 daily_pages 仅为兼容审计数据，不能使导航宣称某日已公开。
 async function loadAdjacentDates(env: Env, date: string): Promise<{ prevDate: string | null; nextDate: string | null }> {
-  const prev = await env.DB.prepare(
-    `SELECT date FROM daily_pages WHERE date < ? ORDER BY date DESC LIMIT 1`,
-  )
-    .bind(date)
-    .first<{ date: string }>();
-  const next = await env.DB.prepare(
-    `SELECT date FROM daily_pages WHERE date > ? ORDER BY date ASC LIMIT 1`,
-  )
-    .bind(date)
-    .first<{ date: string }>();
-  return { prevDate: prev?.date ?? null, nextDate: next?.date ?? null };
+  const dates = (await listAuthorizedDailyReleaseSummaries(env)).map((release) => release.date);
+  const previous = dates.filter((candidate) => candidate < date).sort().at(-1) ?? null;
+  const next = dates.filter((candidate) => candidate > date).sort().at(0) ?? null;
+  return { prevDate: previous, nextDate: next };
 }
 
 // opts.anchorToDate=true 时把 date 作为选品候选窗口的锚点(回填历史日期用),默认 false
@@ -105,6 +116,26 @@ export async function buildDailyPageData(
   const { apiBase } = getBases(env);
   const sections: DailyPageSection[] = [];
   const reviewedNewsIds = await getAppliedNewsReviewSelection(env, date);
+  let reviewBatch: DailyPageReviewBatchSnapshot | null = null;
+  if (reviewedNewsIds !== null) {
+    const batch = await getActiveNewsReviewBatch(env, date);
+    if (!batch || batch.applied_selected_ids === null
+      || JSON.stringify(batch.applied_selected_ids) !== JSON.stringify(reviewedNewsIds)) {
+      throw new Error('daily_page_review_snapshot_stale');
+    }
+    reviewBatch = {
+      batch_id: batch.batch_id,
+      batch_revision: batch.batch_revision,
+      is_current: 1,
+      edit_revision: batch.edit_revision,
+      candidate_generation: batch.candidate_generation,
+      candidate_ids_json: JSON.stringify(batch.candidate_ids),
+      default_selected_ids_json: JSON.stringify(batch.default_selected_ids),
+      applied_selected_ids_json: JSON.stringify(batch.applied_selected_ids),
+      selection_hash: batch.selection_hash || '',
+      superseded_by: batch.superseded_by,
+    };
+  }
 
   for (const source of DAILY_PAGE_SOURCES) {
     // 每源选品选项:
@@ -140,7 +171,9 @@ export async function buildDailyPageData(
 
   const subject = await loadSubject(env, date, sections);
   const { prevDate, nextDate } = await loadAdjacentDates(env, date);
-  return { date, subject, sections, prevDate, nextDate };
+  const formalNewsItemIds = sections.find((section) => section.source === 'news')
+    ?.items.map((item) => item.item_id) || [];
+  return { date, subject, sections, prevDate, nextDate, formalNewsItemIds, reviewBatch };
 }
 
 // ── HTML 渲染(纯函数)──

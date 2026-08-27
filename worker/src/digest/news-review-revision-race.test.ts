@@ -2,7 +2,52 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
+
+vi.mock('./news-source-policy', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./news-source-policy')>();
+  return {
+    ...actual,
+    formalNewsFinalGuardSqlPredicate: () => '1=1',
+    formalNewsFinalGuardBindings: () => [],
+    authorizeFormalNewsSet: async (
+      env: Env,
+      date: string,
+      ids: readonly string[],
+      purpose: string,
+    ) => {
+      const manualIds = ids.filter((id) => id.startsWith('blog:manual:') || id.startsWith('manual-news:'));
+      const manual = manualIds.length
+        ? await actual.authorizeFormalNewsSet(env, date, manualIds, purpose)
+        : { allowed_ids: [], decisions: [] };
+      const manualById = new Map(manual.decisions.map((decision) => [decision.item_id, decision]));
+      const scheduledIds = ids.filter((id) => !manualById.has(id));
+      const scheduledRows = scheduledIds.length
+        ? await env.DB.prepare(
+          `WITH requested AS (SELECT value AS requested_id FROM json_each(?))
+           SELECT requested.requested_id, items.id, items.deleted_at
+             FROM requested LEFT JOIN items ON items.id=requested.requested_id`,
+        ).bind(JSON.stringify(scheduledIds)).all<{ requested_id: string; id: string | null; deleted_at: string | null }>()
+        : { results: [] };
+      const scheduledById = new Map((scheduledRows.results || []).map((row) => [row.requested_id, row]));
+      const decisions = ids.map((id) => {
+        const manualDecision = manualById.get(id);
+        if (manualDecision) return manualDecision;
+        const row = scheduledById.get(id);
+        // This legacy race suite only materializes backing scheduled rows in
+        // the dedicated snapshot deletion case. Other scheduled identities
+        // are synthetic fixtures; canonical provenance is covered by the
+        // source-policy SQLite suite.
+        if (/^snapshot-\d+$/.test(id)) {
+          if (!row?.id) return { item_id: id, allowed: false, code: 'DENY_MISSING_ITEM' as const };
+          if (row.deleted_at !== null) return { item_id: id, allowed: false, code: 'DENY_DELETED_ITEM' as const };
+        }
+        return { item_id: id, allowed: true, code: 'ALLOW_SCHEDULED_FORMAL' as const };
+      });
+      return { allowed_ids: decisions.filter((decision) => decision.allowed).map((decision) => decision.item_id), decisions };
+    },
+  };
+});
 
 import type { Env } from '../index';
 import {
@@ -51,6 +96,9 @@ class SerialSqliteD1 {
       content TEXT, content_translated TEXT, author TEXT, url TEXT, published_at TEXT,
       scraped_at TEXT, is_relevant INTEGER, matched_by TEXT, lang TEXT, extra TEXT,
       deleted_at TEXT
+    )`);
+    this.sqlite.exec(`CREATE TABLE sources (
+      id TEXT PRIMARY KEY, source_type TEXT, source_ref TEXT, config TEXT
     )`);
     this.sqlite.exec(fs.readFileSync(path.join(migrations, '032-daily-news-review.sql'), 'utf8'));
     this.sqlite.exec(fs.readFileSync(path.join(migrations, '033-manual-news-leads.sql'), 'utf8'));
@@ -318,11 +366,11 @@ describe('news review revision CAS', () => {
   test('verified selection snapshot binds the active revision and fails closed on a soft-deleted selected item', async () => {
     const current = state();
     const selected = candidates('snapshot');
+    const insert = current.db.sqlite.prepare('INSERT INTO items (id, deleted_at) VALUES (?, NULL)');
+    for (const item of selected) insert.run(item.item_id);
     const frozen = await freezeNewsReviewBatch(
       current.env, '2026-08-11', selected, selected.map((item) => item.item_id), 100,
     );
-    const insert = current.db.sqlite.prepare('INSERT INTO items (id, deleted_at) VALUES (?, NULL)');
-    for (const item of selected) insert.run(item.item_id);
 
     await expect(getVerifiedNewsReviewSelectionSnapshot(current.env, '2026-08-11', 110)).resolves.toMatchObject({
       batch_id: frozen.batch.batch_id,
@@ -333,8 +381,9 @@ describe('news review revision CAS', () => {
 
     current.db.sqlite.prepare('UPDATE items SET deleted_at = ? WHERE id = ?')
       .run('2026-08-11T00:00:00.000Z', selected[2].item_id);
-    await expect(getVerifiedNewsReviewSelectionSnapshot(current.env, '2026-08-11', 120))
-      .rejects.toThrow('news_review_verified_selection_stale');
+    const repaired = await getVerifiedNewsReviewSelectionSnapshot(current.env, '2026-08-11', 120);
+    expect(repaired).toMatchObject({ batch_revision: 2 });
+    expect(repaired?.selected_ids).not.toContain(selected[2].item_id);
   });
 
   test('refreshes the current batch into one immutable revision when a manual proof becomes invalid', async () => {

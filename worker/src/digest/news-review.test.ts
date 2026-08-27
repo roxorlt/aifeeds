@@ -1,4 +1,18 @@
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
+
+vi.mock('./news-source-policy', () => ({
+  formalNewsFinalGuardSqlPredicate: () => '1=1',
+  formalNewsFinalGuardBindings: () => [],
+  authorizeFormalNewsSet: vi.fn(async (_env: unknown, _date: string, ids: readonly string[]) => ({
+    allowed_ids: ids.filter((id) => id !== 'news-9' && id !== 'news-10'),
+    decisions: ids.map((id) => ({
+      item_id: id,
+      allowed: id !== 'news-9' && id !== 'news-10',
+      code: id === 'news-9' ? 'DENY_LEGACY_RADAR_FEED_ID'
+        : id === 'news-10' ? 'DENY_UNVERIFIED_MANUAL' : 'ALLOW_SCHEDULED_FORMAL',
+    })),
+  })),
+}));
 
 import {
   buildNewsReviewNotification,
@@ -77,11 +91,14 @@ describe('daily news review contract', () => {
   test('applied production selection may contain fewer than five reviewed items', async () => {
     const env = {
       DB: {
-        prepare() {
+        prepare(sql: string) {
           const stmt = {
             bind() { return stmt; },
             async first<T>() {
-              return { applied_selected_ids: JSON.stringify(['news-6', 'news-2', 'news-7']) } as T;
+              if (/SELECT applied_selected_ids/i.test(sql)) {
+                return { applied_selected_ids: JSON.stringify(['news-6', 'news-2', 'news-7']) } as T;
+              }
+              return null as T | null;
             },
           };
           return stmt;
@@ -122,7 +139,7 @@ describe('daily news review contract', () => {
     expect(message.body).toContain('#news-review');
   });
 
-  test('pool snapshot keeps calibrated defaults and ignores an unverified legacy manual lead', async () => {
+  test('pool snapshot keeps calibrated defaults and drops legacy radar plus an unverified manual lead', async () => {
     const auditCandidates = candidates.map((candidate, index) => ({
       rank: index + 1,
       id: candidate.item_id,
@@ -145,7 +162,14 @@ describe('daily news review contract', () => {
       content: candidate.summary,
       content_translated: candidate.summary,
       url: `https://example.com/${candidate.item_id}`,
-      extra: JSON.stringify({ title_zh: candidate.title, ai_summary_zh: candidate.summary }),
+      extra: JSON.stringify({
+        title_zh: candidate.title,
+        ai_summary_zh: candidate.summary,
+        ...(candidate.item_id === 'news-9' ? {
+          feed_id: 'blog:weibo-hot-tech',
+          feed_key: 'weibo-hot-tech',
+        } : {}),
+      }),
     }]));
     const inserted: Array<{ sql: string; binds: unknown[] }> = [];
     const manualAssessment = {
@@ -204,7 +228,7 @@ describe('daily news review contract', () => {
     const result = await freezeNewsReviewBatchFromPool(env, '2026-07-30', Date.parse('2026-07-30T00:00:00Z'));
 
     expect(result.created).toBe(true);
-    expect(result.batch.candidate_ids).toEqual(candidates.slice(0, 9).map((candidate) => candidate.item_id));
+    expect(result.batch.candidate_ids).toEqual(candidates.slice(0, 8).map((candidate) => candidate.item_id));
     expect(result.batch.default_selected_ids).toEqual(candidates.slice(0, 5).map((candidate) => candidate.item_id));
     expect(result.batch.candidates[0]).toMatchObject({
       title: '候选新闻 1', summary: '候选新闻 1 摘要', source: '量子位', score: 100,
@@ -230,6 +254,7 @@ describe('daily news review contract', () => {
               if (/superseded_by = \?/i.test(sql)) {
                 return { default_selected_ids: JSON.stringify(previousIds) } as T;
               }
+              if (/news_review:batch_formal_final_guard/i.test(sql)) return { ok: 1 } as T;
               return null as T | null;
             },
           };
