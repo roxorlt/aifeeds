@@ -44,6 +44,12 @@ import { canonicalize, idHashOf, urlHashOf } from './feeds/extract';
 import { parseSeenSet, partitionForCatchup } from './x-list-cursor';
 // 无音频文字项改判 blog：复用 blog 管线的 trigger + 全文门槛(同一套 BlogPipeline 产 excerpt_zh)。
 import { triggerBlogWorkflowForItem, isFullEnoughHtml } from './blog';
+import {
+  clearWorkflowRecoveryState,
+  markWorkflowPending,
+  runFeedWorkflowRecovery,
+  type FeedWorkflowRecoveryResult,
+} from './feeds/dedup';
 
 /** podcast catch-up 分流阈值：最新 N 条立即 trigger，其余 pending_workflow=1 平摊(§5.5)。 */
 const PODCAST_CATCHUP_THRESHOLD = 50;
@@ -182,6 +188,7 @@ async function ingestOnePodcastFeed(
         JSON.stringify({
           feed_id: feed.id,
           feed_key: feed.key,
+          editorial_type: feed.editorial_type,
           guid: e.guid,
           canonical_url: e.canonicalUrl,
           url_hash: e.urlHash,
@@ -219,6 +226,7 @@ async function ingestOnePodcastFeed(
         feed_id: feed.id,
         show_key: feed.key,
         source_company: feed.source_company,
+        editorial_type: feed.editorial_type,
         show_name: feed.name,
         feed_url: feed.feed_url,
         fetch_strategy: feed.fetch_strategy,
@@ -279,6 +287,7 @@ async function ingestOnePodcastFeed(
         feed_id: feed.id,
         feed_key: feed.key,
         source_company: feed.source_company,
+        editorial_type: feed.editorial_type,
         blog_name: feed.name,
         feed_url: feed.feed_url,
         fetch_strategy: feed.fetch_strategy,
@@ -398,7 +407,10 @@ export async function triggerPodcastWorkflowForItem(
   itemId: string,
   signals: PodcastTriggerSignals,
 ): Promise<TriggerResult> {
-  if (!env.PODCAST_PIPELINE_WORKFLOW) return 'binding_missing';
+  if (!env.PODCAST_PIPELINE_WORKFLOW) {
+    await markWorkflowPending(env, itemId, 'WORKFLOW_BINDING_MISSING');
+    return 'binding_missing';
+  }
 
   const nowUnix = Math.floor(Date.now() / 1000);
   try {
@@ -426,14 +438,27 @@ export async function triggerPodcastWorkflowForItem(
         lang: 'zh' as const,
       },
     });
+    await clearWorkflowRecoveryState(env, itemId);
     return 'triggered';
   } catch (e) {
     if (String(e).toLowerCase().includes('already exists')) {
+      await clearWorkflowRecoveryState(env, itemId);
       return 'already_exists';
     }
     console.error(`[podcast-trigger] create failed for ${itemId}:`, e);
+    await markWorkflowPending(env, itemId, 'WORKFLOW_CREATE_FAILED');
     return 'failed';
   }
+}
+
+/** 每小时独立恢复至少 30 分钟仍未完成的 podcast workflow。 */
+export async function runPodcastWorkflowRecovery(env: Env): Promise<FeedWorkflowRecoveryResult> {
+  return runFeedWorkflowRecovery(env, {
+    sourceType: 'podcast',
+    trigger: (itemId, extra) => triggerPodcastWorkflowForItem(env, itemId, {
+      hasNativeTranscript: Boolean(extra.transcript_url) || extra.transcript_tier === 'A',
+    }),
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

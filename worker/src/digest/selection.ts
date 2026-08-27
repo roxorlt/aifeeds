@@ -258,6 +258,8 @@ export async function selectNewsByScoreWithAudit(
       AND is_relevant = 1
       AND ${windowClause}
       AND deleted_at IS NULL
+      -- radar 仅供人工核验，不得进入正式候选、日报视频或自动推送。
+      AND COALESCE(json_extract(extra,'$.editorial_type'),'') != 'radar'
       -- 噪音过滤①:slow-news / "没什么大事" 填充帖(如 smol.ai 的 "[AINews] not much
       -- happened today")。措辞很特定,按原标题英文匹配(对中文重写鲁棒),几乎不误伤真新闻。
       AND lower(COALESCE(title,'')) NOT LIKE '%not much happened%'
@@ -807,6 +809,7 @@ interface TokenProfile {
   orgs: Set<string>;
   topics: Set<string>;
   distinctive: Set<string>;
+  normalizedText: string;
   releaseStage: ReleaseLifecycleStage;
   fingerprint: DerivedEventFingerprint;
 }
@@ -840,6 +843,7 @@ function eventTokens(item: NewsCandidateForScoring): TokenProfile {
     orgs,
     topics,
     distinctive,
+    normalizedText: text,
     releaseStage: detectReleaseLifecycleStage(item, text),
     fingerprint: deriveEventFingerprint(item, text, tokens),
   };
@@ -983,6 +987,7 @@ function deriveEventFingerprint(
   addIf(/\blongcat[-\s]?2(?:\.0)?\b|longcat|美团/, 'longcat');
 
   addIf(/\blaunch(?:es|ed)?\b|\brelease(?:s|d)?\b|\bintroduc(?:e|es|ing|ed)\b|发布|推出|上线/, 'launch', actionTokens);
+  addIf(/\bopen[-\s]?(?:source|weight)(?:s|d|ed)?\b|开源|开放权重/, 'open-weight', actionTokens);
   addIf(/\bintegrat(?:e|es|ed|ion)\b|\brun(?:s|ning)? on\b|\bbrings\b|接入|集成|运行|可用/, 'integration', actionTokens);
   addIf(/\bprice|pricing|cheap|cheaper|cost\b|定价|低成本|便宜/, 'pricing', actionTokens);
 
@@ -1169,6 +1174,7 @@ function sameNewsEvent(left: TokenProfile, right: TokenProfile): boolean {
   const structuredSame = sameStructuredEventFingerprint(left.fingerprint, right.fingerprint);
   if (structuredSame !== undefined) return structuredSame;
   if (shouldSeparateByEventFingerprint(left.fingerprint, right.fingerprint)) return false;
+  if (!canUseTokenFallbackWithSingleHighConfidenceFingerprint(left, right)) return false;
   const shared = intersection(left.tokens, right.tokens);
   if (shared.size < 2) return false;
   const sharedOrgs = intersection(left.orgs, right.orgs);
@@ -1180,6 +1186,76 @@ function sameNewsEvent(left: TokenProfile, right: TokenProfile): boolean {
   if (sharedOrgs.size && sharedTopics.size && [...sharedDistinctive].some((token) => token.length >= 6 || /\d/.test(token))) return true;
   if (shared.size >= 3 && sharedDistinctive.size >= 2 && sharedTopics.size) return true;
   return false;
+}
+
+function canUseTokenFallbackWithSingleHighConfidenceFingerprint(
+  left: TokenProfile,
+  right: TokenProfile,
+): boolean {
+  const leftStructured = highConfidenceStructuredFingerprint(left);
+  const rightStructured = highConfidenceStructuredFingerprint(right);
+  // 双边高置信指纹继续完全由 sameStructuredEventFingerprint 判定，不能在此放宽。
+  if (Boolean(leftStructured) === Boolean(rightStructured)) return true;
+
+  const structured = leftStructured || rightStructured;
+  const unstructured = leftStructured ? right : left;
+  if (!structured || !hasSpecificStructuredObject(structured)) return true;
+
+  // 单边指纹足够明确时，普通关键词只能作为“有完整对象 + 同类事件 + 同动作”的补证。
+  // 任何一项缺失都 fail-open，避免旧的泛型号报道压掉新变体或新发布阶段。
+  return structured.eventType === unstructured.fingerprint.eventType
+    && hasCompatibleUnstructuredAction(structured, unstructured)
+    && unstructuredTextCoversStructuredObject(structured, unstructured.normalizedText);
+}
+
+function highConfidenceStructuredFingerprint(profile: TokenProfile): StructuredEventFingerprint | undefined {
+  const structured = profile.fingerprint.structured;
+  return structured && structured.confidence >= 0.75 ? structured : undefined;
+}
+
+function hasSpecificStructuredObject(structured: StructuredEventFingerprint): boolean {
+  return Boolean(
+    compactStructuredText(structured.primaryObject)
+    || compactStructuredText(structured.objectVariantTokens.size ? [...structured.objectVariantTokens].join(' ') : '')
+    || compactStructuredText(structured.objectVersion),
+  );
+}
+
+function hasCompatibleUnstructuredAction(
+  structured: StructuredEventFingerprint,
+  unstructured: TokenProfile,
+): boolean {
+  const action = structuredActionFamily(structured.action);
+  return Boolean(action && unstructured.fingerprint.actionTokens.has(action));
+}
+
+function structuredActionFamily(value: string): string {
+  if (/open(?:source|weight)/.test(value)) return 'open-weight';
+  if (/launch|release|publish|available/.test(value)) return 'launch';
+  if (/integrat/.test(value)) return 'integration';
+  if (/pric/.test(value)) return 'pricing';
+  if (/approv|ban|restrict|restor|redeploy/.test(value)) return 'policy';
+  return '';
+}
+
+function unstructuredTextCoversStructuredObject(
+  structured: StructuredEventFingerprint,
+  normalizedText: string,
+): boolean {
+  const text = compactStructuredText(normalizedText);
+  const primaryObject = compactStructuredText(structured.primaryObject);
+  if (primaryObject && text.includes(primaryObject)) return true;
+
+  const details = [
+    compactStructuredText(structured.objectFamily),
+    compactStructuredText([...structured.objectVariantTokens].join(' ')),
+    compactStructuredText(structured.objectVersion),
+  ].filter(Boolean);
+  return details.length > 0 && details.every((detail) => text.includes(detail));
+}
+
+function compactStructuredText(value: string): string {
+  return normalizeEventText(value).replace(/[^a-z0-9]/g, '');
 }
 
 function sameStructuredEventFingerprint(left: DerivedEventFingerprint, right: DerivedEventFingerprint): boolean | undefined {

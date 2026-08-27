@@ -824,6 +824,47 @@ test('selectNewsByScoreWithAudit does not truncate matching events after the fir
   assert.deepEqual(result.ids, []);
 });
 
+test('selectNewsByScoreWithAudit explicitly excludes radar items from formal news candidates', async () => {
+  let selectionSql = '';
+  const radarRow = {
+    id: 'blog:weibo-hot-tech:radar-lead',
+    title: 'Unverified social-media rumor',
+    source_type: 'blog',
+    content: '',
+    content_translated: '',
+    published_at: '2026-08-27T00:00:00.000Z',
+    extra: JSON.stringify({
+      feed_key: 'weibo-hot-tech',
+      source_company: '微博',
+      editorial_type: 'radar',
+      ai_category: 'model-release',
+      ai_summary_zh: '仅作为待核验的雷达线索。',
+    }),
+  };
+  const db = {
+    prepare(sql: string) {
+      const statement = {
+        bind() {
+          return statement;
+        },
+        async all<T>() {
+          if (sql.includes('FROM items')) {
+            selectionSql = sql;
+            return { results: (sql.includes("$.editorial_type") ? [] : [radarRow]) as T[] };
+          }
+          return { results: [] as T[] };
+        },
+      };
+      return statement;
+    },
+  };
+
+  const result = await selectNewsByScoreWithAudit({ DB: db } as never, 5);
+
+  assert.match(selectionSql, /editorial_type/);
+  assert.deepEqual(result.ids, []);
+});
+
 test('suppressCrossDayRepeatedNewsEvents does not suppress a new Claude Sonnet launch because of prior Claude infrastructure coverage', () => {
   const candidates = [
     row({
@@ -933,6 +974,116 @@ test('suppressCrossDayRepeatedNewsEvents removes a repeated LongCat 2.0 event ac
   const filteredIds = suppressCrossDayRepeatedNewsEvents(candidates, prior).map((item) => item.id);
 
   assert.deepEqual(filteredIds, []);
+});
+
+test('suppressCrossDayRepeatedNewsEvents keeps a structured GLM-5.3 Flash release after an older unstructured GLM-5.3/PhanRouter story', () => {
+  const candidates = [
+    row({
+      id: 'blog:zai:glm-53-flash-open-weights',
+      title: 'GLM-5.3 Flash native multimodal open-weight release',
+      sourceCompany: 'Z.ai',
+      sourceKey: 'zai',
+      aiCategory: 'model-release',
+      aiSummaryZh: '智谱发布 GLM-5.3 Flash，原生支持多模态并开放权重。',
+      eventFingerprint: {
+        eventType: 'model_release',
+        primaryActor: 'Z.ai',
+        primaryObject: 'GLM-5.3 Flash',
+        objectFamily: 'GLM',
+        objectVariant: 'Flash',
+        objectVersion: '5.3',
+        action: 'open_source',
+        canonicalEvent: 'Z.ai releases GLM-5.3 Flash as a native multimodal open-weight model',
+        confidence: 0.96,
+      },
+    }),
+  ];
+  const prior = [
+    row({
+      id: 'blog:media:glm-53-phanrouter',
+      title: '智谱发布 GLM-5.3 / PhanRouter',
+      sourceCompany: '机器之心',
+      aiCategory: 'model-release',
+      aiSummaryZh: '智谱发布 GLM-5.3 与 PhanRouter，面向智能体路由和模型服务。',
+    }),
+  ];
+
+  const filteredIds = suppressCrossDayRepeatedNewsEvents(candidates, prior).map((item) => item.id);
+
+  assert.deepEqual(filteredIds, ['blog:zai:glm-53-flash-open-weights']);
+});
+
+test('suppressCrossDayRepeatedNewsEvents removes an unstructured cross-source retelling that covers the same GLM-5.3 Flash open-weight release', () => {
+  const candidates = [
+    row({
+      id: 'blog:media:glm-53-flash-open-weights',
+      title: 'GLM-5.3 Flash native multimodal open-weight release',
+      sourceCompany: '机器之心',
+      aiCategory: 'model-release',
+      aiSummaryZh: '智谱发布 GLM-5.3 Flash，原生支持多模态并开放权重。',
+      eventFingerprint: {
+        eventType: 'model_release',
+        primaryActor: 'Z.ai',
+        primaryObject: 'GLM-5.3 Flash',
+        objectFamily: 'GLM',
+        objectVariant: 'Flash',
+        objectVersion: '5.3',
+        action: 'open_source',
+        canonicalEvent: 'Z.ai releases GLM-5.3 Flash as a native multimodal open-weight model',
+        confidence: 0.96,
+      },
+    }),
+  ];
+  const prior = [
+    row({
+      id: 'blog:zai:glm-53-flash-announcement',
+      title: 'Z.ai releases GLM-5.3 Flash native multimodal open weights',
+      sourceCompany: 'Z.ai',
+      sourceKey: 'zai',
+      aiCategory: 'model-release',
+      aiSummaryZh: 'GLM-5.3 Flash 已发布，原生多模态并开放模型权重。',
+    }),
+  ];
+
+  const filteredIds = suppressCrossDayRepeatedNewsEvents(candidates, prior).map((item) => item.id);
+
+  assert.deepEqual(filteredIds, []);
+});
+
+test('suppressCrossDayRepeatedNewsEvents fails open when an unstructured GLM-5.3 Flash story does not establish a compatible release action', () => {
+  const candidates = [
+    row({
+      id: 'blog:media:glm-53-flash-open-weights',
+      title: 'GLM-5.3 Flash native multimodal open-weight release',
+      sourceCompany: '机器之心',
+      aiCategory: 'model-release',
+      aiSummaryZh: '智谱发布 GLM-5.3 Flash，原生支持多模态并开放权重。',
+      eventFingerprint: {
+        eventType: 'model_release',
+        primaryActor: 'Z.ai',
+        primaryObject: 'GLM-5.3 Flash',
+        objectFamily: 'GLM',
+        objectVariant: 'Flash',
+        objectVersion: '5.3',
+        action: 'open_source',
+        canonicalEvent: 'Z.ai releases GLM-5.3 Flash as a native multimodal open-weight model',
+        confidence: 0.96,
+      },
+    }),
+  ];
+  const prior = [
+    row({
+      id: 'blog:media:glm-53-flash-benchmark',
+      title: 'GLM-5.3 Flash benchmark results',
+      sourceCompany: '机器之心',
+      aiCategory: 'research',
+      aiSummaryZh: '研究人员测试 GLM-5.3 Flash 的多模态能力。',
+    }),
+  ];
+
+  const filteredIds = suppressCrossDayRepeatedNewsEvents(candidates, prior).map((item) => item.id);
+
+  assert.deepEqual(filteredIds, ['blog:media:glm-53-flash-open-weights']);
 });
 
 test('suppressCrossDayRepeatedNewsEvents keeps a new Fable 5 global redeploy after older partial-policy coverage', () => {

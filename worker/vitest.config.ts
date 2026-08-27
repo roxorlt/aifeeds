@@ -11,7 +11,6 @@ export default defineConfig({
     exclude: [
       ...configDefaults.exclude,
       'src/feedback.test.ts',
-      'src/digest/selection.test.ts',
       'src/digest/node-run-subject.test.ts',
       'src/feeds/classify-translate.test.ts',
       'src/feeds/ranking.test.ts',

@@ -1,11 +1,13 @@
 export type SourceCronAction =
   | 'blog-fetch'
+  | 'blog-workflow-recovery'
   | 'daily-video-gc'
   | 'github-pending-drain'
   | 'hdx-auto-drain'
   | 'hf-daily-fetch'
   | 'hf-pending-drain'
   | 'podcast-fetch'
+  | 'podcast-workflow-recovery'
   | 'source-readiness-snapshot'
   | 'weibo-hot-fetch';
 
@@ -35,6 +37,8 @@ export function routeSourceCronActions(slot: UtcCronSlot): SourceCronAction[] {
   if (hour === 19 && minute === 30) actions.push('daily-video-gc');
 
   if (minute === 10 || minute === 40) actions.push('github-pending-drain');
+
+  if (minute === 30) actions.push('blog-workflow-recovery', 'podcast-workflow-recovery');
 
   if (minute === 20 || minute === 50) {
     actions.push('hdx-auto-drain', 'hf-pending-drain');

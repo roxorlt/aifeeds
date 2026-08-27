@@ -43,6 +43,13 @@ import {
   parseFeed,
 } from './feeds/parse';
 import { discoverPageIndex, hasPageIndexConfig } from './feeds/page-index';
+import { discoverZaiOrgModels } from './feeds/zai-models';
+import {
+  clearWorkflowRecoveryState,
+  markWorkflowPending,
+  runFeedWorkflowRecovery,
+  type FeedWorkflowRecoveryResult,
+} from './feeds/dedup';
 import { canonicalize, idHashOf, urlHashOf } from './feeds/extract';
 import { parseSeenSet } from './x-list-cursor';
 import { partitionForCatchup } from './x-list-cursor';
@@ -125,7 +132,9 @@ async function ingestOneBlogFeed(
   // Phase 3 page-scrape:无 RSS 的源走 sitemap 列表发现(discoverPageIndex),产出
   // 与 parseFeed 同构的 ParsedFeedItem[];其余走 RSS/Atom(fetchFeedXml + parseFeed)。
   let parsedItems: ParsedFeedItem[];
-  if (feed.fetch_strategy === 'page-scrape' && hasPageIndexConfig(feed.key)) {
+  if (feed.discovery_strategy === 'huggingface-models') {
+    parsedItems = await discoverZaiOrgModels(feed);
+  } else if (feed.fetch_strategy === 'page-scrape' && hasPageIndexConfig(feed.key)) {
     parsedItems = await discoverPageIndex(feed);
   } else {
     const xml = await fetchFeedXml(
@@ -197,6 +206,7 @@ async function ingestOneBlogFeed(
         JSON.stringify({
           feed_id: feed.id,
           feed_key: feed.key,
+          editorial_type: feed.editorial_type,
           guid: e.guid,
           canonical_url: e.canonicalUrl,
           url_hash: e.urlHash,
@@ -223,6 +233,7 @@ async function ingestOneBlogFeed(
         feed_id: feed.id,
         feed_key: feed.key,
         source_company: feed.source_company,
+        editorial_type: feed.editorial_type,
         blog_name: feed.name,
         feed_url: feed.feed_url,
         fetch_strategy: feed.fetch_strategy,
@@ -332,7 +343,10 @@ export async function triggerBlogWorkflowForItem(
   itemId: string,
   signals: BlogTriggerSignals,
 ): Promise<TriggerResult> {
-  if (!env.BLOG_PIPELINE_WORKFLOW) return 'binding_missing';
+  if (!env.BLOG_PIPELINE_WORKFLOW) {
+    await markWorkflowPending(env, itemId, 'WORKFLOW_BINDING_MISSING');
+    return 'binding_missing';
+  }
 
   const nowUnix = Math.floor(Date.now() / 1000);
   try {
@@ -362,14 +376,32 @@ export async function triggerBlogWorkflowForItem(
         skipCnSensitive: signals.skipCnSensitive,
       },
     });
+    await clearWorkflowRecoveryState(env, itemId);
     return 'triggered';
   } catch (e) {
     if (String(e).toLowerCase().includes('already exists')) {
+      await clearWorkflowRecoveryState(env, itemId);
       return 'already_exists';
     }
     console.error(`[blog-trigger] create failed for ${itemId}:`, e);
+    await markWorkflowPending(env, itemId, 'WORKFLOW_CREATE_FAILED');
     return 'failed';
   }
+}
+
+/** 每小时独立恢复至少 30 分钟仍未完成的 blog workflow，避免手工 backfill 才能修复。 */
+export async function runBlogWorkflowRecovery(env: Env): Promise<FeedWorkflowRecoveryResult> {
+  return runFeedWorkflowRecovery(env, {
+    sourceType: 'blog',
+    trigger: (itemId, extra) => triggerBlogWorkflowForItem(env, itemId, {
+      fetchStrategy: (extra.fetch_strategy as BlogTriggerSignals['fetchStrategy']) || 'native',
+      hasNativeFulltext: isFullEnoughHtml(
+        (extra.rss_content_html as string | undefined)
+          || (extra.body_markdown as string | undefined),
+      ),
+      skipCnSensitive: extra.skip_cn_sensitive === true,
+    }),
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

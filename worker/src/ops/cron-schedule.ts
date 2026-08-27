@@ -182,6 +182,15 @@ export const CRON_SCHEDULE: CronTaskDef[] = [
     description: '厂商博客 RSS 抓取 (每 2h, UTC 偶数时 :20) → blog-pipeline workflow enrich',
   },
   {
+    name: 'blog-workflow-recovery',
+    source: 'blog',
+    category: 'backfill',
+    label: '博客 workflow 自愈',
+    bjt_times: ['*:30'],
+    frequency: 'hourly-1x',
+    description: '扫描至少 30 分钟未完成的博客项，按小时幂等重试，最多 6 次',
+  },
+  {
     name: 'podcast-fetch',
     source: 'podcast',
     category: 'fetch',
@@ -189,6 +198,15 @@ export const CRON_SCHEDULE: CronTaskDef[] = [
     bjt_times: ['03:50', '09:50', '15:50', '21:50'],
     frequency: 'daily-4x',
     description: 'AI 播客 RSS 抓取 (4x/天, UTC {1,7,13,19}:50) → podcast-pipeline workflow enrich',
+  },
+  {
+    name: 'podcast-workflow-recovery',
+    source: 'podcast',
+    category: 'backfill',
+    label: '播客 workflow 自愈',
+    bjt_times: ['*:30'],
+    frequency: 'hourly-1x',
+    description: '扫描至少 30 分钟未完成的播客项，按小时幂等重试，最多 6 次',
   },
   // ─── 通用 (common) ───────────────────────────────────────────
   {

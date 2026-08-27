@@ -85,8 +85,8 @@ import {
 // 官方新闻源（blog 厂商博客 + podcast AI 播客，Phase 1 2026-06-09）。
 // runBlogFetch/runPodcastFetch 内部已幂等 ensureFeedSources，cron slot 直接调。
 // backfill 兜底（workflow_completed_at IS NULL 重 trigger）经 /api/enrich/run 暴露。
-import { runBlogFetch, runBlogBackfill, triggerBlogWorkflowForItem, isFullEnoughHtml } from './blog';
-import { runPodcastFetch, runPodcastBackfill } from './podcast';
+import { runBlogFetch, runBlogBackfill, runBlogWorkflowRecovery, triggerBlogWorkflowForItem, isFullEnoughHtml } from './blog';
+import { runPodcastFetch, runPodcastBackfill, runPodcastWorkflowRecovery } from './podcast';
 import type { BlogExtra, BlogTriggerSignals } from './feeds/types';
 import {
   classifySensitivityForFeeds,
@@ -624,6 +624,15 @@ async function runScheduledSourceAction(env: Env, action: SourceCronAction): Pro
       await notifyCronSummary(env, '厂商博客抓取', result as unknown as Record<string, unknown>);
       return;
     }
+    case 'blog-workflow-recovery': {
+      const result = await recordCronRun(
+        env,
+        { name: 'blog-workflow-recovery', source: 'blog', category: 'backfill' },
+        () => runBlogWorkflowRecovery(env),
+      );
+      console.log('[cron] blog-workflow-recovery result:', JSON.stringify(result));
+      return;
+    }
     case 'podcast-fetch': {
       const result = await recordCronRun(
         env,
@@ -632,6 +641,15 @@ async function runScheduledSourceAction(env: Env, action: SourceCronAction): Pro
       );
       console.log('[cron] podcast-fetch result:', JSON.stringify(result));
       await notifyCronSummary(env, 'AI 播客抓取', result as unknown as Record<string, unknown>);
+      return;
+    }
+    case 'podcast-workflow-recovery': {
+      const result = await recordCronRun(
+        env,
+        { name: 'podcast-workflow-recovery', source: 'podcast', category: 'backfill' },
+        () => runPodcastWorkflowRecovery(env),
+      );
+      console.log('[cron] podcast-workflow-recovery result:', JSON.stringify(result));
       return;
     }
   }
@@ -4801,6 +4819,7 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
         feed_id: old.feed_id as string | undefined,
         feed_key: old.show_key as string | undefined,
         source_company: old.source_company as string | undefined,
+        editorial_type: old.editorial_type as BlogExtra['editorial_type'],
         blog_name: old.show_name as string | undefined,
         feed_url: old.feed_url as string | undefined,
         fetch_strategy: fetchStrategy,

@@ -41,6 +41,13 @@ function meituanDateFromUrl(url: string): string | undefined {
 }
 
 const PAGE_INDEX: Record<string, PageIndexConfig> = {
+  // Anthropic: 官方无 RSS；从官方 sitemap 仅保留 /news/<slug>，详情页由 blog pipeline 抽取。
+  anthropic: {
+    method: "sitemap",
+    sitemaps: ["https://www.anthropic.com/sitemap.xml"],
+    isArticle: (u) => /^https:\/\/www\.anthropic\.com\/news\/[^/?#]+\/?$/.test(u),
+    recentN: 20,
+  },
   // AI21 Labs:WordPress 风 post-sitemap,只含文章 + 带 lastmod。
   ai21: {
     method: "sitemap",

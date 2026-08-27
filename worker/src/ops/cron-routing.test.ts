@@ -42,4 +42,12 @@ describe('source cron action routing', () => {
     expect(routeSourceCronActions({ utcHour: 19, utcMinute: 30 })).toContain('daily-video-gc');
     expect(routeSourceCronActions({ utcHour: 19, utcMinute: 35 })).not.toContain('daily-video-gc');
   });
+
+  test('runs blog and podcast workflow recovery together without shadowing other :30 work', () => {
+    expect(routeSourceCronActions({ utcHour: 19, utcMinute: 30 })).toEqual(expect.arrayContaining([
+      'daily-video-gc',
+      'blog-workflow-recovery',
+      'podcast-workflow-recovery',
+    ]));
+  });
 });

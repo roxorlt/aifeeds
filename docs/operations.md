@@ -517,6 +517,8 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 
 **调度节奏（2026-05-16 阶段 4 cutover 后）**：每小时 2 次 refresh-metrics（`:00` `:30`，ScrapeBadger batch 刷新现有 tweet 互动数据）+ 2 次 list-poll-ingest（`:25` `:55`，拉新 tweet 触发 workflow）。每天 03:35 UTC（11:35 BJT）cleanup。其余 tick 走 catch-all preempt（PH/ClawHub 链）。
 
+**2026-08-27 要闻源与 workflow 自愈加固**：Anthropic 保持 `blog:anthropic` source id/key，发现改为官方 `sitemap.xml` 中的 `/news/<slug>` 页面（不再依赖第三方 RSS bridge）。新增 `blog:zai-models`，registry 现为 40 源；通过官方 Hugging Face `zai-org` 模型列表发现首次出现的模型仓库，repo id 是稳定 item identity，普通 `lastModified` 更新不会造新事件；该国内官方源的 `.cc` 策略仍为 `deny`。feed item 在 `extra.editorial_type` 持久化来源类型，`radar` 永远不进入正式候选、日报视频或自动推送，X 的既有隔离规则不变。UTC 每小时 `:30` 另跑 `blog-workflow-recovery` 与 `podcast-workflow-recovery`：仅扫描至少 30 分钟未完成项，以 item 小时 bucket 幂等重建 workflow，最多 6 次；失败写 `pending_workflow` 与结构化错误，成功/终态清理暂态；耗尽项按日写去重告警信号。cron run 返回 `found/triggered/failed/exhausted/exhausted_alerts/oldest_age` 供运维观测。
+
 **X 主链已迁 CF Workflow**（2026-05-16）：原 6 个 cron mode（classify-pending / fill-translations / backfill-quotes / backfill-replies / detect-longform / longform-via-sb）全部走 `XTweetPipelineWorkflow` 5 step pipeline，每条新 tweet 1 个 instance。详见下方「X 流水线 (Workflow)」节。
 
 **Product Hunt（2026-05-11 v2，全云端 — 迁离 browser-use 本地脚本）**：

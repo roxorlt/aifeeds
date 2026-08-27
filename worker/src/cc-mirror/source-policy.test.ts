@@ -23,6 +23,7 @@ const EXPECTED_FEED_POLICIES = [
   ["blog", "qwen", "deny", "official"],
   ["blog", "meituan-tech", "deny", "official"],
   ["blog", "minicpm", "deny", "official"],
+  ["blog", "zai-models", "deny", "official"],
   ["blog", "qbitai", "deny", "third-party-media"],
   ["blog", "jiqizhixin", "deny", "third-party-media"],
   ["blog", "aiera", "deny", "third-party-media"],
