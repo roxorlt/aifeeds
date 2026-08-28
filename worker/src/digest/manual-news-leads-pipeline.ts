@@ -5,7 +5,10 @@ import {
   buildManualLeadAssessmentPrompt,
   buildManualLeadAssessmentRegenerationPrompt,
   buildManualLeadFactVerificationPrompt,
+  buildManualNewsSourceSupportSelectionPrompt,
+  buildManualNewsSourceSupportVerificationPrompt,
   classifyManualLeadDuplicate,
+  createManualNewsSourceSupportPayload,
   manualLeadAssessmentValidationFailure,
   manualLeadFactVerificationErrorCode,
   missingManualLeadEvidenceAnchors,
@@ -17,6 +20,8 @@ import {
   MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
   validateManualLeadGeneratedAssessment,
   validateManualLeadFactVerification,
+  validateManualNewsSourceSupportSelection,
+  validateManualNewsSourceSupportVerification,
   validateManualNewsProcessedAssessment,
   validateManualNewsLeadInput,
   type ManualNewsEvidence,
@@ -25,6 +30,9 @@ import {
   type ManualLeadPriorEvent,
   type ManualNewsProcessedAssessment,
   type ManualNewsAssessmentGenerationAudit,
+  type ManualNewsSourceSupportAuthorization,
+  type ManualNewsSourceSupportPayload,
+  type ManualNewsSourceSupportPriorEvent,
 } from './manual-news-leads';
 import type { PublicDocument } from '../security/safe-url-fetch';
 import {
@@ -81,6 +89,16 @@ export interface ManualSearchResult {
 
 export interface ManualLeadProcessingStore {
   getLead(id: string): Promise<ManualNewsLeadRecord | null>;
+  getSourceSupportAuthorization?(id: string): Promise<ManualNewsSourceSupportAuthorization | null>;
+  listSourceSupportPriorEvents?(
+    date: string,
+    excludeLeadId: string,
+  ): Promise<ManualNewsSourceSupportPriorEvent[]>;
+  saveSourceSupportedCandidate?(
+    id: string,
+    expectedVersion: number,
+    payload: ManualNewsSourceSupportPayload,
+  ): Promise<ManualNewsLeadRecord>;
   getPaidRetrievalEpoch(id: string): Promise<number>;
   hasPersistedAssessment(id: string): Promise<boolean>;
   transition(
@@ -351,8 +369,16 @@ export async function processManualNewsLead(
 ): Promise<ManualNewsLeadRecord> {
   let lead = await store.getLead(leadId);
   if (!lead) throw new Error('manual_news_lead_not_found');
+  const sourceSupportAuthorization = await store.getSourceSupportAuthorization?.(leadId) ?? null;
   let status = lead.status;
-  if (!PROCESSABLE_STATUSES.has(status)) throw new Error(`lead_not_processable:${status}`);
+  if (!PROCESSABLE_STATUSES.has(status)) {
+    if (sourceSupportAuthorization && status === 'recommended' && lead.confirmed_at !== null) return lead;
+    throw new Error(`lead_not_processable:${status}`);
+  }
+  if (sourceSupportAuthorization
+    && (!store.listSourceSupportPriorEvents || !store.saveSourceSupportedCandidate)) {
+    throw new Error('source_support_compatibility_floor_missing');
+  }
   const retrievalGeneration = await store.getPaidRetrievalEpoch(leadId);
   if (!Number.isSafeInteger(retrievalGeneration) || retrievalGeneration < 0) {
     throw new Error('invalid_paid_retrieval_epoch');
@@ -452,6 +478,107 @@ export async function processManualNewsLead(
           error_message: 'high_confidence_anchor_missing',
         });
         return (await store.getLead(leadId))!;
+      }
+      if (sourceSupportAuthorization) {
+        let selectionRaw: unknown;
+        try {
+          selectionRaw = await adapters.assess(
+            buildManualNewsSourceSupportSelectionPrompt({ fact: normalized.text, evidence }),
+            providerCallContext('assessment', evidence.length),
+          );
+        } catch (error) {
+          if (isTransientManualLeadError(error)) throw error;
+          await transition('needs_review', {
+            error_code: 'source_support_selection_failed',
+            error_message: safeProviderOrConciseError(error),
+          });
+          return (await store.getLead(leadId))!;
+        }
+        let selection;
+        try {
+          selection = validateManualNewsSourceSupportSelection(
+            selectionRaw, { fact: normalized.text, evidence },
+          );
+        } catch (error) {
+          await transition('needs_review', {
+            error_code: 'source_support_selection_failed',
+            error_message: conciseError(error),
+          });
+          return (await store.getLead(leadId))!;
+        }
+        let verificationRaw: unknown;
+        try {
+          verificationRaw = await adapters.verify(
+            buildManualNewsSourceSupportVerificationPrompt({
+              fact: normalized.text, evidence, selection,
+            }),
+            providerCallContext('verification', evidence.length),
+          );
+        } catch (error) {
+          if (isTransientManualLeadError(error)) throw error;
+          await transition('needs_review', {
+            error_code: 'source_support_verification_failed',
+            error_message: safeProviderOrConciseError(error),
+          });
+          return (await store.getLead(leadId))!;
+        }
+        let verification;
+        try {
+          verification = validateManualNewsSourceSupportVerification(verificationRaw, selection);
+        } catch (error) {
+          await transition('needs_review', {
+            error_code: 'source_support_verification_failed',
+            error_message: conciseError(error),
+          });
+          return (await store.getLead(leadId))!;
+        }
+        if (!verification.supported) {
+          await transition('needs_review', {
+            error_code: 'source_support_verification_failed',
+            error_message: 'source_support_not_supported',
+          });
+          return (await store.getLead(leadId))!;
+        }
+        let payload: ManualNewsSourceSupportPayload;
+        try {
+          payload = await createManualNewsSourceSupportPayload({
+            lead: {
+              id: leadId,
+              review_date: lead.review_date,
+              input_type: lead.input_type,
+              input_text: lead.input_text,
+              input_url: lead.input_url,
+              note: lead.note,
+            },
+            authorization: sourceSupportAuthorization,
+            evidence,
+            selection,
+            verification,
+          });
+        } catch (error) {
+          await transition('needs_review', {
+            error_code: 'source_support_validation_failed',
+            error_message: conciseError(error),
+          });
+          return (await store.getLead(leadId))!;
+        }
+        const priorEvents = await store.listSourceSupportPriorEvents!(normalized.date, leadId);
+        if (priorEvents.some((event) => event.event_key === payload.event_identity.event_key
+          && event.review_date !== normalized.date)) {
+          await transition('clustering');
+          await transition('duplicate');
+          return (await store.getLead(leadId))!;
+        }
+        try {
+          return await store.saveSourceSupportedCandidate!(leadId, lead.version, payload);
+        } catch (error) {
+          if (error instanceof Error && error.message === 'manual_candidate_event_conflict') {
+            await transition('clustering');
+            await transition('duplicate');
+            return (await store.getLead(leadId))!;
+          }
+          throw error;
+        }
       }
       if (!assessment && await store.hasPersistedAssessment(leadId)) {
         await store.invalidateAssessment(leadId, lead.version, 'persisted_verification_invalid');

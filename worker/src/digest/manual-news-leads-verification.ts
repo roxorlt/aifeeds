@@ -6,13 +6,18 @@ import {
 } from '../security/manual-news-keyring';
 import {
   assertManualNewsEvidenceSet,
+  createManualEvidenceDigest,
+  isCurrentManualNewsSourceSupportProof,
   isCurrentManualLeadVerification,
+  MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+  MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
   validateManualLeadFactVerification,
   validateManualNewsProcessedAssessment,
   type ManualLeadFactVerification,
   type ManualLeadPriorEvent,
   type ManualNewsEvidence,
   type ManualNewsProcessedAssessment,
+  type ManualNewsSourceSupportPayload,
 } from './manual-news-leads';
 
 interface ManualEvidenceRow {
@@ -28,6 +33,21 @@ interface ManualEvidenceRow {
   claims_supported_json: string;
   fetch_audit_json: string;
   reliable: number;
+}
+
+interface ManualEvidenceBulkRow extends ManualEvidencePreflightRow {
+  evidence_id: string | null;
+  response_key_id: string | null;
+  url: string | null;
+  source_type: ManualNewsEvidence['source_type'] | null;
+  publisher: string | null;
+  published_at: string | null;
+  retrieved_at: number | null;
+  title: string | null;
+  excerpt: string | null;
+  claims_supported_json: string | null;
+  fetch_audit_json: string | null;
+  reliable: number | null;
 }
 
 export interface PersistedManualVerificationRow {
@@ -59,6 +79,24 @@ export interface VerifiedPersistedManualAssessment {
   verification: ManualLeadFactVerification;
   record: PersistedManualVerificationRow;
   evidence: ManualNewsEvidence[];
+}
+
+export interface VerifiedPersistedManualCandidateProof {
+  policy_version: typeof MANUAL_LEAD_VERIFICATION_POLICY_VERSION | typeof MANUAL_NEWS_SOURCE_SUPPORT_POLICY;
+  candidate: {
+    item_id: string;
+    title: string;
+    summary: string;
+    source: string;
+    score: number | null;
+    url: string;
+    published_at: string | null;
+    event_key: string;
+  };
+  record: PersistedManualVerificationRow;
+  evidence: ManualNewsEvidence[];
+  assessment?: ManualNewsProcessedAssessment;
+  source_support?: ManualNewsSourceSupportPayload;
 }
 
 type PersistedVerificationOutcome =
@@ -384,6 +422,321 @@ async function verifyPersistedManualAssessmentOutcome(
   } catch {
     return { status: 'tamper', value: null };
   }
+}
+
+interface ManualCandidateProofDispatchRow extends PersistedManualVerificationRow {
+  review_date: string;
+  input_type: 'text' | 'url' | 'text_url';
+  input_text: string;
+  input_url: string;
+  note: string;
+  submit_idempotency_key: string;
+  lead_status: string;
+  lead_confirmed_at: number | null;
+  lead_version: number;
+}
+
+interface SourceSupportAuthorizationAuditRow {
+  authorization_audit_id: number | null;
+  authorization_idempotency_key: string | null;
+  authorization_metadata_json: string | null;
+}
+
+interface BulkSourceSupportCandidateProofRow
+  extends ManualCandidateProofDispatchRow, ManualEvidenceBulkRow, SourceSupportAuthorizationAuditRow {}
+
+async function activeManualCandidateProofRow(
+  env: Env,
+  leadId: string,
+): Promise<ManualCandidateProofDispatchRow | null> {
+  return env.DB.prepare(
+    `/* manual_verification:policy_dispatch */ SELECT
+       v.verification_id, v.lead_id, v.assessment_version, v.policy_version,
+       v.verification_key_id, v.canonical_digest, v.hmac_sha256, v.verification_json,
+       v.processing_owner, v.processing_attempt, v.creation_nonce, v.status, v.reason,
+       v.created_at, v.invalidation_nonce, v.invalidated_at,
+       l.review_date, l.input_type, l.input_text, l.input_url, l.note,
+       l.submit_idempotency_key, l.status AS lead_status,
+       l.confirmed_at AS lead_confirmed_at, l.version AS lead_version
+     FROM manual_news_assessment_verifications v
+     JOIN manual_news_leads l ON l.id = v.lead_id
+     WHERE v.lead_id = ? AND v.status = 'active'
+     ORDER BY v.created_at DESC LIMIT 1`,
+  ).bind(leadId).first<ManualCandidateProofDispatchRow>();
+}
+
+async function sourceSupportAuthorizationMatches(
+  env: Env,
+  row: ManualCandidateProofDispatchRow,
+  payload: ManualNewsSourceSupportPayload,
+): Promise<boolean> {
+  const audit = await env.DB.prepare(
+    `/* manual_verification:source_support_authorization */ SELECT
+       id, idempotency_key, metadata_json
+     FROM manual_news_lead_audit
+     WHERE lead_id = ? AND action = 'submit' AND resulting_version = 1
+       AND from_status IS NULL AND to_status = 'submitted'
+     ORDER BY id ASC LIMIT 1`,
+  ).bind(row.lead_id).first<{ id: number; idempotency_key: string; metadata_json: string }>();
+  return sourceSupportAuthorizationSnapshotMatches(row, payload, audit ? {
+    authorization_audit_id: audit.id,
+    authorization_idempotency_key: audit.idempotency_key,
+    authorization_metadata_json: audit.metadata_json,
+  } : null);
+}
+
+function sourceSupportAuthorizationSnapshotMatches(
+  row: ManualCandidateProofDispatchRow,
+  payload: ManualNewsSourceSupportPayload,
+  audit: SourceSupportAuthorizationAuditRow | null,
+): boolean {
+  if (payload.input.review_date !== row.review_date
+    || payload.input.input_type !== row.input_type
+    || payload.input.input_text !== row.input_text
+    || payload.input.input_url !== row.input_url
+    || payload.input.note !== row.note
+    || payload.authorization.idempotency_key !== row.submit_idempotency_key
+    || !audit
+    || Number(audit.authorization_audit_id) !== payload.authorization.audit_id
+    || audit.authorization_idempotency_key !== payload.authorization.idempotency_key) return false;
+  const metadata = parseJson<Record<string, unknown>>(audit.authorization_metadata_json, {});
+  const expectedKeys = [
+    'input_type', 'candidate_authorization', 'submit_identity_contract', 'submit_identity_digest',
+  ];
+  return Object.keys(metadata).length === expectedKeys.length
+    && Object.keys(metadata).every((key) => expectedKeys.includes(key))
+    && metadata.input_type === row.input_type
+    && metadata.candidate_authorization === MANUAL_NEWS_SOURCE_SUPPORT_POLICY
+    && metadata.submit_identity_contract === 'manual_news_submit_identity_v1'
+    && metadata.submit_identity_digest === payload.authorization.submit_identity_digest;
+}
+
+async function verifySourceSupportCandidateProofSnapshot(
+  row: ManualCandidateProofDispatchRow,
+  payload: ManualNewsSourceSupportPayload,
+  evidence: readonly ManualNewsEvidence[],
+  keyrings: { verificationKeys: ManualNewsKeyring; responseKeys: ManualNewsKeyring },
+): Promise<boolean> {
+  try {
+    return await createManualEvidenceDigest(evidence) === await createManualEvidenceDigest(payload.evidence)
+      && await isCurrentManualNewsSourceSupportProof({
+        lead_id: row.lead_id,
+        assessment_version: Number(row.assessment_version),
+        payload,
+      }, {
+        policy_version: row.policy_version,
+        verification_key_id: row.verification_key_id,
+        canonical_digest: row.canonical_digest,
+        hmac_sha256: row.hmac_sha256,
+      }, keyrings.verificationKeys, keyrings.responseKeys);
+  } catch {
+    return false;
+  }
+}
+
+export async function loadVerifiedManualCandidateProof(
+  env: Env,
+  leadId: string,
+): Promise<VerifiedPersistedManualCandidateProof | null> {
+  const row = await activeManualCandidateProofRow(env, leadId);
+  if (!row) return null;
+  if (row.policy_version !== MANUAL_LEAD_VERIFICATION_POLICY_VERSION
+    && row.policy_version !== MANUAL_NEWS_SOURCE_SUPPORT_POLICY) return null;
+  if (row.policy_version === MANUAL_LEAD_VERIFICATION_POLICY_VERSION) {
+    const legacy = await loadVerifiedManualAssessment(env, leadId);
+    if (!legacy) return null;
+    const primaryEvidence = legacy.evidence.find((item) => item.reliable) || legacy.evidence[0];
+    return {
+      policy_version: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+      candidate: {
+        item_id: `blog:manual:${leadId}`,
+        title: legacy.assessment.title,
+        summary: legacy.assessment.summary,
+        source: primaryEvidence?.publisher || '手工补录',
+        score: legacy.assessment.score,
+        url: primaryEvidence?.url || row.input_url,
+        published_at: primaryEvidence?.published_at || null,
+        event_key: legacy.assessment.event_key,
+      },
+      record: legacy.record,
+      evidence: legacy.evidence,
+      assessment: legacy.assessment,
+    };
+  }
+  const keyrings = configuredKeyrings(env);
+  if (!keyrings
+    || !keyrings.verificationKeys.keys.has(row.verification_key_id)
+    || !await persistedKeyLineageAvailable(env, leadId, keyrings)) return null;
+  const payload = parseJson<ManualNewsSourceSupportPayload | null>(row.verification_json, null);
+  const evidence = await loadManualNewsEvidence(env, leadId);
+  let valid = false;
+  if (payload && await sourceSupportAuthorizationMatches(env, row, payload)) {
+    valid = await verifySourceSupportCandidateProofSnapshot(row, payload, evidence, keyrings);
+  }
+  if (!valid || !payload) {
+    await quarantineInvalidManualAssessment(env, row, 'verification_integrity_invalid');
+    return null;
+  }
+  return {
+    policy_version: MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+    candidate: {
+      ...payload.item_projection,
+      event_key: payload.event_identity.event_key,
+    },
+    record: row,
+    evidence,
+    source_support: payload,
+  };
+}
+
+const SOURCE_SUPPORT_BULK_PROOF_LIMIT = 700;
+const SOURCE_SUPPORT_BULK_PROOF_CHUNK_SIZE = 20;
+
+export async function loadVerifiedManualSourceSupportProofs(
+  env: Env,
+  leadIds: readonly string[],
+): Promise<Map<string, VerifiedPersistedManualCandidateProof>> {
+  const uniqueLeadIds = [...new Set(leadIds)];
+  if (uniqueLeadIds.length > SOURCE_SUPPORT_BULK_PROOF_LIMIT) {
+    throw new Error('source_support_prior_event_scan_limit');
+  }
+  const verified = new Map<string, VerifiedPersistedManualCandidateProof>();
+  if (uniqueLeadIds.length === 0) return verified;
+  const keyrings = configuredKeyrings(env);
+  if (!keyrings) return verified;
+
+  for (let offset = 0; offset < uniqueLeadIds.length; offset += SOURCE_SUPPORT_BULK_PROOF_CHUNK_SIZE) {
+    const chunk = uniqueLeadIds.slice(offset, offset + SOURCE_SUPPORT_BULK_PROOF_CHUNK_SIZE);
+    const requestedValues = chunk.map(() => '(?)').join(', ');
+    const result = await env.DB.prepare(
+      `/* manual_verification:source_support_bulk */ WITH requested(lead_id) AS (
+         VALUES ${requestedValues}
+       ), evidence_stats AS (
+         SELECT e.lead_id,
+           COUNT(*) AS evidence_count,
+           MAX(length(CAST(e.evidence_id AS BLOB))) AS max_evidence_id_bytes,
+           MAX(length(CAST(e.response_key_id AS BLOB))) AS max_response_key_id_bytes,
+           MAX(length(CAST(e.url AS BLOB))) AS max_url_bytes,
+           MAX(length(CAST(e.source_type AS BLOB))) AS max_source_type_bytes,
+           MAX(length(CAST(e.publisher AS BLOB))) AS max_publisher_bytes,
+           MAX(length(CAST(COALESCE(e.published_at, '') AS BLOB))) AS max_published_at_bytes,
+           MAX(length(CAST(e.title AS BLOB))) AS max_title_bytes,
+           MAX(length(e.excerpt)) AS max_excerpt_code_points,
+           MAX(length(CAST(e.excerpt AS BLOB))) AS max_excerpt_bytes,
+           MAX(length(CAST(e.claims_supported_json AS BLOB))) AS max_claims_bytes,
+           MAX(length(CAST(e.fetch_audit_json AS BLOB))) AS max_fetch_audit_bytes
+         FROM manual_news_evidence e JOIN requested r ON r.lead_id = e.lead_id
+         GROUP BY e.lead_id
+       ) SELECT
+         v.verification_id, v.lead_id, v.assessment_version, v.policy_version,
+         v.verification_key_id, v.canonical_digest, v.hmac_sha256, v.verification_json,
+         v.processing_owner, v.processing_attempt, v.creation_nonce, v.status, v.reason,
+         v.created_at, v.invalidation_nonce, v.invalidated_at,
+         l.review_date, l.input_type, l.input_text, l.input_url, l.note,
+         l.submit_idempotency_key, l.status AS lead_status,
+         l.confirmed_at AS lead_confirmed_at, l.version AS lead_version,
+         a.id AS authorization_audit_id,
+         a.idempotency_key AS authorization_idempotency_key,
+         a.metadata_json AS authorization_metadata_json,
+         COALESCE(s.evidence_count, 0) AS evidence_count,
+         s.max_evidence_id_bytes, s.max_response_key_id_bytes, s.max_url_bytes,
+         s.max_source_type_bytes, s.max_publisher_bytes, s.max_published_at_bytes,
+         s.max_title_bytes, s.max_excerpt_code_points, s.max_excerpt_bytes,
+         s.max_claims_bytes, s.max_fetch_audit_bytes,
+         e.evidence_id, e.response_key_id, e.url, e.source_type, e.publisher,
+         e.published_at, e.retrieved_at, e.title, e.excerpt,
+         e.claims_supported_json, e.fetch_audit_json, e.reliable
+       FROM requested r
+       JOIN manual_news_assessment_verifications v
+         ON v.lead_id = r.lead_id AND v.status = 'active' AND v.policy_version = '${MANUAL_NEWS_SOURCE_SUPPORT_POLICY}'
+       JOIN manual_news_leads l ON l.id = v.lead_id
+       LEFT JOIN manual_news_lead_audit a ON a.id = (
+         SELECT MIN(a0.id) FROM manual_news_lead_audit a0
+         WHERE a0.lead_id = v.lead_id AND a0.action = 'submit'
+           AND a0.resulting_version = 1 AND a0.from_status IS NULL AND a0.to_status = 'submitted'
+       )
+       LEFT JOIN evidence_stats s ON s.lead_id = v.lead_id
+       LEFT JOIN manual_news_evidence e ON e.lead_id = v.lead_id
+         AND COALESCE(s.evidence_count, 0) <= 8
+         AND COALESCE(s.max_evidence_id_bytes, 0) <= 256
+         AND COALESCE(s.max_response_key_id_bytes, 0) <= 64
+         AND COALESCE(s.max_url_bytes, 0) <= 4096
+         AND COALESCE(s.max_source_type_bytes, 0) <= 64
+         AND COALESCE(s.max_publisher_bytes, 0) <= 1024
+         AND COALESCE(s.max_published_at_bytes, 0) <= 64
+         AND COALESCE(s.max_title_bytes, 0) <= 4096
+         AND COALESCE(s.max_excerpt_code_points, 0) <= 3000
+         AND COALESCE(s.max_excerpt_bytes, 0) <= 12000
+         AND COALESCE(s.max_claims_bytes, 0) <= 80000
+         AND COALESCE(s.max_fetch_audit_bytes, 0) <= 131072
+       ORDER BY v.lead_id ASC, e.evidence_id ASC`,
+    ).bind(...chunk).all<BulkSourceSupportCandidateProofRow>();
+    const grouped = new Map<string, {
+      row: BulkSourceSupportCandidateProofRow;
+      evidenceRows: ManualEvidenceRow[];
+    }>();
+    for (const row of result.results || []) {
+      const group = grouped.get(row.lead_id) || { row, evidenceRows: [] };
+      if (row.evidence_id !== null && row.response_key_id !== null && row.url !== null
+        && row.source_type !== null && row.publisher !== null && row.retrieved_at !== null
+        && row.title !== null && row.excerpt !== null && row.claims_supported_json !== null
+        && row.fetch_audit_json !== null && row.reliable !== null) {
+        group.evidenceRows.push(row as ManualEvidenceRow);
+      }
+      grouped.set(row.lead_id, group);
+    }
+    for (const { row, evidenceRows } of grouped.values()) {
+      const preflight: ManualEvidencePreflightRow = {
+        evidence_count: Number(row.evidence_count),
+        max_evidence_id_bytes: row.max_evidence_id_bytes,
+        max_response_key_id_bytes: row.max_response_key_id_bytes,
+        max_url_bytes: row.max_url_bytes,
+        max_source_type_bytes: row.max_source_type_bytes,
+        max_publisher_bytes: row.max_publisher_bytes,
+        max_published_at_bytes: row.max_published_at_bytes,
+        max_title_bytes: row.max_title_bytes,
+        max_excerpt_code_points: row.max_excerpt_code_points,
+        max_excerpt_bytes: row.max_excerpt_bytes,
+        max_claims_bytes: row.max_claims_bytes,
+        max_fetch_audit_bytes: row.max_fetch_audit_bytes,
+      };
+      if (evidencePreflightInvalid(preflight) || evidenceRows.length !== preflight.evidence_count) {
+        await quarantineInvalidManualAssessment(env, row, 'verification_integrity_invalid');
+        continue;
+      }
+      const evidence = evidenceRows.map(evidenceFromRow);
+      try {
+        assertManualNewsEvidenceSet(evidence);
+      } catch {
+        await quarantineInvalidManualAssessment(env, row, 'verification_integrity_invalid');
+        continue;
+      }
+      if (!keyrings.verificationKeys.keys.has(row.verification_key_id)
+        || evidence.some((item) => typeof item.response_key_id !== 'string'
+          || !keyrings.responseKeys.keys.has(item.response_key_id))) continue;
+      const payload = parseJson<ManualNewsSourceSupportPayload | null>(row.verification_json, null);
+      const authorization = {
+        authorization_audit_id: row.authorization_audit_id,
+        authorization_idempotency_key: row.authorization_idempotency_key,
+        authorization_metadata_json: row.authorization_metadata_json,
+      };
+      const valid = payload
+        && sourceSupportAuthorizationSnapshotMatches(row, payload, authorization)
+        && await verifySourceSupportCandidateProofSnapshot(row, payload, evidence, keyrings);
+      if (!valid || !payload) {
+        await quarantineInvalidManualAssessment(env, row, 'verification_integrity_invalid');
+        continue;
+      }
+      verified.set(row.lead_id, {
+        policy_version: MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+        candidate: { ...payload.item_projection, event_key: payload.event_identity.event_key },
+        record: row,
+        evidence,
+        source_support: payload,
+      });
+    }
+  }
+  return verified;
 }
 
 export async function loadVerifiedManualAssessment(

@@ -8,6 +8,8 @@ import {
   boundedManualLeadPriorEvents,
   createManualEvidenceDigest,
   createManualLeadVerificationProof,
+  createManualNewsSourceSupportProof,
+  deriveAutomaticManualEventIdentityV1,
   MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
   MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
   MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
@@ -17,19 +19,27 @@ import {
   manualNewsAssessmentGenerationAudit,
   MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT,
   MANUAL_NEWS_PRIOR_EVENT_PROVIDER_LIMITS,
+  mergeAuthorizedManualNewsCandidates,
   mergeManualLeadCandidate,
   TOTAL_NEWS_REVIEW_CANDIDATE_LIMIT,
   validateManualLeadFactVerification,
   validateManualNewsProcessedAssessment,
   validateManualNewsLeadInput,
+  MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
   type ManualNewsEvidence,
   type ManualLeadPriorEvent,
   type ManualNewsLeadStatus,
   type ManualNewsProcessedAssessment,
   type ManualNewsAssessmentGenerationAudit,
+  type ManualNewsSourceSupportAuthorization,
+  type ManualNewsSourceSupportPayload,
+  type ManualNewsSourceSupportPriorEvent,
+  type ManualReviewCandidate,
 } from './manual-news-leads';
 import {
   loadManualNewsEvidence,
+  loadVerifiedManualCandidateProof,
+  loadVerifiedManualSourceSupportProofs,
   loadVerifiedManualAssessment,
   MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL,
   manualVerificationSnapshotGuardBindings,
@@ -54,6 +64,7 @@ import {
   getActiveNewsReviewBatch,
   getNewsReviewBatch,
   getPublishedNewsReviewSelection,
+  loadAutomaticNewsReviewEventIdentitySidecar,
   newsReviewExpiresAt,
   newsReviewSecret,
   newsReviewSelectionHash,
@@ -104,6 +115,91 @@ interface ManualAssessmentGenerationCycleRow {
   regeneration_consumed: number;
   validated_assessment_json: string | null;
   provider_failure_json: string | null;
+}
+
+function sourceSupportEvidenceSnapshotGuard(
+  leadId: string,
+  evidence: readonly ManualNewsEvidence[],
+): {
+  sql: string;
+  bindings: unknown[];
+} {
+  const predicates = evidence.map(() => `EXISTS (
+    SELECT 1 FROM manual_news_evidence e
+    WHERE e.lead_id = ? AND e.evidence_id = ? AND e.response_key_id = ?
+      AND e.url = ? AND e.source_type = ? AND e.publisher = ?
+      AND e.published_at IS ? AND e.retrieved_at = ? AND e.title = ? AND e.excerpt = ?
+      AND e.claims_supported_json = ? AND e.fetch_audit_json = ? AND e.reliable = ?
+  )`);
+  return {
+    sql: `(SELECT COUNT(*) FROM manual_news_evidence WHERE lead_id = ?) = ?
+      AND ${predicates.length ? predicates.join(' AND ') : '0 = 1'}`,
+    bindings: [
+      leadId,
+      evidence.length,
+      ...evidence.flatMap((item) => [
+        leadId, item.id, item.response_key_id || '', item.url, item.source_type, item.publisher,
+        item.published_at, item.retrieved_at, item.title, item.excerpt,
+        JSON.stringify(item.claims_supported), JSON.stringify(item.fetch_audit || null),
+        item.reliable ? 1 : 0,
+      ]),
+    ],
+  };
+}
+
+interface OrderedVerifiedManualCandidate {
+  authorization_order: number;
+  candidate: ManualReviewCandidate;
+  lead_id: string;
+  verification: PersistedManualVerificationRow;
+}
+
+async function orderedVerifiedManualCandidates(
+  env: Env,
+  date: string,
+  excludeLeadId: string,
+): Promise<OrderedVerifiedManualCandidate[]> {
+  const rows = await env.DB.prepare(
+    `/* manual_source_support:ordered_confirmed_manual */ SELECT
+       l.id AS lead_id,
+       CASE WHEN v.policy_version = ? THEN (
+         SELECT MIN(a.id) FROM manual_news_lead_audit a
+         WHERE a.lead_id = l.id AND a.action = 'submit'
+           AND json_extract(a.metadata_json, '$.candidate_authorization') = ?
+       ) ELSE (
+         SELECT MIN(a.id) FROM manual_news_lead_audit a
+         WHERE a.lead_id = l.id AND a.action = 'confirm_candidate'
+       ) END AS authorization_order
+     FROM manual_news_leads l
+     JOIN manual_news_assessment_verifications v
+       ON v.lead_id = l.id AND v.status = 'active'
+     WHERE l.review_date = ? AND l.confirmed_at IS NOT NULL AND l.id <> ?
+       AND l.status IN ('recommended', 'needs_review')
+     ORDER BY authorization_order ASC, l.id ASC LIMIT 51`,
+  ).bind(
+    MANUAL_NEWS_SOURCE_SUPPORT_POLICY, MANUAL_NEWS_SOURCE_SUPPORT_POLICY, date, excludeLeadId,
+  ).all<{ lead_id: string; authorization_order: number | null }>();
+  if ((rows.results || []).length > MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT) {
+    throw new Error('manual_candidate_limit_exceeded');
+  }
+  const candidates: OrderedVerifiedManualCandidate[] = [];
+  for (const row of rows.results || []) {
+    const order = Number(row.authorization_order);
+    if (!Number.isSafeInteger(order) || order <= 0) throw new Error('manual_candidate_order_invalid');
+    const proof = await loadVerifiedManualCandidateProof(env, row.lead_id);
+    if (!proof) continue;
+    candidates.push({
+      authorization_order: order,
+      candidate: {
+        ...proof.candidate,
+        origin: 'manual_lead',
+        lead_id: row.lead_id,
+      },
+      lead_id: row.lead_id,
+      verification: proof.record,
+    });
+  }
+  return candidates;
 }
 
 function assessmentGenerationCycleState(
@@ -430,26 +526,143 @@ export async function getManualNewsLeadPaidRetrievalEpoch(
   return epoch;
 }
 
+async function manualNewsSubmitIdentityDigest(input: {
+  date: string;
+  input_type: ManualNewsLeadRecord['input_type'];
+  text: string;
+  url: string;
+  note: string;
+  candidate_authorization: typeof MANUAL_NEWS_SOURCE_SUPPORT_POLICY | null;
+}): Promise<string> {
+  return sha256Hex([
+    'manual-news-submit-identity-v1', input.date, input.input_type, input.text,
+    input.url, input.note, input.candidate_authorization || '',
+  ].join('\0'));
+}
+
+export async function getManualNewsSourceSupportAuthorization(
+  env: Env,
+  id: string,
+): Promise<ManualNewsSourceSupportAuthorization | null> {
+  const row = await env.DB.prepare(
+    `/* manual_audit:source_support_authorization */ SELECT
+       l.review_date, l.input_type, l.input_text, l.input_url, l.note,
+       l.submit_idempotency_key, a.id AS audit_id, a.idempotency_key, a.metadata_json
+     FROM manual_news_leads l
+     JOIN manual_news_lead_audit a ON a.lead_id = l.id
+     WHERE l.id = ? AND a.action = 'submit' AND a.resulting_version = 1
+       AND a.from_status IS NULL AND a.to_status = 'submitted'
+       AND a.idempotency_key = l.submit_idempotency_key
+     ORDER BY a.id ASC LIMIT 1`,
+  ).bind(id).first<{
+    review_date: string;
+    input_type: ManualNewsLeadRecord['input_type'];
+    input_text: string;
+    input_url: string;
+    note: string;
+    submit_idempotency_key: string;
+    audit_id: number;
+    idempotency_key: string;
+    metadata_json: string;
+  }>();
+  if (!row) return null;
+  let metadata: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(row.metadata_json) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    metadata = parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const expectedKeys = [
+    'input_type', 'candidate_authorization', 'submit_identity_contract', 'submit_identity_digest',
+  ];
+  if (Object.keys(metadata).length !== expectedKeys.length
+    || Object.keys(metadata).some((key) => !expectedKeys.includes(key))
+    || metadata.input_type !== row.input_type
+    || metadata.candidate_authorization !== MANUAL_NEWS_SOURCE_SUPPORT_POLICY
+    || metadata.submit_identity_contract !== 'manual_news_submit_identity_v1'
+    || typeof metadata.submit_identity_digest !== 'string'
+    || !Number.isSafeInteger(Number(row.audit_id)) || Number(row.audit_id) <= 0) return null;
+  const expectedDigest = await manualNewsSubmitIdentityDigest({
+    date: row.review_date,
+    input_type: row.input_type,
+    text: row.input_text,
+    url: row.input_url,
+    note: row.note,
+    candidate_authorization: MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+  });
+  if (metadata.submit_identity_digest !== expectedDigest) return null;
+  return {
+    audit_id: Number(row.audit_id),
+    candidate_authorization: MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+    submit_identity_digest: expectedDigest,
+    idempotency_key: row.idempotency_key,
+  };
+}
+
 export async function submitManualNewsLead(
   env: Env,
-  input: { date?: unknown; text?: unknown; url?: unknown; note?: unknown },
+  input: {
+    date?: unknown;
+    text?: unknown;
+    url?: unknown;
+    note?: unknown;
+    candidate_authorization?: unknown;
+  },
   idempotencyKey: string,
   now = Date.now(),
 ): Promise<{ lead: ManualNewsLeadRecord; created: boolean }> {
   const normalized = validateManualNewsLeadInput(input);
+  const submitIdentityDigest = await manualNewsSubmitIdentityDigest({
+    date: normalized.date,
+    input_type: normalized.input_type,
+    text: normalized.text,
+    url: normalized.url,
+    note: normalized.note,
+    candidate_authorization: normalized.candidate_authorization,
+  });
+  const sameSubmission = async (row: ManualLeadRow): Promise<boolean> => {
+    const samePayload = row.input_type === normalized.input_type
+      && row.input_text === normalized.text
+      && row.input_url === normalized.url
+      && row.note === normalized.note;
+    if (!samePayload) return false;
+    const audit = await env.DB.prepare(
+      `/* manual_audit:submit_authorization */ SELECT id, metadata_json
+       FROM manual_news_lead_audit
+       WHERE lead_id = ? AND action = 'submit' AND resulting_version = 1
+       ORDER BY id ASC LIMIT 1`,
+    ).bind(row.id).first<{ id: number; metadata_json: string }>();
+    if (!audit) return normalized.candidate_authorization === null;
+    let metadata: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(audit.metadata_json) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        metadata = parsed as Record<string, unknown>;
+      }
+    } catch {
+      return false;
+    }
+    const storedAuthorization = metadata.candidate_authorization === MANUAL_NEWS_SOURCE_SUPPORT_POLICY
+      ? MANUAL_NEWS_SOURCE_SUPPORT_POLICY
+      : null;
+    if (storedAuthorization !== normalized.candidate_authorization) return false;
+    return storedAuthorization === null
+      || (metadata.submit_identity_contract === 'manual_news_submit_identity_v1'
+        && metadata.submit_identity_digest === submitIdentityDigest);
+  };
   const existing = await env.DB.prepare(
     `/* manual_lead:by_submit_key */ SELECT * FROM manual_news_leads
      WHERE review_date = ? AND submit_idempotency_key = ?`,
   ).bind(normalized.date, idempotencyKey).first<ManualLeadRow>();
   if (existing) {
-    const samePayload = existing.input_type === normalized.input_type
-      && existing.input_text === normalized.text
-      && existing.input_url === normalized.url
-      && existing.note === normalized.note;
-    if (!samePayload) throw new Error('idempotency_key_reused_with_different_payload');
+    if (!await sameSubmission(existing)) throw new Error('idempotency_key_reused_with_different_payload');
     return { lead: await leadFromRow(env, existing), created: false };
   }
-  const hash = await sha256Hex(`${normalized.date}\0${idempotencyKey}\0${normalized.text}\0${normalized.url}`);
+  const hash = normalized.candidate_authorization
+    ? await sha256Hex(`manual-news-source-support-lead-id-v1\0${normalized.date}\0${idempotencyKey}\0${submitIdentityDigest}`)
+    : await sha256Hex(`${normalized.date}\0${idempotencyKey}\0${normalized.text}\0${normalized.url}`);
   const id = `ml-${normalized.date.replace(/-/g, '')}-${hash.slice(0, 12)}`;
   const mutationNonce = createMutationNonce('submit');
   const processingOwner = manualNewsLeadProcessingOwner(id, 1);
@@ -477,7 +690,16 @@ export async function submitManualNewsLead(
   const created = await runAuditedMutation(env, insertStatement, auditMutationStatement(env, {
     leadId: id, action: 'submit', mutationKind: 'submit', mutationNonce,
     fromStatus: null, toStatus: 'submitted', idempotencyKey,
-    resultingVersion: 1, metadata: { input_type: normalized.input_type }, createdAt: now,
+    resultingVersion: 1,
+    metadata: {
+      input_type: normalized.input_type,
+      ...(normalized.candidate_authorization ? {
+        candidate_authorization: normalized.candidate_authorization,
+        submit_identity_contract: 'manual_news_submit_identity_v1',
+        submit_identity_digest: submitIdentityDigest,
+      } : {}),
+    },
+    createdAt: now,
   })) > 0;
   let lead = await getManualNewsLead(env, id);
   if (!lead) {
@@ -486,9 +708,7 @@ export async function submitManualNewsLead(
        WHERE review_date = ? AND submit_idempotency_key = ?`,
     ).bind(normalized.date, idempotencyKey).first<ManualLeadRow>();
     if (!winner) throw new Error('manual_news_lead_insert_failed');
-    const samePayload = winner.input_type === normalized.input_type && winner.input_text === normalized.text
-      && winner.input_url === normalized.url && winner.note === normalized.note;
-    if (!samePayload) throw new Error('idempotency_key_reused_with_different_payload');
+    if (!await sameSubmission(winner)) throw new Error('idempotency_key_reused_with_different_payload');
     lead = await leadFromRow(env, winner);
   }
   return { lead, created };
@@ -880,6 +1100,560 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
 
   getLead(id: string): Promise<ManualNewsLeadRecord | null> {
     return getManualNewsLead(this.env, id);
+  }
+
+  getSourceSupportAuthorization(id: string): Promise<ManualNewsSourceSupportAuthorization | null> {
+    return getManualNewsSourceSupportAuthorization(this.env, id);
+  }
+
+  async listSourceSupportPriorEvents(
+    date: string,
+    excludeLeadId: string,
+  ): Promise<ManualNewsSourceSupportPriorEvent[]> {
+    const manual = await this.env.DB.prepare(
+      `/* manual_source_support:recent_manual_events */ SELECT
+         v.lead_id, l.review_date
+       FROM manual_news_assessment_verifications v
+       JOIN manual_news_leads l ON l.id = v.lead_id
+       WHERE v.policy_version = ? AND v.status = 'active' AND v.lead_id <> ?
+         AND l.confirmed_at IS NOT NULL
+         AND l.review_date BETWEEN date(?, '-14 days') AND ?
+       ORDER BY l.review_date DESC, v.lead_id ASC LIMIT 701`,
+    ).bind(MANUAL_NEWS_SOURCE_SUPPORT_POLICY, excludeLeadId, date, date)
+      .all<{ lead_id: string; review_date: string }>();
+    if ((manual.results || []).length > 700) throw new Error('source_support_prior_event_scan_limit');
+    const events: ManualNewsSourceSupportPriorEvent[] = [];
+    const proofs = await loadVerifiedManualSourceSupportProofs(
+      this.env,
+      (manual.results || []).map((row) => row.lead_id),
+    );
+    for (const row of manual.results || []) {
+      const proof = proofs.get(row.lead_id);
+      if (!proof) continue;
+      events.push({
+        event_key: proof.candidate.event_key,
+        review_date: row.review_date,
+        origin: 'manual',
+        item_id: proof.candidate.item_id,
+      });
+    }
+    const automatic = await this.env.DB.prepare(
+      `/* manual_source_support:recent_automatic_events */ SELECT
+         id, extra, substr(COALESCE(published_at, scraped_at), 1, 10) AS review_date
+       FROM items
+       WHERE id <> ? AND COALESCE(source_ref, '') <> 'manual_lead'
+         AND deleted_at IS NULL AND COALESCE(is_relevant, 0) = 1
+         AND extra IS NOT NULL AND json_valid(extra) = 1
+         AND json_type(extra, '$.event_fingerprint') = 'object'
+         AND substr(COALESCE(published_at, scraped_at), 1, 10)
+           BETWEEN date(?, '-14 days') AND ?
+       ORDER BY review_date DESC, id ASC LIMIT 4097`,
+    ).bind(`blog:manual:${excludeLeadId}`, date, date)
+      .all<{ id: string; extra: string; review_date: string }>();
+    if ((automatic.results || []).length > 4096) throw new Error('source_support_prior_event_scan_limit');
+    for (const row of automatic.results || []) {
+      let fingerprint: unknown = null;
+      try {
+        const extra = JSON.parse(row.extra) as Record<string, unknown>;
+        fingerprint = extra.event_fingerprint;
+      } catch {
+        continue;
+      }
+      const identity = await deriveAutomaticManualEventIdentityV1(fingerprint);
+      if (!identity) continue;
+      events.push({
+        event_key: identity.event_key,
+        review_date: row.review_date,
+        origin: 'automatic',
+        item_id: row.id,
+      });
+    }
+    const ordered = events.sort((left, right) =>
+      right.review_date.localeCompare(left.review_date)
+      || (left.origin === right.origin ? 0 : left.origin === 'manual' ? -1 : 1)
+      || left.item_id.localeCompare(right.item_id));
+    const byEvent = new Map<string, ManualNewsSourceSupportPriorEvent>();
+    for (const event of ordered) if (!byEvent.has(event.event_key)) byEvent.set(event.event_key, event);
+    return [...byEvent.values()];
+  }
+
+  async saveSourceSupportedCandidate(
+    id: string,
+    expectedVersion: number,
+    payload: ManualNewsSourceSupportPayload,
+  ): Promise<ManualNewsLeadRecord> {
+    const { owner, attempt } = this.fence();
+    const lead = await getManualNewsLead(this.env, id);
+    if (!lead) throw new Error('manual_news_lead_not_found');
+    const alreadyVerified = await loadVerifiedManualCandidateProof(this.env, id);
+    if (lead.confirmed_at !== null
+      && alreadyVerified?.policy_version === MANUAL_NEWS_SOURCE_SUPPORT_POLICY
+      && JSON.stringify(alreadyVerified.source_support) === JSON.stringify(payload)) return lead;
+    if (lead.version !== expectedVersion || lead.status !== 'verifying'
+      || lead.processing_owner !== owner || lead.processing_attempt !== attempt
+      || lead.confirmed_at !== null) throw new Error('stale_processing_owner');
+
+    const authorization = await getManualNewsSourceSupportAuthorization(this.env, id);
+    if (!authorization || JSON.stringify(authorization) !== JSON.stringify(payload.authorization)
+      || payload.input.review_date !== lead.review_date
+      || payload.input.input_type !== lead.input_type
+      || payload.input.input_text !== lead.input_text
+      || payload.input.input_url !== lead.input_url
+      || payload.input.note !== lead.note) throw new Error('source_support_authorization_stale');
+    const evidence = await loadManualNewsEvidence(this.env, id);
+    if (await createManualEvidenceDigest(evidence) !== await createManualEvidenceDigest(payload.evidence)) {
+      throw new Error('source_support_evidence_stale');
+    }
+    const assessmentVersion = expectedVersion * 1_000_000 + attempt;
+    if (attempt >= 1_000_000 || !Number.isSafeInteger(assessmentVersion) || assessmentVersion <= 0) {
+      throw new Error('invalid_assessment_version');
+    }
+    const proof = await createManualNewsSourceSupportProof({
+      lead_id: id, assessment_version: assessmentVersion, payload,
+    }, manualNewsVerificationKeyring(this.env), manualNewsResponseKeyring(this.env));
+    const now = Date.now();
+    const creationNonce = createMutationNonce('source_support_verification_create');
+    const eventClaimNonce = await manualEventClaimNonce(lead.review_date, payload.event_identity.event_key);
+    const verificationId = `mav:${id}:${assessmentVersion}:${proof.canonical_digest.slice(0, 16)}`;
+    const verificationJson = JSON.stringify(payload);
+    const verification: PersistedManualVerificationRow = {
+      verification_id: verificationId,
+      lead_id: id,
+      assessment_version: assessmentVersion,
+      policy_version: proof.policy_version,
+      verification_key_id: proof.verification_key_id,
+      canonical_digest: proof.canonical_digest,
+      hmac_sha256: proof.hmac_sha256,
+      verification_json: verificationJson,
+      processing_owner: owner,
+      processing_attempt: attempt,
+      creation_nonce: creationNonce,
+      status: 'active',
+      reason: null,
+      created_at: now,
+      invalidated_at: null,
+    };
+    const candidate: ManualReviewCandidate = {
+      ...payload.item_projection,
+      event_key: payload.event_identity.event_key,
+      origin: 'manual_lead',
+      lead_id: id,
+    };
+    const proofGuardBindings = manualVerificationSnapshotGuardBindings(id, verification);
+    const evidenceGuard = sourceSupportEvidenceSnapshotGuard(id, evidence);
+    const submitMetadata = JSON.stringify({
+      input_type: lead.input_type,
+      candidate_authorization: MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+      submit_identity_contract: 'manual_news_submit_identity_v1',
+      submit_identity_digest: authorization.submit_identity_digest,
+    });
+    const itemExtra = JSON.stringify({
+      title_zh: candidate.title,
+      ai_summary_zh: candidate.summary,
+      source_company: candidate.source,
+      event_fingerprint: payload.event_identity.event_key,
+      manual_lead: { lead_id: id, evidence_ids: evidence.map((entry) => entry.id) },
+      manual_source_support: {
+        policy_version: MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+        authorization_audit_id: authorization.audit_id,
+        verification_id: verificationId,
+        canonical_digest: proof.canonical_digest,
+      },
+    });
+
+    const active = await getActiveNewsReviewBatch(this.env, lead.review_date);
+    const confirmedCount = await this.env.DB.prepare(
+      `/* manual_source_support:manual_cap_preflight */ SELECT COUNT(*) AS count
+       FROM manual_news_leads WHERE review_date = ? AND confirmed_at IS NOT NULL`,
+    ).bind(lead.review_date).first<{ count: number }>();
+    if (Number(confirmedCount?.count || 0) >= MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT) {
+      throw new Error('manual_candidate_limit_exceeded');
+    }
+    const existingManual = await orderedVerifiedManualCandidates(this.env, lead.review_date, id);
+    if (!active) {
+      const generationRow = await this.env.DB.prepare(
+        `/* manual_source_support:generation_read */ SELECT generation
+         FROM daily_news_review_candidate_generations WHERE review_date = ? AND lineage_id = ?`,
+      ).bind(lead.review_date, lead.review_date).first<{ generation: number }>();
+      const generation = generationRow ? Number(generationRow.generation) : 0;
+      if (!Number.isSafeInteger(generation) || generation < 0) {
+        throw new Error('invalid_news_review_candidate_generation');
+      }
+      const existingProofGuard = existingManual.length
+        ? existingManual.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
+        : '1 = 1';
+      const existingProofBindings = existingManual.flatMap((entry) =>
+        manualVerificationSnapshotGuardBindings(entry.lead_id, entry.verification));
+      const sharedGate = `EXISTS (
+        SELECT 1 FROM manual_news_leads l
+        WHERE l.id = ? AND l.version = ? AND l.status = 'verifying'
+          AND l.processing_owner = ? AND l.processing_attempt = ? AND l.confirmed_at IS NULL
+      ) AND EXISTS (
+        SELECT 1 FROM manual_news_lead_audit a
+        WHERE a.id = ? AND a.lead_id = ? AND a.action = 'submit'
+          AND a.resulting_version = 1 AND a.from_status IS NULL AND a.to_status = 'submitted'
+          AND a.idempotency_key = ? AND a.metadata_json = ?
+      ) AND ${evidenceGuard.sql}
+        AND NOT EXISTS (SELECT 1 FROM manual_news_assessment_verifications v
+          WHERE v.lead_id = ? AND v.status = 'active')
+        AND NOT EXISTS (SELECT 1 FROM daily_news_review_batches b
+          WHERE b.review_date = ? AND b.lineage_id = ? AND b.is_current = 1)
+        AND (SELECT COUNT(*) FROM manual_news_leads l
+          WHERE l.review_date = ? AND l.confirmed_at IS NOT NULL) < ${MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT}
+        AND NOT EXISTS (SELECT 1 FROM manual_news_lead_audit a
+          WHERE a.action = 'confirm_candidate' AND a.mutation_nonce = ?)
+        AND COALESCE((SELECT g.generation FROM daily_news_review_candidate_generations g
+          WHERE g.review_date = ? AND g.lineage_id = ?), 0) = ?
+        AND ${existingProofGuard}
+        AND length(?) BETWEEN 1 AND 80 AND length(?) BETWEEN 1 AND 180`;
+      const sharedGateBindings: unknown[] = [
+        id, expectedVersion, owner, attempt,
+        authorization.audit_id, id, authorization.idempotency_key, submitMetadata,
+        ...evidenceGuard.bindings,
+        id,
+        lead.review_date, lead.review_date,
+        lead.review_date, eventClaimNonce,
+        lead.review_date, lead.review_date, generation,
+        ...existingProofBindings,
+        candidate.title, candidate.summary,
+      ];
+      const finalMetadata = JSON.stringify({
+        candidate_authorization: MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+        authorization_audit_id: authorization.audit_id,
+        verification_id: verificationId,
+        canonical_digest: proof.canonical_digest,
+        pending_initial_freeze: true,
+        event_key: payload.event_identity.event_key,
+        event_aliases: {},
+        rerender_enqueued: false,
+      });
+      try {
+        await this.env.DB.batch([
+        this.env.DB.prepare(
+          `/* manual_source_support:proof_insert_prefreeze */ INSERT INTO manual_news_assessment_verifications (
+             verification_id, lead_id, assessment_version, policy_version, verification_key_id,
+             canonical_digest, hmac_sha256, verification_json, processing_owner, processing_attempt,
+             creation_nonce, status, reason, created_at, invalidated_at
+           ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?, NULL
+           WHERE ${sharedGate}`,
+        ).bind(
+          verificationId, id, assessmentVersion, proof.policy_version, proof.verification_key_id,
+          proof.canonical_digest, proof.hmac_sha256, verificationJson, owner, attempt, creationNonce, now,
+          ...sharedGateBindings,
+        ),
+        this.env.DB.prepare(
+          `/* manual_source_support:item_insert_prefreeze */ INSERT INTO items (
+             id, source_type, source_id, source_ref, title, content, content_translated, author,
+             url, published_at, scraped_at, is_relevant, matched_by, lang, extra
+           ) SELECT ?, 'blog', ?, 'manual_lead', ?, ?, ?, ?, ?, ?, ?, 1, 'manual_lead', 'zh', ?
+           WHERE ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}`,
+        ).bind(
+          candidate.item_id, payload.item_projection.source_id, candidate.title, candidate.summary,
+          candidate.summary, candidate.source, candidate.url || '', payload.item_projection.published_at,
+          new Date(now).toISOString(), itemExtra, ...proofGuardBindings,
+        ),
+        this.env.DB.prepare(
+          `/* manual_source_support:lead_confirm_prefreeze */ UPDATE manual_news_leads
+           SET status = 'recommended', version = version + 1, confirmed_batch_id = NULL, confirmed_at = ?,
+             processing_owner = NULL, processing_lease_until = NULL,
+             last_mutation_kind = 'source_support_confirm', last_mutation_idempotency_key = ?,
+             last_mutation_nonce = ?, updated_at = ?
+           WHERE id = ? AND version = ? AND status = 'verifying'
+             AND processing_owner = ? AND processing_attempt = ? AND confirmed_at IS NULL
+             AND NOT EXISTS (SELECT 1 FROM daily_news_review_batches b
+               WHERE b.review_date = ? AND b.lineage_id = ? AND b.is_current = 1)
+             AND EXISTS (SELECT 1 FROM items i WHERE i.id = ? AND i.extra = ?)
+             AND ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}`,
+        ).bind(
+          now, authorization.idempotency_key, eventClaimNonce, now,
+          id, expectedVersion, owner, attempt, lead.review_date, lead.review_date,
+          candidate.item_id, itemExtra, ...proofGuardBindings,
+        ),
+        this.env.DB.prepare(
+          `/* manual_source_support:generation_advance */ INSERT INTO daily_news_review_candidate_generations
+             (review_date, lineage_id, generation, updated_at)
+           SELECT ?, ?, ?, ?
+           WHERE NOT EXISTS (SELECT 1 FROM daily_news_review_batches b
+               WHERE b.review_date = ? AND b.lineage_id = ? AND b.is_current = 1)
+             AND EXISTS (SELECT 1 FROM manual_news_leads l
+               WHERE l.id = ? AND l.version = ? AND l.status = 'recommended'
+                 AND l.confirmed_at = ? AND l.last_mutation_nonce = ?)
+             AND ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}
+           ON CONFLICT(review_date, lineage_id) DO UPDATE SET
+             generation = excluded.generation, updated_at = excluded.updated_at
+           WHERE daily_news_review_candidate_generations.generation = ?
+             AND NOT EXISTS (SELECT 1 FROM daily_news_review_batches b
+               WHERE b.review_date = ? AND b.lineage_id = ? AND b.is_current = 1)
+             AND EXISTS (SELECT 1 FROM manual_news_leads l
+               WHERE l.id = ? AND l.version = ? AND l.status = 'recommended'
+                 AND l.confirmed_at = ? AND l.last_mutation_nonce = ?)
+             AND ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}`,
+        ).bind(
+          lead.review_date, lead.review_date, generation + 1, now,
+          lead.review_date, lead.review_date,
+          id, expectedVersion + 1, now, eventClaimNonce,
+          ...proofGuardBindings,
+          generation,
+          lead.review_date, lead.review_date,
+          id, expectedVersion + 1, now, eventClaimNonce,
+          ...proofGuardBindings,
+        ),
+        this.env.DB.prepare(
+          `/* manual_source_support:final_audit_gate_prefreeze */ INSERT INTO manual_news_lead_audit (
+             lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
+             resulting_version, metadata_json, created_at
+           ) VALUES (?, 'confirm_candidate', 'verifying', 'recommended', NULL,
+             CASE WHEN EXISTS (
+               SELECT 1 FROM manual_news_leads l
+               WHERE l.id = ? AND l.version = ? AND l.status = 'recommended'
+                 AND l.confirmed_batch_id IS NULL AND l.confirmed_at = ?
+                 AND l.processing_owner IS NULL AND l.last_mutation_kind = 'source_support_confirm'
+                 AND l.last_mutation_idempotency_key = ? AND l.last_mutation_nonce = ?
+             ) AND EXISTS (SELECT 1 FROM items i
+               WHERE i.id = ? AND i.source_id = ? AND i.source_ref = 'manual_lead'
+                 AND i.title = ? AND i.content = ? AND i.extra = ?)
+             AND NOT EXISTS (SELECT 1 FROM daily_news_review_batches b
+               WHERE b.review_date = ? AND b.lineage_id = ? AND b.is_current = 1)
+             AND EXISTS (SELECT 1 FROM daily_news_review_candidate_generations g
+               WHERE g.review_date = ? AND g.lineage_id = ? AND g.generation = ?)
+             AND ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}
+             THEN ? ELSE NULL END, ?, ?, ?)` ,
+        ).bind(
+          id,
+          id, expectedVersion + 1, now, authorization.idempotency_key, eventClaimNonce,
+          candidate.item_id, payload.item_projection.source_id, candidate.title, candidate.summary, itemExtra,
+          lead.review_date, lead.review_date,
+          lead.review_date, lead.review_date, generation + 1,
+          ...proofGuardBindings,
+          eventClaimNonce, expectedVersion + 1, finalMetadata, now,
+        ),
+        ]);
+      } catch (error) {
+        const eventOwner = await confirmedManualEventOwner(
+          this.env, lead.review_date, payload.event_identity.event_key, eventClaimNonce,
+        );
+        if (eventOwner && eventOwner !== id) throw new Error('manual_candidate_event_conflict');
+        throw error;
+      }
+      const updated = await getManualNewsLead(this.env, id);
+      if (!updated || updated.version !== expectedVersion + 1
+        || updated.status !== 'recommended' || updated.confirmed_batch_id !== null
+        || updated.confirmed_at === null) throw new Error('source_support_atomic_write_failed');
+      return updated;
+    }
+    const automaticEventIdentities = await loadAutomaticNewsReviewEventIdentitySidecar(
+      this.env, active.candidates,
+    );
+    const merged = mergeAuthorizedManualNewsCandidates({
+      previous_candidates: active.candidates,
+      previous_default_selected_ids: active.default_selected_ids,
+      published_selected_ids: active.applied_selected_ids || [],
+      automatic_event_identities: automaticEventIdentities,
+      manual_candidates: [
+        ...existingManual.map((entry) => ({
+          authorization_order: entry.authorization_order,
+          candidate: entry.candidate,
+        })),
+        { authorization_order: authorization.audit_id, candidate },
+      ],
+    });
+    const batchRevision = active.batch_revision + 1;
+    const batchId = await buildNewsReviewBatchId(lead.review_date, merged.candidates, {
+      batch_revision: batchRevision,
+      supersedes_batch_id: active.batch_id,
+      lineage_id: lead.review_date,
+    });
+    const candidateIds = merged.candidates.map((entry) => entry.item_id);
+    const inheritsHumanSelection = active.human_reviewed && merged.default_selected_ids.length > 0;
+    const inheritedSelectionHash = inheritsHumanSelection
+      ? await newsReviewSelectionHash(merged.default_selected_ids)
+      : null;
+    const existingProofGuard = existingManual.length
+      ? existingManual.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
+      : '1 = 1';
+    const existingProofBindings = existingManual.flatMap((entry) =>
+      manualVerificationSnapshotGuardBindings(entry.lead_id, entry.verification));
+    const activeSnapshotGuard = `EXISTS (
+      SELECT 1 FROM daily_news_review_batches b
+      WHERE b.review_date = ? AND b.lineage_id = ? AND b.batch_id = ?
+        AND b.batch_revision = ? AND b.is_current = 1 AND b.candidate_generation = ?
+        AND b.candidate_ids = ? AND b.candidates_json = ? AND b.default_selected_ids = ?
+        AND b.applied_selected_ids IS ? AND b.selection_hash IS ?
+        AND b.edit_revision = ? AND b.publish_status = ? AND b.human_reviewed = ?
+        AND b.superseded_by IS ?
+    )`;
+    const activeSnapshotBindings: unknown[] = [
+      lead.review_date, active.lineage_id, active.batch_id, active.batch_revision,
+      active.candidate_generation, JSON.stringify(active.candidate_ids), JSON.stringify(active.candidates),
+      JSON.stringify(active.default_selected_ids),
+      active.applied_selected_ids === null ? null : JSON.stringify(active.applied_selected_ids),
+      active.selection_hash, active.edit_revision, active.publish_status,
+      active.human_reviewed ? 1 : 0, active.superseded_by,
+    ];
+    const sharedGate = `EXISTS (
+      SELECT 1 FROM manual_news_leads l
+      WHERE l.id = ? AND l.version = ? AND l.status = 'verifying'
+        AND l.processing_owner = ? AND l.processing_attempt = ? AND l.confirmed_at IS NULL
+    ) AND EXISTS (
+      SELECT 1 FROM manual_news_lead_audit a
+      WHERE a.id = ? AND a.lead_id = ? AND a.action = 'submit'
+        AND a.resulting_version = 1 AND a.from_status IS NULL AND a.to_status = 'submitted'
+        AND a.idempotency_key = ? AND a.metadata_json = ?
+    ) AND ${evidenceGuard.sql}
+      AND NOT EXISTS (SELECT 1 FROM manual_news_assessment_verifications v
+        WHERE v.lead_id = ? AND v.status = 'active')
+      AND (SELECT COUNT(*) FROM manual_news_leads l
+        WHERE l.review_date = ? AND l.confirmed_at IS NOT NULL) < ${MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT}
+      AND NOT EXISTS (SELECT 1 FROM manual_news_lead_audit a
+        WHERE a.action = 'confirm_candidate' AND a.mutation_nonce = ?)
+      AND ${activeSnapshotGuard}
+      AND EXISTS (SELECT 1 FROM daily_news_review_candidate_generations g
+        WHERE g.review_date = ? AND g.lineage_id = ? AND g.generation = ?)
+      AND ${existingProofGuard}
+      AND length(?) BETWEEN 1 AND 80 AND length(?) BETWEEN 1 AND 180`;
+    const sharedGateBindings: unknown[] = [
+      id, expectedVersion, owner, attempt,
+      authorization.audit_id, id, authorization.idempotency_key, submitMetadata,
+      ...evidenceGuard.bindings,
+      id, lead.review_date, eventClaimNonce,
+      ...activeSnapshotBindings,
+      lead.review_date, lead.review_date, active.candidate_generation,
+      ...existingProofBindings,
+      candidate.title, candidate.summary,
+    ];
+    const finalMetadata = JSON.stringify({
+      candidate_authorization: MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+      authorization_audit_id: authorization.audit_id,
+      verification_id: verificationId,
+      canonical_digest: proof.canonical_digest,
+      batch_id: batchId,
+      revision: batchRevision,
+      supersedes: active.batch_id,
+      event_key: payload.event_identity.event_key,
+      event_aliases: merged.event_aliases,
+      rerender_enqueued: false,
+    });
+    const statements = [
+      this.env.DB.prepare(
+        `/* manual_source_support:proof_insert */ INSERT INTO manual_news_assessment_verifications (
+           verification_id, lead_id, assessment_version, policy_version, verification_key_id,
+           canonical_digest, hmac_sha256, verification_json, processing_owner, processing_attempt,
+           creation_nonce, status, reason, created_at, invalidated_at
+         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?, NULL
+         WHERE ${sharedGate}`,
+      ).bind(
+        verificationId, id, assessmentVersion, proof.policy_version, proof.verification_key_id,
+        proof.canonical_digest, proof.hmac_sha256, verificationJson, owner, attempt, creationNonce, now,
+        ...sharedGateBindings,
+      ),
+      this.env.DB.prepare(
+        `/* manual_source_support:item_insert */ INSERT INTO items (
+           id, source_type, source_id, source_ref, title, content, content_translated, author,
+           url, published_at, scraped_at, is_relevant, matched_by, lang, extra
+         ) SELECT ?, 'blog', ?, 'manual_lead', ?, ?, ?, ?, ?, ?, ?, 1, 'manual_lead', 'zh', ?
+         WHERE ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}`,
+      ).bind(
+        candidate.item_id, payload.item_projection.source_id, candidate.title, candidate.summary,
+        candidate.summary, candidate.source, candidate.url || '', payload.item_projection.published_at,
+        new Date(now).toISOString(), itemExtra, ...proofGuardBindings,
+      ),
+      this.env.DB.prepare(
+        `/* manual_source_support:batch_insert */ INSERT INTO daily_news_review_batches (
+           review_date, batch_id, candidate_ids, candidates_json, default_selected_ids,
+           created_at, expires_at, batch_revision, supersedes_batch_id, revision_origin,
+           lineage_id, is_current, candidate_generation, applied_selected_ids, selection_hash,
+           edit_revision, publish_status, human_reviewed
+         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual_lead', ?, 0, ?, ?, ?, ?, ?, ?
+         WHERE ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL} AND ${activeSnapshotGuard}`,
+      ).bind(
+        lead.review_date, batchId, JSON.stringify(candidateIds), JSON.stringify(merged.candidates),
+        JSON.stringify(merged.default_selected_ids), now, newsReviewExpiresAt(lead.review_date),
+        batchRevision, active.batch_id, lead.review_date, active.candidate_generation,
+        inheritsHumanSelection ? JSON.stringify(merged.default_selected_ids) : null,
+        inheritedSelectionHash, inheritsHumanSelection ? Math.max(active.edit_revision, 1) : 0,
+        inheritsHumanSelection ? active.publish_status : 'not_requested', active.human_reviewed ? 1 : 0,
+        ...proofGuardBindings, ...activeSnapshotBindings,
+      ),
+      this.env.DB.prepare(
+        `/* manual_source_support:batch_supersede */ UPDATE daily_news_review_batches
+         SET superseded_by = ?, is_current = 0
+         WHERE review_date = ? AND lineage_id = ? AND batch_id = ? AND batch_revision = ? AND is_current = 1
+           AND EXISTS (SELECT 1 FROM daily_news_review_batches next
+             WHERE next.review_date = ? AND next.batch_id = ? AND next.is_current = 0)
+           AND ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}`,
+      ).bind(
+        batchId, lead.review_date, active.lineage_id, active.batch_id, active.batch_revision,
+        lead.review_date, batchId, ...proofGuardBindings,
+      ),
+      this.env.DB.prepare(
+        `/* manual_source_support:batch_activate */ UPDATE daily_news_review_batches
+         SET is_current = 1
+         WHERE review_date = ? AND lineage_id = ? AND batch_id = ? AND is_current = 0
+           AND EXISTS (SELECT 1 FROM daily_news_review_batches previous
+             WHERE previous.review_date = ? AND previous.batch_id = ?
+               AND previous.superseded_by = ? AND previous.is_current = 0)
+           AND ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}`,
+      ).bind(
+        lead.review_date, lead.review_date, batchId,
+        lead.review_date, active.batch_id, batchId, ...proofGuardBindings,
+      ),
+      this.env.DB.prepare(
+        `/* manual_source_support:lead_confirm */ UPDATE manual_news_leads
+         SET status = 'recommended', version = version + 1, confirmed_batch_id = ?, confirmed_at = ?,
+           processing_owner = NULL, processing_lease_until = NULL,
+           last_mutation_kind = 'source_support_confirm', last_mutation_idempotency_key = ?,
+           last_mutation_nonce = ?, updated_at = ?
+         WHERE id = ? AND version = ? AND status = 'verifying'
+           AND processing_owner = ? AND processing_attempt = ? AND confirmed_at IS NULL
+           AND EXISTS (SELECT 1 FROM daily_news_review_batches b
+             WHERE b.review_date = ? AND b.batch_id = ? AND b.is_current = 1)
+           AND ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}`,
+      ).bind(
+        batchId, now, authorization.idempotency_key, eventClaimNonce, now,
+        id, expectedVersion, owner, attempt, lead.review_date, batchId, ...proofGuardBindings,
+      ),
+      this.env.DB.prepare(
+        `/* manual_source_support:final_audit_gate */ INSERT INTO manual_news_lead_audit (
+           lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
+           resulting_version, metadata_json, created_at
+         ) VALUES (?, 'confirm_candidate', 'verifying', 'recommended', NULL,
+           CASE WHEN EXISTS (
+             SELECT 1 FROM manual_news_leads l
+             WHERE l.id = ? AND l.version = ? AND l.status = 'recommended'
+               AND l.confirmed_batch_id = ? AND l.confirmed_at = ?
+               AND l.processing_owner IS NULL AND l.last_mutation_kind = 'source_support_confirm'
+               AND l.last_mutation_idempotency_key = ? AND l.last_mutation_nonce = ?
+           ) AND EXISTS (
+             SELECT 1 FROM items i WHERE i.id = ? AND i.source_id = ? AND i.source_ref = 'manual_lead'
+               AND i.title = ? AND i.content = ? AND i.extra = ?
+           ) AND EXISTS (
+             SELECT 1 FROM daily_news_review_batches b
+             WHERE b.review_date = ? AND b.batch_id = ? AND b.batch_revision = ? AND b.is_current = 1
+           ) AND ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}
+           THEN ? ELSE NULL END, ?, ?, ?)` ,
+      ).bind(
+        id,
+        id, expectedVersion + 1, batchId, now, authorization.idempotency_key, eventClaimNonce,
+        candidate.item_id, payload.item_projection.source_id, candidate.title, candidate.summary, itemExtra,
+        lead.review_date, batchId, batchRevision,
+        ...proofGuardBindings,
+        eventClaimNonce, expectedVersion + 1, finalMetadata, now,
+      ),
+    ];
+    try {
+      await this.env.DB.batch(statements);
+    } catch (error) {
+      const eventOwner = await confirmedManualEventOwner(
+        this.env, lead.review_date, payload.event_identity.event_key, eventClaimNonce,
+      );
+      if (eventOwner && eventOwner !== id) throw new Error('manual_candidate_event_conflict');
+      throw error;
+    }
+    const updated = await getManualNewsLead(this.env, id);
+    if (!updated || updated.version !== expectedVersion + 1
+      || updated.status !== 'recommended' || updated.confirmed_batch_id !== batchId
+      || updated.confirmed_at === null) throw new Error('source_support_atomic_write_failed');
+    return updated;
   }
 
   getPaidRetrievalEpoch(id: string): Promise<number> {

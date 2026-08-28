@@ -173,6 +173,45 @@ describe('manual daily news leads API', () => {
     expect(queued).toHaveLength(1);
   });
 
+  test('passes the exact source-support authorization marker and rejects every other marker', async () => {
+    const accepted = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': 'submit-source-support' },
+      body: JSON.stringify({
+        date: '2026-08-11',
+        text: 'Anthropic 开放研究预览 MHS',
+        candidate_authorization: 'source_support_v1',
+      }),
+    }), env(), { waitUntil() {} } as never);
+
+    expect(accepted.status).toBe(202);
+    expect(submitManualNewsLead).toHaveBeenCalledWith(expect.anything(), {
+      date: '2026-08-11',
+      text: 'Anthropic 开放研究预览 MHS',
+      url: undefined,
+      note: undefined,
+      candidate_authorization: 'source_support_v1',
+    }, 'submit-source-support', expect.any(Number));
+
+    vi.mocked(submitManualNewsLead).mockClear();
+    const rejected = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': 'submit-unknown-authorization' },
+      body: JSON.stringify({
+        date: '2026-08-11',
+        text: 'Anthropic 开放研究预览 MHS',
+        candidate_authorization: 'source_support_v2',
+      }),
+    }), env(), { waitUntil() {} } as never);
+
+    expect(rejected.status).toBe(400);
+    await expect(rejected.json()).resolves.toEqual({
+      ok: false,
+      error: 'invalid_candidate_authorization',
+    });
+    expect(submitManualNewsLead).not.toHaveBeenCalled();
+  });
+
   test('uses one bounded lead DTO for submit replay and retry/confirm success or conflict', async () => {
     const cases = [
       {

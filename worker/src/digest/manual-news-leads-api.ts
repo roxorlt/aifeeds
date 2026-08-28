@@ -15,7 +15,10 @@ import {
   submitManualNewsLead,
 } from './manual-news-leads-store';
 import { newsReviewSecret } from './news-review';
-import type { ManualNewsEvidence } from './manual-news-leads';
+import {
+  MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+  type ManualNewsEvidence,
+} from './manual-news-leads';
 import type { ManualNewsLeadRecord, ManualNewsLeadSummary } from './manual-news-leads-pipeline';
 
 const MAX_BODY_BYTES = 16 * 1024;
@@ -140,6 +143,7 @@ function requestErrorResponse(error: unknown): Response {
     'trusted_research_response_secret_required', 'no_deepseek_key']
     .includes(code)) return response({ ok: false, error: 'dependency_unavailable' }, 503);
   if (code === 'invalid_json' || code === 'invalid_review_date' || code === 'lead_input_required'
+    || code === 'invalid_candidate_authorization'
     || code.startsWith('unsafe_url:')) return response({ ok: false, error: code }, 400);
   console.error('[manual-news-leads-api] internal request failure', {
     error: error instanceof Error ? error.name : typeof error,
@@ -228,11 +232,18 @@ async function handleManualNewsLeadsApiInternal(
     if (!key) return response({ ok: false, error: 'invalid_idempotency_key' }, 400);
     try {
       const body = await jsonBody(request);
+      if ('candidate_authorization' in body
+        && body.candidate_authorization !== MANUAL_NEWS_SOURCE_SUPPORT_POLICY) {
+        throw new Error('invalid_candidate_authorization');
+      }
       const result = await submitManualNewsLead(env, {
         date: body.date,
         text: body.text,
         url: body.url,
         note: body.note,
+        ...('candidate_authorization' in body
+          ? { candidate_authorization: body.candidate_authorization }
+          : {}),
       }, key, now);
       if (result.created) scheduleLeadProcessing(env, ctx, result.lead);
       return response({

@@ -2,7 +2,10 @@ import type { Env } from '../index';
 import { pushDeerMessage } from '../notifier';
 import {
   AUTOMATIC_NEWS_REVIEW_CANDIDATE_LIMIT,
+  deriveAutomaticManualEventIdentityV1,
   MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT,
+  MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+  mergeAuthorizedManualNewsCandidates,
   mergeManualLeadCandidate,
   TOTAL_NEWS_REVIEW_CANDIDATE_LIMIT,
 } from './manual-news-leads';
@@ -13,7 +16,7 @@ import {
   type FormalNewsAuthorizationResult,
 } from './news-source-policy';
 import {
-  loadVerifiedManualAssessment,
+  loadVerifiedManualCandidateProof,
   MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL,
   manualVerificationSnapshotGuardBindings,
   type PersistedManualVerificationRow,
@@ -878,10 +881,22 @@ async function verifiedManualCandidateSnapshot(
   env: Env,
   row: ConfirmedManualCandidateRow,
 ): Promise<VerifiedManualCandidateSnapshot | null> {
-  const verified = await loadVerifiedManualAssessment(env, row.id);
+  const verified = await loadVerifiedManualCandidateProof(env, row.id);
   if (!verified) return null;
+  if (verified.policy_version === MANUAL_NEWS_SOURCE_SUPPORT_POLICY) {
+    return {
+      lead_id: row.id,
+      verification: verified.record,
+      candidate: {
+        ...verified.candidate,
+        origin: 'manual_lead',
+        lead_id: row.id,
+      },
+    };
+  }
+  if (!verified.assessment) return null;
   const primaryEvidence = verified.evidence.find((item) => item.reliable) || verified.evidence[0];
-  const { assessment } = verified;
+  const assessment = verified.assessment;
   return {
     lead_id: row.id,
     verification: verified.record,
@@ -923,6 +938,30 @@ function manualCandidateLeadId(candidate: NewsReviewCandidate): string | null {
   if (candidate.item_id.startsWith('blog:manual:')) return candidate.item_id.slice('blog:manual:'.length);
   if (candidate.item_id.startsWith('manual-news:')) return candidate.item_id.slice('manual-news:'.length);
   return null;
+}
+
+export async function loadAutomaticNewsReviewEventIdentitySidecar(
+  env: Env,
+  candidates: readonly NewsReviewCandidate[],
+): Promise<Record<string, string>> {
+  const ids = [...new Set(candidates
+    .filter((candidate) => !isManualCandidateSnapshot(candidate))
+    .map((candidate) => candidate.item_id))];
+  if (!ids.length) return {};
+  if (ids.length > AUTOMATIC_NEWS_REVIEW_CANDIDATE_LIMIT) {
+    throw new Error('automatic_candidate_limit_exceeded');
+  }
+  const rows = await env.DB.prepare(
+    `/* news_review:automatic_event_identity_sidecar */ SELECT id, extra
+     FROM items WHERE id IN (${ids.map(() => '?').join(',')})`,
+  ).bind(...ids).all<{ id: string; extra: string | null }>();
+  const sidecar: Record<string, string> = {};
+  for (const row of rows.results || []) {
+    const fingerprint = parseObject(row.extra).event_fingerprint;
+    const identity = await deriveAutomaticManualEventIdentityV1(fingerprint);
+    if (identity) sidecar[row.id] = identity.event_key;
+  }
+  return sidecar;
 }
 
 export async function sanitizeCurrentNewsReviewBatch(
@@ -1162,9 +1201,24 @@ async function durableConfirmedManualCandidates(env: Env, date: string): Promise
        AND l.status IN ('recommended', 'needs_review')
      ORDER BY COALESCE((
        SELECT MIN(audit.id) FROM manual_news_lead_audit audit
-       WHERE audit.lead_id = l.id AND audit.action = 'confirm_candidate'
+       WHERE audit.lead_id = l.id AND (
+         (EXISTS (SELECT 1 FROM manual_news_assessment_verifications verification
+           WHERE verification.lead_id = l.id AND verification.status = 'active'
+             AND verification.policy_version = ?)
+          AND audit.action = 'submit'
+          AND json_extract(audit.metadata_json, '$.candidate_authorization') = ?)
+         OR
+         (NOT EXISTS (SELECT 1 FROM manual_news_assessment_verifications verification
+           WHERE verification.lead_id = l.id AND verification.status = 'active'
+             AND verification.policy_version = ?)
+          AND audit.action = 'confirm_candidate')
+       )
      ), 9223372036854775807) ASC, l.confirmed_at ASC, l.id ASC`,
-  ).bind(date).all<ConfirmedManualCandidateRow>();
+  ).bind(
+    date,
+    MANUAL_NEWS_SOURCE_SUPPORT_POLICY, MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+    MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+  ).all<ConfirmedManualCandidateRow>();
   const candidates: NewsReviewCandidate[] = [];
   for (const row of confirmed.results || []) {
     const candidate = await verifiedManualCandidate(env, row);
@@ -1202,27 +1256,29 @@ async function preserveConfirmedManualCandidates(
     }
   }
   if (manuals.length > MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT) throw new Error('manual_candidate_limit_exceeded');
+  const automaticEventIdentities = manuals.length
+    ? await loadAutomaticNewsReviewEventIdentitySidecar(
+      env, [...(previous?.candidates || []), ...submittedCandidates],
+    )
+    : {};
+  const automaticIdentity = (candidate: NewsReviewCandidate) =>
+    candidate.event_key || automaticEventIdentities[candidate.item_id] || candidate.item_id;
 
-  const defaultAliases = new Map<string, string>();
   const availableById = new Map<string, NewsReviewCandidate>();
   for (const candidate of [...(previous?.candidates || []), ...submittedCandidates]) {
     availableById.set(candidate.item_id, candidate);
-    if (isManualCandidateSnapshot(candidate)) continue;
-    const manual = manualByIdentity.get(candidate.event_key || candidate.item_id);
-    if (manual) defaultAliases.set(candidate.item_id, manual.item_id);
   }
   const publishedIds = previous ? await getPublishedNewsReviewSelection(env, date, previous) : [];
   const protectedScheduled: NewsReviewCandidate[] = [];
   const seenItemIds = new Set<string>();
   const seenEventKeys = new Set<string>();
   for (const publishedId of publishedIds) {
-    const aliasedId = defaultAliases.get(publishedId) || publishedId;
-    if (manuals.some((candidate) => candidate.item_id === aliasedId)) continue;
     const candidate = availableById.get(publishedId);
     if (!candidate || isManualCandidateSnapshot(candidate)) continue;
-    if (seenItemIds.has(candidate.item_id) || (candidate.event_key && seenEventKeys.has(candidate.event_key))) continue;
+    const eventKey = automaticIdentity(candidate);
+    if (seenItemIds.has(candidate.item_id) || seenEventKeys.has(eventKey)) continue;
     seenItemIds.add(candidate.item_id);
-    if (candidate.event_key) seenEventKeys.add(candidate.event_key);
+    seenEventKeys.add(eventKey);
     protectedScheduled.push(candidate);
   }
   if (protectedScheduled.length > AUTOMATIC_NEWS_REVIEW_CANDIDATE_LIMIT) {
@@ -1232,33 +1288,31 @@ async function preserveConfirmedManualCandidates(
   const unselectedScheduled: NewsReviewCandidate[] = [];
   for (const candidate of submittedCandidates) {
     if (isManualCandidateSnapshot(candidate)) continue;
-    const manual = manualByIdentity.get(candidate.event_key || candidate.item_id);
-    if (manual) {
-      defaultAliases.set(candidate.item_id, manual.item_id);
-      continue;
-    }
+    const eventKey = automaticIdentity(candidate);
     if (manuals.some((item) => item.item_id === candidate.item_id)) {
-      defaultAliases.set(candidate.item_id, candidate.item_id);
       continue;
     }
-    if (seenItemIds.has(candidate.item_id) || (candidate.event_key && seenEventKeys.has(candidate.event_key))) continue;
+    if (seenItemIds.has(candidate.item_id) || seenEventKeys.has(eventKey)) continue;
     seenItemIds.add(candidate.item_id);
-    if (candidate.event_key) seenEventKeys.add(candidate.event_key);
+    seenEventKeys.add(eventKey);
     unselectedScheduled.push(candidate);
   }
   const scheduledCapacity = AUTOMATIC_NEWS_REVIEW_CANDIDATE_LIMIT;
-  const candidates = [
+  const scheduled = [
     ...protectedScheduled,
     ...unselectedScheduled.slice(0, Math.max(0, scheduledCapacity - protectedScheduled.length)),
-    ...manuals,
   ];
-  if (candidates.length > TOTAL_NEWS_REVIEW_CANDIDATE_LIMIT) {
-    throw new Error('review_candidate_total_limit_exceeded');
-  }
-  const candidateIds = new Set(candidates.map((candidate) => candidate.item_id));
-  const defaultSelectedIds = [...new Set(submittedDefaultIds.map((id) => defaultAliases.get(id) || id))]
-    .filter((id) => candidateIds.has(id));
-  return { candidates, default_selected_ids: defaultSelectedIds };
+  const merged = mergeAuthorizedManualNewsCandidates({
+    previous_candidates: scheduled,
+    previous_default_selected_ids: submittedDefaultIds,
+    published_selected_ids: [],
+    automatic_event_identities: automaticEventIdentities,
+    manual_candidates: manuals.map((candidate, index) => ({
+      authorization_order: index + 1,
+      candidate,
+    })),
+  });
+  return { candidates: merged.candidates, default_selected_ids: merged.default_selected_ids };
 }
 
 export async function freezeNewsReviewBatchFromPool(
@@ -1329,9 +1383,24 @@ export async function freezeNewsReviewBatchFromPool(
        AND l.status IN ('recommended', 'needs_review')
      ORDER BY COALESCE((
        SELECT MIN(audit.id) FROM manual_news_lead_audit audit
-       WHERE audit.lead_id = l.id AND audit.action = 'confirm_candidate'
+       WHERE audit.lead_id = l.id AND (
+         (EXISTS (SELECT 1 FROM manual_news_assessment_verifications verification
+           WHERE verification.lead_id = l.id AND verification.status = 'active'
+             AND verification.policy_version = ?)
+          AND audit.action = 'submit'
+          AND json_extract(audit.metadata_json, '$.candidate_authorization') = ?)
+         OR
+         (NOT EXISTS (SELECT 1 FROM manual_news_assessment_verifications verification
+           WHERE verification.lead_id = l.id AND verification.status = 'active'
+             AND verification.policy_version = ?)
+          AND audit.action = 'confirm_candidate')
+       )
      ), 9223372036854775807) ASC, l.confirmed_at ASC, l.id ASC`,
-  ).bind(date).all<ConfirmedManualCandidateRow>();
+  ).bind(
+    date,
+    MANUAL_NEWS_SOURCE_SUPPORT_POLICY, MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+    MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+  ).all<ConfirmedManualCandidateRow>();
   for (const row of confirmed.results || []) {
     const candidate = await verifiedManualCandidate(env, row);
     if (!candidate) continue;

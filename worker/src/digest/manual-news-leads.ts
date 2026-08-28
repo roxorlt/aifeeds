@@ -203,6 +203,80 @@ export interface ManualLeadVerificationProof {
   hmac_sha256: string;
 }
 
+export interface ManualNewsEventIdentityV1 {
+  contract: 'mnev1';
+  slots: {
+    actor: string;
+    action: FactAction;
+    object: string;
+    versions: string[];
+    event_times: string[];
+    polarity: 'positive';
+    modality: 'asserted' | 'ongoing' | 'completed';
+  };
+  event_key: string;
+}
+
+export interface ManualNewsSourceSupportSelection {
+  evidence_id: string;
+  quote: string;
+}
+
+export interface ManualNewsSourceSupportVerification {
+  supported: boolean;
+  evidence_id: string;
+}
+
+export interface ManualNewsSourceSupportPayload {
+  contract: 'manual-news-source-support-proof-v1';
+  authorization: {
+    audit_id: number;
+    candidate_authorization: typeof MANUAL_NEWS_SOURCE_SUPPORT_POLICY;
+    submit_identity_digest: string;
+    idempotency_key: string;
+  };
+  input: {
+    review_date: string;
+    input_type: 'text' | 'url' | 'text_url';
+    input_text: string;
+    input_url: string;
+    note: string;
+    input_hash: string;
+    normalized_fact: string;
+  };
+  slots: ManualNewsEventIdentityV1['slots'];
+  event_identity: ManualNewsEventIdentityV1;
+  evidence: ManualNewsEvidence[];
+  selection: ManualNewsSourceSupportSelection;
+  verification: ManualNewsSourceSupportVerification;
+  item_projection: {
+    item_id: string;
+    source_id: string;
+    title: string;
+    summary: string;
+    source: string;
+    score: null;
+    url: string;
+    published_at: string | null;
+  };
+}
+
+export interface ManualNewsSourceSupportProof {
+  policy_version: typeof MANUAL_NEWS_SOURCE_SUPPORT_POLICY;
+  verification_key_id: string;
+  canonical_digest: string;
+  hmac_sha256: string;
+}
+
+export type ManualNewsSourceSupportAuthorization = ManualNewsSourceSupportPayload['authorization'];
+
+export interface ManualNewsSourceSupportPriorEvent {
+  event_key: string;
+  review_date: string;
+  origin: 'automatic' | 'manual';
+  item_id: string;
+}
+
 export type ManualFactVerificationIssueCode =
   | 'none'
   | 'unsupported'
@@ -352,6 +426,9 @@ export interface ManualReviewCandidate {
   lead_id?: string;
 }
 
+export const MANUAL_NEWS_SOURCE_SUPPORT_POLICY = 'source_support_v1' as const;
+export type ManualNewsCandidateAuthorization = typeof MANUAL_NEWS_SOURCE_SUPPORT_POLICY;
+
 function validCalendarDate(value: string): boolean {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   if (!match) return false;
@@ -372,15 +449,37 @@ export function validateManualNewsLeadInput(input: {
   text?: unknown;
   url?: unknown;
   note?: unknown;
-}): { date: string; text: string; url: string; note: string; input_type: 'text' | 'url' | 'text_url' } {
+  candidate_authorization?: unknown;
+}): {
+  date: string;
+  text: string;
+  url: string;
+  note: string;
+  input_type: 'text' | 'url' | 'text_url';
+  candidate_authorization: ManualNewsCandidateAuthorization | null;
+} {
   const date = String(input.date || '').trim();
   if (!validCalendarDate(date)) throw new Error('invalid_review_date');
   const text = compact(input.text, 4_000);
   const note = compact(input.note, 1_000);
   let url = String(input.url || '').trim();
+  const candidateAuthorization = input.candidate_authorization === undefined
+    ? null
+    : input.candidate_authorization;
+  if (candidateAuthorization !== null
+    && candidateAuthorization !== MANUAL_NEWS_SOURCE_SUPPORT_POLICY) {
+    throw new Error('invalid_candidate_authorization');
+  }
   if (!text && !url) throw new Error('lead_input_required');
   if (url) url = validatePublicHttpUrl(url).toString();
-  return { date, text, url, note, input_type: text && url ? 'text_url' : url ? 'url' : 'text' };
+  return {
+    date,
+    text,
+    url,
+    note,
+    input_type: text && url ? 'text_url' : url ? 'url' : 'text',
+    candidate_authorization: candidateAuthorization,
+  };
 }
 
 const TRANSITIONS: Record<ManualNewsLeadStatus, readonly ManualNewsLeadStatus[]> = {
@@ -6112,6 +6211,430 @@ function canonicalEvidence(evidence: readonly ManualNewsEvidence[]) {
   }));
 }
 
+const MANUAL_NEWS_SOURCE_SUPPORT_HMAC_DOMAIN = 'manual-news-source-support-hmac-v1\0';
+const MANUAL_NEWS_SOURCE_SUPPORT_INPUT_DOMAIN = 'manual-news-source-support-input-v1\0';
+const MANUAL_NEWS_SOURCE_SUPPORT_UNSAFE_UNICODE = /[\u061c\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/u;
+
+function normalizeManualNewsSourceSupportText(value: unknown): string {
+  if (typeof value !== 'string' || MANUAL_NEWS_SOURCE_SUPPORT_UNSAFE_UNICODE.test(value)) {
+    throw new Error('source_support_fact_invalid');
+  }
+  const normalized = value.normalize('NFC').replace(/\s+/gu, ' ').trim();
+  if (!normalized) throw new Error('source_support_fact_invalid');
+  return normalized;
+}
+
+function exactSourceSupportProductTarget(value: string): IndexedProductTargetTuple | null {
+  const normalized = normalizedAtomicClause(value);
+  const targets = productTargetTuples(normalized);
+  if (targets.length !== 1) return null;
+  const mask = new Array<boolean>(normalized.length).fill(false);
+  for (let index = targets[0].start; index < targets[0].end; index += 1) mask[index] = true;
+  const residue = normalized.split('').map((character, index) => mask[index] ? ' ' : character)
+    .join('').replace(/\bthe\b/giu, ' ').replace(/[\p{P}\p{S}\s]+/gu, '');
+  return residue ? null : targets[0];
+}
+
+function parsedManualNewsSourceSupportFact(value: unknown): {
+  normalized_fact: string;
+  verification_fact: string;
+  slots: ManualNewsEventIdentityV1['slots'];
+} {
+  const normalizedFact = normalizeManualNewsSourceSupportText(value);
+  const clause = normalizedFact.replace(/[。.!！?？]+$/gu, '').trim();
+  const originalActions = factActionOccurrences(clause);
+  if (originalActions.length !== 1 || originalActions[0].negated
+    || originalActions[0].modality === 'weak') {
+    throw new Error('manual_event_identity_invalid');
+  }
+  let verificationFact = clause;
+  const separatedPreview = /^(.+?)\s*(?:开放|开启|启动)\s+(.+?)\s*(?:的\s*)?研究预览$/u.exec(clause);
+  if (separatedPreview) {
+    if (originalActions[0].action !== 'open_access') throw new Error('manual_event_identity_invalid');
+    verificationFact = `${separatedPreview[1].trim()} is opening a research preview of ${separatedPreview[2].trim()}`;
+  }
+  const split = splitAtomicFactClauses(verificationFact);
+  const actions = factActionOccurrences(verificationFact);
+  if (!split.reliable || split.clauses.length !== 1 || actions.length !== 1
+    || (actions[0].action === 'preview' && !atomicActionChainReliable(verificationFact))) {
+    throw new Error('manual_event_identity_invalid');
+  }
+  const subject = leadingFactUnitSubject(verificationFact, actions[0]);
+  const actor = subject ? canonicalSubjectIdentity(subject) : null;
+  const objectSegment = actionObjectSegment(verificationFact, actions[0], actions);
+  const product = exactSourceSupportProductTarget(objectSegment);
+  const units = structuredFactUnits(verificationFact);
+  if (!actor || !product || units.length !== 1 || units[0].action !== actions[0].action
+    || !units[0].subject || canonicalSubjectIdentity(units[0].subject) !== actor
+    || units[0].negated || units[0].modality === 'weak') {
+    throw new Error('manual_event_identity_invalid');
+  }
+  const relativeTimes = relativeFactTimeSpans(verificationFact);
+  if (relativeTimes.length) throw new Error('manual_event_identity_invalid');
+  const versions = [...new Set(product.components
+    .filter((component) => component.kind === 'version')
+    .map((component) => component.value))].sort();
+  const eventTimes = [...new Set([
+    ...normalizedFactDates(verificationFact),
+    ...normalizedFactInstants(verificationFact),
+  ])].sort();
+  return {
+    normalized_fact: normalizedFact,
+    verification_fact: verificationFact,
+    slots: {
+      actor,
+      action: actions[0].action,
+      object: [product.entity, ...product.components
+        .filter((component) => component.kind !== 'version')
+        .map((component) => `${component.kind}:${component.value}`)].join('|'),
+      versions,
+      event_times: eventTimes,
+      polarity: 'positive',
+      modality: originalActions[0].modality === 'completed'
+        ? 'completed'
+        : (separatedPreview || /\b(?:is|are)\s+opening\b|正在开放/u.test(clause) ? 'ongoing' : 'asserted'),
+    },
+  };
+}
+
+export async function deriveManualEventIdentityV1(value: unknown): Promise<ManualNewsEventIdentityV1> {
+  const parsed = parsedManualNewsSourceSupportFact(value);
+  return {
+    contract: 'mnev1',
+    slots: parsed.slots,
+    event_key: `mnev1:${await sha256Hex(`mnev1\0${canonicalJson(parsed.slots)}`)}`,
+  };
+}
+
+function isCanonicalAutomaticMhsPreviewAnchor(value: string): boolean {
+  const normalized = value.normalize('NFKC').toLowerCase().replace(/\s+/gu, ' ').trim()
+    .replace(/[.!。！]+$/u, '');
+  const product = String.raw`(?:mhs|model hardware standard(?: \(mhs\))?)`;
+  return new RegExp(
+    String.raw`^anthropic (?:${product} research preview|(?:is )?opening (?:a )?research preview of (?:the )?${product})$`,
+    'u',
+  ).test(normalized);
+}
+
+export async function deriveAutomaticManualEventIdentityV1(
+  value: unknown,
+): Promise<ManualNewsEventIdentityV1 | null> {
+  const keys = [
+    'event_type', 'primary_actor', 'primary_object', 'object_family', 'object_variant',
+    'object_version', 'action', 'canonical_event', 'confidence',
+  ];
+  if (!hasExactKeys(value, keys)
+    || typeof value.event_type !== 'string' || !value.event_type.trim()
+    || typeof value.primary_actor !== 'string'
+    || typeof value.primary_object !== 'string'
+    || typeof value.object_family !== 'string'
+    || typeof value.object_variant !== 'string'
+    || typeof value.object_version !== 'string'
+    || typeof value.action !== 'string'
+    || typeof value.canonical_event !== 'string' || !value.canonical_event.trim()
+    || Array.from(value.canonical_event).length > 80
+    || typeof value.confidence !== 'number' || !Number.isFinite(value.confidence)
+    || value.confidence < 0.8 || value.confidence > 1
+    || [value.primary_actor, value.primary_object, value.object_family, value.object_variant,
+      value.object_version, value.canonical_event].some((entry) =>
+      MANUAL_NEWS_SOURCE_SUPPORT_UNSAFE_UNICODE.test(entry))) return null;
+  const actor = canonicalSubjectIdentity(value.primary_actor);
+  const product = exactSourceSupportProductTarget(value.primary_object);
+  const enumeratedAction = ({
+    preview: 'preview', launch: 'release', release: 'release', open_access: 'open_access',
+  } as const)[value.action as 'preview' | 'launch' | 'release' | 'open_access'];
+  const action = enumeratedAction || (value.action === 'other'
+    && value.event_type === 'research_result'
+    && actor === 'anthropic'
+    && product?.entity === 'mhs'
+    && product.components.length === 0
+    && isCanonicalAutomaticMhsPreviewAnchor(value.canonical_event)
+    ? 'preview'
+    : null);
+  if (!actor || !product || !action) return null;
+  const family = value.object_family.trim();
+  if (family) {
+    const familyTarget = exactSourceSupportProductTarget(family);
+    if (!familyTarget || familyTarget.entity !== product.entity || familyTarget.components.length) return null;
+  }
+  const variant = canonicalProductKey(value.object_variant);
+  if (variant && !product.components.some((component) =>
+    component.kind !== 'version' && component.value === variant)) return null;
+  if ((action === 'preview' && value.event_type !== 'research_result')
+    || (action === 'release' && !['model_release', 'product_launch'].includes(value.event_type))
+    || (action === 'open_access' && !['policy_access', 'research_result'].includes(value.event_type))) return null;
+  const canonicalEvent = value.canonical_event.normalize('NFKC').toLowerCase();
+  const actorAnchor = value.primary_actor.normalize('NFKC').trim().toLowerCase();
+  const productAnchored = PRODUCT_ENTITY_REGISTRY[product.entity]?.some((alias) =>
+    canonicalEvent.includes(alias.normalize('NFKC').toLowerCase()));
+  const actionAnchored = action === 'preview'
+    ? /\bpreview\b|预览/u.test(canonicalEvent)
+    : action === 'release'
+      ? /\b(?:launch|launches|launched|release|releases|released)\b|发布|推出/u.test(canonicalEvent)
+      : /\b(?:open|opens|opened|access)\b|开放/u.test(canonicalEvent);
+  if (!actorAnchor || !canonicalEvent.includes(actorAnchor) || !productAnchored || !actionAnchored) return null;
+  const versions = [...new Set([
+    ...product.components.filter((component) => component.kind === 'version')
+      .map((component) => component.value),
+    ...(value.object_version.trim() ? [value.object_version.normalize('NFKC').trim().toLowerCase()] : []),
+  ])].sort();
+  if (versions.some((version) => !/^[a-z0-9][a-z0-9._-]{0,47}$/u.test(version))) return null;
+  const slots: ManualNewsEventIdentityV1['slots'] = {
+    actor,
+    action,
+    object: [product.entity, ...product.components
+      .filter((component) => component.kind !== 'version')
+      .map((component) => `${component.kind}:${component.value}`)].join('|'),
+    versions,
+    event_times: [],
+    polarity: 'positive',
+    modality: action === 'preview' ? 'ongoing' : 'asserted',
+  };
+  return {
+    contract: 'mnev1',
+    slots,
+    event_key: `mnev1:${await sha256Hex(`mnev1\0${canonicalJson(slots)}`)}`,
+  };
+}
+
+function sourceSupportEvidence(input: {
+  evidence: readonly ManualNewsEvidence[];
+  evidenceId: string;
+}): ManualNewsEvidence {
+  assertManualNewsEvidenceSet(input.evidence);
+  const selected = input.evidence.find((item) => item.id === input.evidenceId);
+  if (!selected || !selected.reliable) throw new Error('source_support_evidence_invalid');
+  return selected;
+}
+
+export function validateManualNewsSourceSupportSelection(
+  raw: unknown,
+  input: { fact: string; evidence: readonly ManualNewsEvidence[] },
+): ManualNewsSourceSupportSelection {
+  if (!hasExactKeys(raw, ['evidence_id', 'quote'])
+    || typeof raw.evidence_id !== 'string' || typeof raw.quote !== 'string') {
+    throw new Error('source_support_quote_invalid');
+  }
+  const parsedFact = parsedManualNewsSourceSupportFact(input.fact);
+  const selected = sourceSupportEvidence({ evidence: input.evidence, evidenceId: raw.evidence_id });
+  if (MANUAL_NEWS_SOURCE_SUPPORT_UNSAFE_UNICODE.test(selected.excerpt)
+    || MANUAL_NEWS_SOURCE_SUPPORT_UNSAFE_UNICODE.test(raw.quote)) {
+    throw new Error('source_support_quote_invalid');
+  }
+  const excerpt = normalizeManualNewsSourceSupportText(selected.excerpt);
+  const quote = normalizeManualNewsSourceSupportText(raw.quote);
+  if (!excerpt.includes(quote)) throw new Error('source_support_quote_invalid');
+  const relationError = structuredFactUnitVerificationError(parsedFact.verification_fact, quote);
+  if (relationError !== null) throw new Error(`source_support_fact_invalid:${relationError}`);
+  return { evidence_id: selected.id, quote };
+}
+
+export function validateManualNewsSourceSupportVerification(
+  raw: unknown,
+  selection: ManualNewsSourceSupportSelection,
+): ManualNewsSourceSupportVerification {
+  if (!hasExactKeys(raw, ['supported', 'evidence_id'])
+    || typeof raw.supported !== 'boolean'
+    || raw.evidence_id !== selection.evidence_id) {
+    throw new Error('source_support_verification_invalid');
+  }
+  return { supported: raw.supported, evidence_id: raw.evidence_id as string };
+}
+
+export function buildManualNewsSourceSupportSelectionPrompt(input: {
+  fact: string;
+  evidence: readonly ManualNewsEvidence[];
+}): { system: string; user: string } {
+  const parsed = parsedManualNewsSourceSupportFact(input.fact);
+  assertManualNewsEvidenceSet(input.evidence);
+  const reliable = input.evidence.filter((item) => item.reliable);
+  return {
+    system: '核验一个原子事实。只输出且必须输出精确 JSON {"evidence_id":"...","quote":"..."}；quote 必须原样复制自同一 evidence_id 的 excerpt，不能使用标题、摘要、备注、正文尾部或跨证据拼接。没有单条 excerpt 可支持时输出空 evidence_id 和空 quote，不得补写事实。',
+    user: JSON.stringify({
+      fact: parsed.normalized_fact,
+      untrusted_evidence: reliable.map((item) => ({ evidence_id: item.id, excerpt: item.excerpt })),
+    }),
+  };
+}
+
+export function buildManualNewsSourceSupportVerificationPrompt(input: {
+  fact: string;
+  evidence: readonly ManualNewsEvidence[];
+  selection: ManualNewsSourceSupportSelection;
+}): { system: string; user: string } {
+  const selected = validateManualNewsSourceSupportSelection(input.selection, input);
+  const evidence = sourceSupportEvidence({ evidence: input.evidence, evidenceId: selected.evidence_id });
+  return {
+    system: '独立判断 selected_evidence.quote 是否在同一原子关系、主体、动作、对象、极性、模态和时间上支持 fact。只输出且必须输出精确 JSON {"supported":true|false,"evidence_id":"..."}；evidence_id 必须保持不变。',
+    user: JSON.stringify({
+      fact: parsedManualNewsSourceSupportFact(input.fact).normalized_fact,
+      selected_evidence: { evidence_id: evidence.id, excerpt: evidence.excerpt, quote: selected.quote },
+    }),
+  };
+}
+
+export async function createManualNewsSourceSupportPayload(input: {
+  lead: {
+    id: string;
+    review_date: string;
+    input_type: 'text' | 'url' | 'text_url';
+    input_text: string;
+    input_url: string;
+    note: string;
+  };
+  authorization: ManualNewsSourceSupportPayload['authorization'];
+  evidence: readonly ManualNewsEvidence[];
+  selection: ManualNewsSourceSupportSelection;
+  verification: ManualNewsSourceSupportVerification;
+}): Promise<ManualNewsSourceSupportPayload> {
+  const parsed = parsedManualNewsSourceSupportFact(input.lead.input_text);
+  const identity = await deriveManualEventIdentityV1(parsed.normalized_fact);
+  const selection = validateManualNewsSourceSupportSelection(input.selection, {
+    fact: parsed.normalized_fact, evidence: input.evidence,
+  });
+  const verification = validateManualNewsSourceSupportVerification(input.verification, selection);
+  if (!verification.supported) throw new Error('source_support_not_supported');
+  const selected = sourceSupportEvidence({ evidence: input.evidence, evidenceId: selection.evidence_id });
+  if (!Number.isSafeInteger(input.authorization.audit_id) || input.authorization.audit_id <= 0
+    || input.authorization.candidate_authorization !== MANUAL_NEWS_SOURCE_SUPPORT_POLICY
+    || !/^[a-f0-9]{64}$/.test(input.authorization.submit_identity_digest)
+    || typeof input.authorization.idempotency_key !== 'string'
+    || !input.authorization.idempotency_key || input.authorization.idempotency_key.length > 200
+    || !/^\d{4}-\d{2}-\d{2}$/.test(input.lead.review_date)
+    || !['text', 'url', 'text_url'].includes(input.lead.input_type)) {
+    throw new Error('source_support_payload_invalid');
+  }
+  const factLength = Array.from(parsed.normalized_fact).length;
+  if (factLength > 80) throw new Error('source_support_item_budget_exceeded');
+  const inputIdentity = {
+    review_date: input.lead.review_date,
+    input_type: input.lead.input_type,
+    input_text: input.lead.input_text,
+    input_url: input.lead.input_url,
+    note: input.lead.note,
+  };
+  const inputHash = await sha256Hex(`${MANUAL_NEWS_SOURCE_SUPPORT_INPUT_DOMAIN}${canonicalJson(inputIdentity)}`);
+  return {
+    contract: 'manual-news-source-support-proof-v1',
+    authorization: { ...input.authorization },
+    input: {
+      ...inputIdentity,
+      input_hash: inputHash,
+      normalized_fact: parsed.normalized_fact,
+    },
+    slots: identity.slots,
+    event_identity: identity,
+    evidence: canonicalEvidence(input.evidence) as ManualNewsEvidence[],
+    selection,
+    verification,
+    item_projection: {
+      item_id: `blog:manual:${input.lead.id}`,
+      source_id: `manual:${input.lead.id}`,
+      title: parsed.normalized_fact,
+      summary: parsed.normalized_fact,
+      source: selected.publisher,
+      score: null,
+      url: selected.url,
+      published_at: selected.published_at,
+    },
+  };
+}
+
+async function validatedManualNewsSourceSupportPayload(
+  leadId: string,
+  payload: ManualNewsSourceSupportPayload,
+): Promise<ManualNewsSourceSupportPayload> {
+  if (!hasExactKeys(payload, [
+    'contract', 'authorization', 'input', 'slots', 'event_identity', 'evidence',
+    'selection', 'verification', 'item_projection',
+  ]) || payload.contract !== 'manual-news-source-support-proof-v1') {
+    throw new Error('source_support_payload_invalid');
+  }
+  const rebuilt = await createManualNewsSourceSupportPayload({
+    lead: {
+      id: leadId,
+      review_date: payload.input.review_date,
+      input_type: payload.input.input_type,
+      input_text: payload.input.input_text,
+      input_url: payload.input.input_url,
+      note: payload.input.note,
+    },
+    authorization: payload.authorization,
+    evidence: payload.evidence,
+    selection: payload.selection,
+    verification: payload.verification,
+  });
+  if (canonicalJson(rebuilt) !== canonicalJson(payload)) {
+    throw new Error('source_support_payload_invalid');
+  }
+  return rebuilt;
+}
+
+export async function createManualNewsSourceSupportProof(
+  input: { lead_id: string; assessment_version: number; payload: ManualNewsSourceSupportPayload },
+  verificationKeys: ManualNewsKeyring,
+  responseKeys: ManualNewsKeyring,
+): Promise<ManualNewsSourceSupportProof> {
+  const payload = await validatedManualNewsSourceSupportPayload(input.lead_id, input.payload);
+  await assertManualNewsEvidenceBodyDigests(payload.evidence, responseKeys);
+  const verificationSecret = verificationKeys.keys.get(verificationKeys.currentKeyId);
+  if (!verificationSecret) throw new Error('manual_news_verification_keys_unavailable');
+  if (!Number.isSafeInteger(input.assessment_version) || input.assessment_version <= 0) {
+    throw new Error('invalid_assessment_version');
+  }
+  const canonicalDigest = await sha256Hex(
+    `${MANUAL_NEWS_SOURCE_SUPPORT_HMAC_DOMAIN}${canonicalJson(payload)}`,
+  );
+  const hmacPayload = `${MANUAL_NEWS_SOURCE_SUPPORT_HMAC_DOMAIN}${canonicalJson({
+    policy_version: MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+    verification_key_id: verificationKeys.currentKeyId,
+    lead_id: input.lead_id,
+    assessment_version: input.assessment_version,
+    canonical_digest: canonicalDigest,
+  })}`;
+  return {
+    policy_version: MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+    verification_key_id: verificationKeys.currentKeyId,
+    canonical_digest: canonicalDigest,
+    hmac_sha256: await hmacSha256Hex(verificationSecret, hmacPayload),
+  };
+}
+
+export async function isCurrentManualNewsSourceSupportProof(
+  input: { lead_id: string; assessment_version: number; payload: ManualNewsSourceSupportPayload },
+  proof: unknown,
+  verificationKeys: ManualNewsKeyring,
+  responseKeys: ManualNewsKeyring,
+): Promise<boolean> {
+  if (!hasExactKeys(proof, ['policy_version', 'verification_key_id', 'canonical_digest', 'hmac_sha256'])
+    || proof.policy_version !== MANUAL_NEWS_SOURCE_SUPPORT_POLICY
+    || typeof proof.verification_key_id !== 'string'
+    || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(proof.verification_key_id)
+    || typeof proof.canonical_digest !== 'string' || !/^[a-f0-9]{64}$/.test(proof.canonical_digest)
+    || typeof proof.hmac_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(proof.hmac_sha256)) return false;
+  const verificationSecret = verificationKeys.keys.get(proof.verification_key_id);
+  if (!verificationSecret) return false;
+  try {
+    const payload = await validatedManualNewsSourceSupportPayload(input.lead_id, input.payload);
+    await assertManualNewsEvidenceBodyDigests(payload.evidence, responseKeys);
+    const canonicalDigest = await sha256Hex(
+      `${MANUAL_NEWS_SOURCE_SUPPORT_HMAC_DOMAIN}${canonicalJson(payload)}`,
+    );
+    const hmacPayload = `${MANUAL_NEWS_SOURCE_SUPPORT_HMAC_DOMAIN}${canonicalJson({
+      policy_version: MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+      verification_key_id: proof.verification_key_id,
+      lead_id: input.lead_id,
+      assessment_version: input.assessment_version,
+      canonical_digest: canonicalDigest,
+    })}`;
+    const expectedHmac = await hmacSha256Hex(verificationSecret, hmacPayload);
+    return constantTimeHexEqual(proof.canonical_digest, canonicalDigest)
+      && constantTimeHexEqual(proof.hmac_sha256, expectedHmac);
+  } catch {
+    return false;
+  }
+}
+
 const MANUAL_NEWS_PROVENANCE_REQUESTED_LIMITS = {
   source_bytes: 8_388_608,
   extracted_text_bytes: 2_097_152,
@@ -7213,6 +7736,81 @@ export function mergeManualLeadCandidate(input: {
     default_selected_ids: defaultSelected,
     published_selected_ids: publishedSelected,
     evicted_ids: [...new Set(evicted)],
+    event_aliases: eventAliases,
+    enqueue_rerender: false,
+  };
+}
+
+export function mergeAuthorizedManualNewsCandidates(input: {
+  previous_candidates: readonly ManualReviewCandidate[];
+  previous_default_selected_ids: readonly string[];
+  published_selected_ids: readonly string[];
+  automatic_event_identities?: Readonly<Record<string, string>>;
+  manual_candidates: ReadonlyArray<{
+    authorization_order: number;
+    candidate: ManualReviewCandidate;
+  }>;
+}): {
+  candidates: ManualReviewCandidate[];
+  default_selected_ids: string[];
+  published_selected_ids: string[];
+  evicted_ids: string[];
+  event_aliases: Record<string, string>;
+  enqueue_rerender: false;
+} {
+  const manuals = [...input.manual_candidates].sort((left, right) =>
+    left.authorization_order - right.authorization_order
+    || left.candidate.item_id.localeCompare(right.candidate.item_id));
+  if (manuals.some((entry) => !Number.isSafeInteger(entry.authorization_order)
+    || entry.authorization_order <= 0 || !isManualReviewCandidate(entry.candidate))) {
+    throw new Error('manual_candidate_authorization_order_invalid');
+  }
+  const manualIds = new Set<string>();
+  const manualByEvent = new Map<string, ManualReviewCandidate>();
+  for (const { candidate } of manuals) {
+    if (manualIds.has(candidate.item_id)) throw new Error('manual_candidate_identity_conflict');
+    manualIds.add(candidate.item_id);
+    if (!candidate.event_key) continue;
+    if (manualByEvent.has(candidate.event_key)) throw new Error('manual_candidate_event_conflict');
+    manualByEvent.set(candidate.event_key, candidate);
+  }
+  const automatic = input.previous_candidates.filter((candidate) => !isManualReviewCandidate(candidate));
+  if (automatic.length > AUTOMATIC_NEWS_REVIEW_CANDIDATE_LIMIT) {
+    throw new Error('automatic_candidate_limit_exceeded');
+  }
+  const placedManualIds = new Set<string>();
+  const eventAliases: Record<string, string> = {};
+  const candidates: ManualReviewCandidate[] = automatic.map((candidate) => {
+    const eventKey = candidate.event_key || input.automatic_event_identities?.[candidate.item_id];
+    const replacement = eventKey ? manualByEvent.get(eventKey) : undefined;
+    if (!replacement) return candidate;
+    if (placedManualIds.has(replacement.item_id)) throw new Error('automatic_candidate_event_collision');
+    placedManualIds.add(replacement.item_id);
+    eventAliases[candidate.item_id] = replacement.item_id;
+    return replacement;
+  });
+  for (const { candidate } of manuals) {
+    if (!placedManualIds.has(candidate.item_id)) candidates.push(candidate);
+  }
+  if (manuals.length > MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT) {
+    throw new Error('manual_candidate_limit_exceeded');
+  }
+  if (candidates.length > TOTAL_NEWS_REVIEW_CANDIDATE_LIMIT) {
+    throw new Error('review_candidate_total_limit_exceeded');
+  }
+  const candidateIds = new Set(candidates.map((candidate) => candidate.item_id));
+  const rewriteSelection = (ids: readonly string[]) => [...new Set(
+    ids.map((id) => eventAliases[id] || id),
+  )].filter((id) => candidateIds.has(id)).slice(0, 5);
+  const publishedSelected = rewriteSelection(input.published_selected_ids);
+  const defaultSelected = input.published_selected_ids.length
+    ? publishedSelected
+    : rewriteSelection(input.previous_default_selected_ids);
+  return {
+    candidates,
+    default_selected_ids: defaultSelected,
+    published_selected_ids: publishedSelected,
+    evicted_ids: Object.keys(eventAliases),
     event_aliases: eventAliases,
     enqueue_rerender: false,
   };

@@ -17,6 +17,12 @@ class SqliteD1 {
         source_type TEXT NOT NULL,
         source_id TEXT,
         source_ref TEXT,
+        title TEXT,
+        content TEXT,
+        content_translated TEXT,
+        author TEXT,
+        url TEXT,
+        published_at TEXT,
         extra TEXT,
         deleted_at TEXT
       );
