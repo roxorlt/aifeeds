@@ -2613,6 +2613,202 @@ describe('manual lead D1-backed dedupe', () => {
     });
   });
 
+  test('list-triggered stale recovery reuses the explicit retry epoch after a terminal paid retrieval crash', async () => {
+    const state = fixture('failed', 7);
+    state.db.sqlite.prepare(
+      'UPDATE manual_news_leads SET input_url = ? WHERE id = ?',
+    ).run('https://mp.weixin.qq.com/s/a0kOMCJ78T8GlQ8dJ_fUDw', state.leadId);
+    const retried = await retryManualNewsLead(
+      state.env, state.leadId, 7, 'retry-terminal-crash-window', 100,
+    );
+    expect(retried).toMatchObject({
+      ok: true,
+      changed: true,
+      lead: { status: 'validating', version: 8 },
+    });
+    const retrievalEpoch = Number((state.db.sqlite.prepare(
+      `SELECT id FROM manual_news_lead_audit
+       WHERE lead_id = ? AND action = 'retry' ORDER BY id DESC LIMIT 1`,
+    ).get(state.leadId) as { id: number }).id);
+    expect(retrievalEpoch).toBeGreaterThan(0);
+
+    const initialOwner = `manual-news-${state.leadId}-v8`;
+    const initialStore = new D1ManualLeadProcessingStore(state.env, initialOwner, 1);
+    await initialStore.transition(state.leadId, 'validating', 'researching');
+    await initialStore.transition(state.leadId, 'researching', 'extracting');
+    state.db.sqlite.prepare(
+      'UPDATE manual_news_leads SET processing_lease_until = 10 WHERE id = ?',
+    ).run(state.leadId);
+
+    // The paid provider has already exhausted generation N. CF crashed before it
+    // could persist needs_review, leaving the lead in extracting with an expired lease.
+    let upstreamCalls = 1;
+    const terminalGenerations = new Set([retrievalEpoch]);
+    const requestedGenerations: number[] = [];
+    const workflowCreates: Array<{ id: string; params: { lead_id: string; processing_owner: string } }> = [];
+    const pending: Promise<unknown>[] = [];
+    state.db.sqlite.exec(`CREATE TABLE daily_news_review_batches (
+      review_date TEXT NOT NULL, batch_id TEXT NOT NULL, lineage_id TEXT NOT NULL,
+      is_current INTEGER NOT NULL, created_at INTEGER NOT NULL
+    )`);
+    const apiEnv = {
+      ...state.env,
+      DAILY_NEWS_REVIEW_SECRET: 'shared-secret',
+      DAILY_NEWS_REVIEW_ENABLED: '1',
+      MANUAL_NEWS_LEAD_WORKFLOW: {
+        create: async (input: { id: string; params: { lead_id: string; processing_owner: string } }) => {
+          workflowCreates.push(input);
+          return { id: input.id };
+        },
+      },
+      MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
+      MANUAL_NEWS_RESEARCH_TOKEN: 'test-research-token',
+      DEEPSEEK_API_KEY: 'test-key',
+    } as Env;
+
+    const listed = await handleManualNewsLeadsApi(new Request(
+      'https://api.example.test/api/digest/daily-news-leads?date=2026-08-11',
+      { headers: { Authorization: 'Bearer shared-secret' } },
+    ), apiEnv, {
+      waitUntil(promise: Promise<unknown>) { pending.push(promise); },
+    } as never, 1_000_000);
+    expect(listed.status).toBe(200);
+    await Promise.all(pending);
+    expect(workflowCreates).toHaveLength(1);
+    expect(await getManualNewsLead(state.env, state.leadId)).toMatchObject({
+      status: 'validating',
+      version: 11,
+      processing_owner: workflowCreates[0].params.processing_owner,
+    });
+
+    const recoveredOwner = workflowCreates[0].params.processing_owner;
+    const processingAttempt = await claimManualNewsLeadProcessing(
+      state.env, state.leadId, recoveredOwner, 1_000_001,
+    );
+    expect(processingAttempt).not.toBeNull();
+    await processManualNewsLead(
+      state.leadId,
+      new D1ManualLeadProcessingStore(state.env, recoveredOwner, processingAttempt!),
+      {
+        search: async () => [],
+        fetch: async (_url, context) => {
+          const generation = Number(context?.retrieval_generation);
+          requestedGenerations.push(generation);
+          if (!terminalGenerations.has(generation)) upstreamCalls += 1;
+          throw new Error('provider_billing_retry_exhausted');
+        },
+        extract: async () => { throw new Error('unexpected_extract'); },
+        assess: async () => { throw new Error('unexpected_assess'); },
+        verify: async () => { throw new Error('unexpected_verify'); },
+      },
+    );
+
+    expect(requestedGenerations).toEqual([retrievalEpoch]);
+    expect(upstreamCalls).toBe(1);
+    expect(await getManualNewsLead(state.env, state.leadId)).toMatchObject({
+      status: 'needs_review', error_code: 'evidence_insufficient',
+    });
+  });
+
+  test('paid retrieval epoch changes only after a committed explicit retry audit', async () => {
+    const state = fixture('failed', 7);
+    const epochStore = new D1ManualLeadProcessingStore(state.env);
+
+    expect(await epochStore.getPaidRetrievalEpoch(state.leadId)).toBe(0);
+
+    const failedCas = await retryManualNewsLead(
+      state.env, state.leadId, 6, 'retry-epoch-failed-cas', 50,
+    );
+    expect(failedCas).toMatchObject({ ok: false, error: 'lead_version_conflict' });
+    expect(await epochStore.getPaidRetrievalEpoch(state.leadId)).toBe(0);
+
+    state.db.failAudit = true;
+    await expect(retryManualNewsLead(
+      state.env, state.leadId, 7, 'retry-epoch-failed-audit', 60,
+    )).rejects.toThrow('injected_audit_failure');
+    state.db.failAudit = false;
+    expect(await epochStore.getPaidRetrievalEpoch(state.leadId)).toBe(0);
+
+    const first = await retryManualNewsLead(
+      state.env, state.leadId, 7, 'retry-epoch-first', 100,
+    );
+    expect(first).toMatchObject({ ok: true, changed: true, lead: { version: 8 } });
+    const firstAuditId = Number((state.db.sqlite.prepare(
+      `SELECT id FROM manual_news_lead_audit
+       WHERE lead_id = ? AND action = 'retry' ORDER BY id DESC LIMIT 1`,
+    ).get(state.leadId) as { id: number }).id);
+    expect(firstAuditId).not.toBe(8);
+    expect(await epochStore.getPaidRetrievalEpoch(state.leadId)).toBe(firstAuditId);
+
+    const replay = await retryManualNewsLead(
+      state.env, state.leadId, 7, 'retry-epoch-first', 110,
+    );
+    expect(replay).toMatchObject({ ok: true, changed: false });
+    expect(await epochStore.getPaidRetrievalEpoch(state.leadId)).toBe(firstAuditId);
+
+    const firstOwner = `manual-news-${state.leadId}-v8`;
+    const processingAttempt = await claimManualNewsLeadProcessing(
+      state.env, state.leadId, firstOwner, 120,
+    );
+    expect(processingAttempt).toBe(2);
+    expect(await epochStore.getPaidRetrievalEpoch(state.leadId)).toBe(firstAuditId);
+
+    await new D1ManualLeadProcessingStore(state.env, firstOwner, processingAttempt!)
+      .transition(state.leadId, 'validating', 'researching');
+    expect((await getManualNewsLead(state.env, state.leadId))?.version).toBe(9);
+    expect(await epochStore.getPaidRetrievalEpoch(state.leadId)).toBe(firstAuditId);
+
+    state.db.sqlite.prepare(
+      'UPDATE manual_news_leads SET processing_lease_until = 10 WHERE id = ?',
+    ).run(state.leadId);
+    await expect(recoverStaleManualNewsLeads(state.env, '2026-08-11', 1_000_000))
+      .resolves.toHaveLength(1);
+    expect(await epochStore.getPaidRetrievalEpoch(state.leadId)).toBe(firstAuditId);
+    state.db.sqlite.prepare(
+      'UPDATE manual_news_leads SET processing_lease_until = 10 WHERE id = ?',
+    ).run(state.leadId);
+    await expect(recoverStaleManualNewsLeads(state.env, '2026-08-11', 2_000_000))
+      .resolves.toHaveLength(1);
+    expect(await epochStore.getPaidRetrievalEpoch(state.leadId)).toBe(firstAuditId);
+
+    const recovered = await getManualNewsLead(state.env, state.leadId);
+    expect(recovered).not.toBeNull();
+    const recoveredAttempt = await claimManualNewsLeadProcessing(
+      state.env, state.leadId, recovered!.processing_owner!, 2_000_001,
+    );
+    expect(recoveredAttempt).toBe(3);
+    expect(await failManualNewsLeadAfterExhaustion(
+      state.env, state.leadId, recovered!.processing_owner!, recoveredAttempt!,
+      new Error('automatic workflow exhaustion'), 2_000_002,
+    )).toBe(true);
+    const failed = await getManualNewsLead(state.env, state.leadId);
+    expect(failed).toMatchObject({ status: 'failed' });
+    expect(await epochStore.getPaidRetrievalEpoch(state.leadId)).toBe(firstAuditId);
+
+    const staleExpectedVersion = failed!.version - 1;
+    const staleRetry = await retryManualNewsLead(
+      state.env, state.leadId, staleExpectedVersion, 'retry-epoch-stale-cas', 2_000_003,
+    );
+    expect(staleRetry).toMatchObject({ ok: false, error: 'lead_version_conflict' });
+    expect(await epochStore.getPaidRetrievalEpoch(state.leadId)).toBe(firstAuditId);
+
+    const second = await retryManualNewsLead(
+      state.env, state.leadId, failed!.version, 'retry-epoch-second', 2_000_004,
+    );
+    expect(second).toMatchObject({ ok: true, changed: true });
+    const secondAuditId = Number((state.db.sqlite.prepare(
+      `SELECT id FROM manual_news_lead_audit
+       WHERE lead_id = ? AND action = 'retry' ORDER BY id DESC LIMIT 1`,
+    ).get(state.leadId) as { id: number }).id);
+    expect(secondAuditId).toBeGreaterThan(firstAuditId);
+    expect(await epochStore.getPaidRetrievalEpoch(state.leadId)).toBe(secondAuditId);
+
+    const epochQuery = state.db.preparedSql.find((sql) => sql.includes('manual_audit:paid_retrieval_epoch')) || '';
+    expect(epochQuery).toMatch(/action\s*=\s*'retry'/i);
+    expect(epochQuery).toMatch(/LIMIT\s+1\b/i);
+    expect(epochQuery).not.toMatch(/COUNT\s*\(/i);
+  });
+
   test('retry replay remains idempotent after workflow transitions overwrite the current mutation marker', async () => {
     const state = fixture('failed', 7);
     const key = 'retry-survives-workflow';

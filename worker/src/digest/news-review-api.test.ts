@@ -135,6 +135,43 @@ describe('daily news review API', () => {
     });
   });
 
+  test('GET round-trips automatic ten plus three manual candidates without truncation', async () => {
+    const manuals = Array.from({ length: 3 }, (_, index) => ({
+      item_id: `blog:manual:ml-${index + 1}`,
+      title: `人工候选${index + 1}`,
+      summary: '人工核验摘要',
+      source: '机器之心',
+      score: 90 - index,
+      event_key: `manual-event-${index + 1}`,
+      origin: 'manual_lead' as const,
+      lead_id: `ml-${index + 1}`,
+    }));
+    const expanded = {
+      ...batch,
+      candidate_ids: [...batch.candidate_ids, ...manuals.map((item) => item.item_id)],
+      candidates: [...batch.candidates, ...manuals],
+      batch_revision: 4,
+      lineage_id: batch.review_date,
+      is_current: true,
+    };
+    vi.mocked(getNewsReviewBatch).mockResolvedValue(expanded as never);
+    vi.mocked(getActiveNewsReviewBatch).mockResolvedValue(expanded as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
+      batch: expanded, changed: false, dropped_ids: [],
+    } as never);
+
+    const response = await handleDailyNewsReviewApi(
+      request('GET'), env(), Date.parse('2026-07-30T08:00:00Z'),
+    );
+    const payload = await response.json<Record<string, unknown>>();
+
+    expect(response.status).toBe(200);
+    expect(payload.candidates).toHaveLength(13);
+    expect((payload.candidates as Array<{ item_id: string }>).map((item) => item.item_id))
+      .toEqual(expanded.candidate_ids);
+    expect(payload.default_selected_ids).toEqual(batch.default_selected_ids);
+  });
+
   test('active review response performs a final current projection and fails closed after mutation', async () => {
     vi.mocked(authorizeFormalNewsSet).mockImplementation(async (_env, _date, ids, purpose) => ({
       allowed_ids: purpose === 'review_api_final_projection'

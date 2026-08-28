@@ -18,6 +18,23 @@ const PROOF_EXCERPT_MAX_UTF8_BYTES = 12_000;
 const ARTICLE_TEXT_V2_MAX_SKEW_MS = 5 * 60_000;
 const ARTICLE_TEXT_V2_MAX_FUTURE_MS = 30_000;
 const ARTICLE_TEXT_V2_MIN_CHROMIUM_MAJOR = 149;
+const PROVIDER_RETRIEVAL_PROTOCOL = 'provider_retrieval_v1';
+const REDFOX_PROVIDER_ID = 'redfox_gzh_article_content_v1';
+const PROVIDER_RESPONSE_HMAC_CONTRACT = 'hmac-sha256-domain-separated-canonical-json-all-fields-except-response_hmac-v1';
+const PROVIDER_HMAC_DOMAIN = 'aifeeds-provider-retrieval-v1\0';
+const REDFOX_OPERATION_DOMAIN = 'aifeeds-redfox-operation-v1\0';
+const MANUAL_NEWS_RETRIEVAL_OPERATION_DOMAIN = 'aifeeds-manual-news-retrieval-operation-v1\0';
+const REDFOX_IDENTITY_ASSERTION_CONTRACT = 'provider_asserted_wechat_article_identity_v1';
+const REDFOX_IDENTITY_ASSERTION_ASSURANCE = 'provider_assertion_not_independently_verified';
+const PROVIDER_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
+const PROVIDER_IMAGE_MAX_COUNT = 64;
+const FROZEN_REDFOX_SHORT_ASSERTIONS = new Map([
+  ['https://mp.weixin.qq.com/s/a0kOMCJ78T8GlQ8dJ_fUDw', {
+    canonical_url: 'https://mp.weixin.qq.com/s?__biz=MzA3MzI4MjgzMw==&mid=2651052842&idx=1&sn=b51e7dcdefdc1d5e9bd54f005456bc19',
+    publisher: '机器之心',
+    wechat_biz: 'MzA3MzI4MjgzMw==',
+  }],
+]);
 
 const ALLOWED_SOURCE_TYPES = new Set([
   'text/html', 'application/xhtml+xml', 'text/plain', 'application/json', 'application/pdf',
@@ -44,12 +61,13 @@ export interface TrustedResearchService {
 export interface PublicDocument {
   url: string;
   content_type: string;
-  extraction: 'html' | 'article_text' | 'text' | 'json' | 'pdf_text';
+  extraction: 'html' | 'article_text' | 'provider_article_text' | 'text' | 'json' | 'pdf_text';
   excerpt: string;
   redirects: number;
-  fetch_audit: DocumentFetchAudit;
+  fetch_audit: ManualNewsFetchAudit;
   response_key_id: string;
   title?: string;
+  publisher?: string;
   published_at?: string | null;
   selection?: 'article' | 'main';
   content_complete?: true;
@@ -77,7 +95,7 @@ export interface DocumentExtractionLimits {
 export interface DocumentFetchAudit {
   hops: FetchAuditHop[];
   source_content_type: string;
-  extraction: PublicDocument['extraction'];
+  extraction: 'html' | 'article_text' | 'text' | 'json' | 'pdf_text';
   requested_limits: DocumentExtractionLimits;
   applied_limits: DocumentExtractionLimits;
   actual_sizes: DocumentExtractionLimits;
@@ -107,6 +125,56 @@ export interface DocumentFetchAudit {
   };
   response_hmac?: string;
 }
+
+export interface ProviderRetrievalAudit {
+  retrieval_type: 'provider';
+  provider_id: 'redfox_gzh_article_content_v1';
+  operation_id: string;
+  retrieval_operation_id?: string;
+  retrieval_generation?: number;
+  input_url: string;
+  canonical_original_url: string;
+  identity_assertion: {
+    contract: 'provider_asserted_wechat_article_identity_v1';
+    requested_url: string;
+    requested_short_url: string | null;
+    provider_asserted_source_url: string;
+    provider_asserted_canonical_url: string;
+    provider_asserted_publisher: string;
+    provider_asserted_wechat_biz: string;
+    assurance: 'provider_assertion_not_independently_verified';
+  };
+  title: string;
+  publisher: string;
+  published_at: string;
+  provider_retrieved_at: string;
+  cache_status: 'miss' | 'hit' | 'coalesced' | 'durable';
+  limits: {
+    provider_response_bytes: number;
+    extracted_text_bytes: number;
+    extracted_text_characters: number;
+    image_count: number;
+  };
+  actual_sizes: {
+    provider_response_bytes: number;
+    extracted_text_bytes: number;
+    extracted_text_characters: number;
+    image_count: number;
+  };
+  protocol_version: 'provider_retrieval_v1';
+  request_nonce: string;
+  request_timestamp: string;
+  response_created_at: string;
+  body_sha256: string;
+  response_profile: 'proof_excerpt_v1';
+  response_hmac_contract: 'hmac-sha256-domain-separated-canonical-json-all-fields-except-response_hmac-v1';
+  proof_excerpt: NonNullable<DocumentFetchAudit['proof_excerpt']>;
+  response_hmac: string;
+  /** Direct-fetch-only metadata is intentionally absent from provider evidence. */
+  document?: never;
+}
+
+export type ManualNewsFetchAudit = DocumentFetchAudit | ProviderRetrievalAudit;
 
 const PROOF_EXCERPT_WHITESPACE =
   /[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/gu;
@@ -276,6 +344,37 @@ export function validatePublicHttpUrl(input: string): URL {
   return url;
 }
 
+export function normalizeWeChatArticleUrl(input: string): string {
+  let url: URL;
+  try { url = new URL(String(input || '').trim()); } catch { throw new Error('unsafe_gateway_provider:input_url'); }
+  if (url.protocol !== 'https:' || url.hostname !== 'mp.weixin.qq.com'
+    || url.username || url.password || url.port) {
+    throw new Error('unsafe_gateway_provider:input_url');
+  }
+  if (/^\/s\/[A-Za-z0-9_-]{10,256}$/.test(url.pathname)) {
+    if (url.search) throw new Error('unsafe_gateway_provider:input_url');
+    return `https://mp.weixin.qq.com${url.pathname}`;
+  }
+  if (url.pathname !== '/s') throw new Error('unsafe_gateway_provider:input_url');
+  const entries = [...url.searchParams.entries()];
+  const expectedKeys = ['__biz', 'mid', 'idx', 'sn'];
+  if (entries.length !== expectedKeys.length
+    || expectedKeys.some((key) => entries.filter(([candidate]) => candidate === key).length !== 1)
+    || entries.some(([key]) => !expectedKeys.includes(key))) {
+    throw new Error('unsafe_gateway_provider:input_url');
+  }
+  const biz = url.searchParams.get('__biz') || '';
+  const mid = url.searchParams.get('mid') || '';
+  const idx = url.searchParams.get('idx') || '';
+  const sn = url.searchParams.get('sn') || '';
+  if (!/^[A-Za-z0-9_+/-]{4,256}={0,2}$/.test(biz)
+    || !/^\d{1,32}$/.test(mid) || !/^\d{1,4}$/.test(idx) || !/^[a-fA-F0-9]{16,128}$/.test(sn)) {
+    throw new Error('unsafe_gateway_provider:input_url');
+  }
+  return `https://mp.weixin.qq.com/s?__biz=${encodeURIComponent(biz).replace(/%3D/gi, '=')}`
+    + `&mid=${mid}&idx=${idx}&sn=${sn.toLowerCase()}`;
+}
+
 function trustedEndpoint(service: TrustedResearchService | undefined, path: '/v1/document' | '/v1/search') {
   if (!service) throw new Error('trusted_research_service_required');
   let origin: URL;
@@ -335,9 +434,16 @@ async function sha256Hex(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-async function verifyResponseHmac(secret: string, unsigned: Record<string, unknown>, supplied: string): Promise<boolean> {
+async function verifyResponseHmac(
+  secret: string,
+  unsigned: Record<string, unknown>,
+  supplied: string,
+  domain = '',
+): Promise<boolean> {
   const key = await crypto.subtle.importKey('raw', hexBytes(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const signature = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(canonicalJson(unsigned))));
+  const signature = new Uint8Array(await crypto.subtle.sign(
+    'HMAC', key, new TextEncoder().encode(`${domain}${canonicalJson(unsigned)}`),
+  ));
   return constantTimeBytesEqual(signature, hexBytes(supplied));
 }
 
@@ -349,6 +455,16 @@ export async function verifyDocumentFetchAuditResponseHmac(
     || !/^[a-f0-9]{64}$/.test(audit.response_hmac || '')) return false;
   const { response_hmac: suppliedHmac, ...unsignedAudit } = audit;
   return verifyResponseHmac(responseSecret, unsignedAudit, suppliedHmac!);
+}
+
+export async function verifyProviderRetrievalAuditResponseHmac(
+  audit: ProviderRetrievalAudit,
+  responseSecret: string,
+): Promise<boolean> {
+  if (!/^[a-f0-9]{64}$/.test(responseSecret)
+    || !/^[a-f0-9]{64}$/.test(audit.response_hmac || '')) return false;
+  const { response_hmac: suppliedHmac, ...unsignedAudit } = audit;
+  return verifyResponseHmac(responseSecret, unsignedAudit, suppliedHmac, PROVIDER_HMAC_DOMAIN);
 }
 
 function strictObject(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
@@ -378,17 +494,266 @@ function sameLimits(left: DocumentExtractionLimits, right: DocumentExtractionLim
     && left.extracted_text_characters === right.extracted_text_characters;
 }
 
+function canonicalProviderPublishedAt(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\+08:00$/.exec(value);
+  if (!match) return null;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day
+    || Number(hourText) > 23 || Number(minuteText) > 59 || Number(secondText) > 59) return null;
+  return value;
+}
+
+function providerOperationIdentity(
+  inputUrl: string,
+  retrievalOperationId?: string,
+  retrievalGeneration?: number,
+) {
+  return {
+    extraction_mode: ARTICLE_TEXT_PROTOCOL_V2,
+    normalized_url: inputUrl,
+    response_profile: PROOF_EXCERPT_RESPONSE_PROFILE,
+    ...(retrievalOperationId === undefined ? {} : {
+      retrieval_operation_id: retrievalOperationId,
+      retrieval_generation: retrievalGeneration,
+    }),
+  };
+}
+
+export async function deriveRedFoxProviderOperationId(
+  inputUrl: string,
+  retrievalOperationId?: string,
+  retrievalGeneration?: number,
+): Promise<string> {
+  return sha256Hex(`${REDFOX_OPERATION_DOMAIN}${canonicalJson(providerOperationIdentity(
+    inputUrl, retrievalOperationId, retrievalGeneration,
+  ))}`);
+}
+
+export async function deriveManualNewsRetrievalOperationId(
+  inputUrl: string,
+): Promise<string | null> {
+  let normalizedUrl: string;
+  try { normalizedUrl = normalizeWeChatArticleUrl(inputUrl); }
+  catch { return null; }
+  return sha256Hex(`${MANUAL_NEWS_RETRIEVAL_OPERATION_DOMAIN}${canonicalJson({
+    extraction_mode: ARTICLE_TEXT_PROTOCOL_V2,
+    normalized_url: normalizedUrl,
+    response_profile: PROOF_EXCERPT_RESPONSE_PROFILE,
+  })}`);
+}
+
+function parseProviderIdentityAssertion(
+  value: unknown,
+  inputUrl: string,
+  canonicalOriginalUrl: string,
+  publisher: string,
+): ProviderRetrievalAudit['identity_assertion'] {
+  const keys = [
+    'contract', 'requested_url', 'requested_short_url', 'provider_asserted_source_url',
+    'provider_asserted_canonical_url', 'provider_asserted_publisher', 'provider_asserted_wechat_biz',
+    'assurance',
+  ];
+  const canonical = new URL(canonicalOriginalUrl);
+  const expectedShortUrl = new URL(inputUrl).pathname === '/s' ? null : inputUrl;
+  const expectedBiz = canonical.searchParams.get('__biz') || '';
+  if (!strictObject(value, keys)
+    || value.contract !== REDFOX_IDENTITY_ASSERTION_CONTRACT
+    || value.requested_url !== inputUrl
+    || value.requested_short_url !== expectedShortUrl
+    || value.provider_asserted_source_url !== canonicalOriginalUrl
+    || value.provider_asserted_canonical_url !== canonicalOriginalUrl
+    || value.provider_asserted_publisher !== publisher
+    || value.provider_asserted_wechat_biz !== expectedBiz
+    || value.assurance !== REDFOX_IDENTITY_ASSERTION_ASSURANCE
+    || !expectedBiz) {
+    throw new Error('unsafe_gateway_provider:identity_assertion');
+  }
+  const frozen = FROZEN_REDFOX_SHORT_ASSERTIONS.get(inputUrl);
+  if (frozen && (frozen.canonical_url !== canonicalOriginalUrl
+    || frozen.publisher !== publisher || frozen.wechat_biz !== expectedBiz)) {
+    throw new Error('unsafe_gateway_provider:identity_assertion');
+  }
+  return value as ProviderRetrievalAudit['identity_assertion'];
+}
+
+function parseProviderRetrievalAudit(
+  raw: Record<string, unknown>,
+  requested: URL,
+  protocol: {
+    nonce: string;
+    requestTimestamp: string;
+    now: number;
+    retrievalOperationId?: string;
+    retrievalGeneration?: number;
+  },
+): ProviderRetrievalAudit {
+  const baseAuditKeys = [
+    'retrieval_type', 'provider_id', 'operation_id', 'input_url', 'canonical_original_url',
+    'identity_assertion', 'title', 'publisher', 'published_at', 'provider_retrieved_at',
+    'cache_status', 'limits', 'actual_sizes',
+    'protocol_version', 'request_nonce', 'request_timestamp', 'response_created_at', 'body_sha256',
+    'response_profile', 'response_hmac_contract', 'proof_excerpt', 'response_hmac',
+  ];
+  const generatedOperation = protocol.retrievalOperationId !== undefined;
+  const auditKeys = generatedOperation
+    ? [...baseAuditKeys, 'retrieval_operation_id', 'retrieval_generation']
+    : baseAuditKeys;
+  if (!strictObject(raw, auditKeys)
+    || raw.retrieval_type !== 'provider'
+    || raw.provider_id !== REDFOX_PROVIDER_ID
+    || raw.protocol_version !== PROVIDER_RETRIEVAL_PROTOCOL
+    || raw.request_nonce !== protocol.nonce
+    || raw.request_timestamp !== protocol.requestTimestamp
+    || raw.response_profile !== PROOF_EXCERPT_RESPONSE_PROFILE
+    || raw.response_hmac_contract !== PROVIDER_RESPONSE_HMAC_CONTRACT
+    || (generatedOperation && (raw.retrieval_operation_id !== protocol.retrievalOperationId
+      || raw.retrieval_generation !== protocol.retrievalGeneration))
+    || typeof raw.operation_id !== 'string' || !/^[a-f0-9]{64}$/.test(raw.operation_id)
+    || !['miss', 'hit', 'coalesced', 'durable'].includes(String(raw.cache_status))) {
+    throw new Error('unsafe_gateway_provider:invalid_schema');
+  }
+  let expectedInputUrl: string;
+  let inputUrl: string;
+  let canonicalOriginalUrl: string;
+  try {
+    expectedInputUrl = normalizeWeChatArticleUrl(requested.toString());
+    inputUrl = normalizeWeChatArticleUrl(String(raw.input_url));
+    canonicalOriginalUrl = normalizeWeChatArticleUrl(String(raw.canonical_original_url));
+  } catch {
+    throw new Error('unsafe_gateway_provider:url');
+  }
+  if (inputUrl !== raw.input_url || inputUrl !== expectedInputUrl
+    || canonicalOriginalUrl !== raw.canonical_original_url
+    || new URL(canonicalOriginalUrl).pathname !== '/s'
+    || (new URL(expectedInputUrl).pathname === '/s' && canonicalOriginalUrl !== expectedInputUrl)) {
+    throw new Error('unsafe_gateway_provider:url');
+  }
+  if (typeof raw.title !== 'string' || !raw.title || raw.title !== raw.title.trim()
+    || raw.title.normalize('NFC') !== raw.title || Array.from(raw.title).length > 220
+    || new TextEncoder().encode(raw.title).byteLength > 1_024
+    || typeof raw.publisher !== 'string' || !raw.publisher || raw.publisher !== raw.publisher.trim()
+    || raw.publisher.normalize('NFC') !== raw.publisher || Array.from(raw.publisher).length > 120
+    || new TextEncoder().encode(raw.publisher).byteLength > 512
+    || canonicalProviderPublishedAt(raw.published_at) === null) {
+    throw new Error('unsafe_gateway_provider:metadata');
+  }
+  const identityAssertion = parseProviderIdentityAssertion(
+    raw.identity_assertion,
+    inputUrl,
+    canonicalOriginalUrl,
+    raw.publisher,
+  );
+  const requestTimestamp = canonicalIsoTimestamp(raw.request_timestamp);
+  const responseCreatedAt = canonicalIsoTimestamp(raw.response_created_at);
+  const providerRetrievedAt = canonicalIsoTimestamp(raw.provider_retrieved_at);
+  if (!requestTimestamp || !responseCreatedAt || !providerRetrievedAt
+    || responseCreatedAt.timestamp < requestTimestamp.timestamp - ARTICLE_TEXT_V2_MAX_FUTURE_MS
+    || responseCreatedAt.timestamp > protocol.now + ARTICLE_TEXT_V2_MAX_FUTURE_MS
+    || protocol.now - responseCreatedAt.timestamp > ARTICLE_TEXT_V2_MAX_SKEW_MS
+    || providerRetrievedAt.timestamp > responseCreatedAt.timestamp + ARTICLE_TEXT_V2_MAX_FUTURE_MS
+    || (raw.cache_status !== 'durable'
+      && requestTimestamp.timestamp - providerRetrievedAt.timestamp > ARTICLE_TEXT_V2_MAX_SKEW_MS)) {
+    throw new Error('unsafe_gateway_provider:timestamp');
+  }
+  const limitKeys = ['provider_response_bytes', 'extracted_text_bytes', 'extracted_text_characters', 'image_count'];
+  if (!strictObject(raw.limits, limitKeys) || !strictObject(raw.actual_sizes, limitKeys)
+    || raw.limits.provider_response_bytes !== PROVIDER_RESPONSE_MAX_BYTES
+    || raw.limits.extracted_text_bytes !== ARTICLE_TEXT_MAX_BYTES
+    || raw.limits.extracted_text_characters !== ARTICLE_TEXT_MAX_CHARACTERS
+    || raw.limits.image_count !== PROVIDER_IMAGE_MAX_COUNT) {
+    throw new Error('unsafe_gateway_provider:limits');
+  }
+  const limits = raw.limits as Record<string, unknown>;
+  const actualSizes = raw.actual_sizes;
+  if (limitKeys.some((key) => !Number.isSafeInteger(actualSizes[key]) || Number(actualSizes[key]) < 0
+    || Number(actualSizes[key]) > Number(limits[key]))
+    || Number(actualSizes.provider_response_bytes) < 1) {
+    throw new Error('unsafe_gateway_provider:sizes');
+  }
+  if (typeof raw.body_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(raw.body_sha256)
+    || typeof raw.response_hmac !== 'string' || !/^[a-f0-9]{64}$/.test(raw.response_hmac)
+    || !strictObject(raw.proof_excerpt, [
+      'contract', 'algorithm', 'max_code_points', 'sha256', 'utf8_bytes', 'code_points',
+    ])
+    || raw.proof_excerpt.contract !== PROOF_EXCERPT_CONTRACT
+    || raw.proof_excerpt.algorithm !== PROOF_EXCERPT_ALGORITHM
+    || raw.proof_excerpt.max_code_points !== PROOF_EXCERPT_MAX_CODE_POINTS
+    || typeof raw.proof_excerpt.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(raw.proof_excerpt.sha256)
+    || !Number.isSafeInteger(raw.proof_excerpt.utf8_bytes)
+    || Number(raw.proof_excerpt.utf8_bytes) < 0
+    || Number(raw.proof_excerpt.utf8_bytes) > PROOF_EXCERPT_MAX_UTF8_BYTES
+    || !Number.isSafeInteger(raw.proof_excerpt.code_points)
+    || Number(raw.proof_excerpt.code_points) < 0
+    || Number(raw.proof_excerpt.code_points) > PROOF_EXCERPT_MAX_CODE_POINTS) {
+    throw new Error('unsafe_gateway_provider:proof');
+  }
+  return {
+    retrieval_type: 'provider',
+    provider_id: REDFOX_PROVIDER_ID,
+    operation_id: raw.operation_id,
+    ...(generatedOperation ? {
+      retrieval_operation_id: raw.retrieval_operation_id as string,
+      retrieval_generation: raw.retrieval_generation as number,
+    } : {}),
+    input_url: inputUrl,
+    canonical_original_url: canonicalOriginalUrl,
+    identity_assertion: identityAssertion,
+    title: raw.title,
+    publisher: raw.publisher,
+    published_at: raw.published_at as string,
+    provider_retrieved_at: providerRetrievedAt.value,
+    cache_status: raw.cache_status as ProviderRetrievalAudit['cache_status'],
+    limits: {
+      provider_response_bytes: PROVIDER_RESPONSE_MAX_BYTES,
+      extracted_text_bytes: ARTICLE_TEXT_MAX_BYTES,
+      extracted_text_characters: ARTICLE_TEXT_MAX_CHARACTERS,
+      image_count: PROVIDER_IMAGE_MAX_COUNT,
+    },
+    actual_sizes: {
+      provider_response_bytes: Number(actualSizes.provider_response_bytes),
+      extracted_text_bytes: Number(actualSizes.extracted_text_bytes),
+      extracted_text_characters: Number(actualSizes.extracted_text_characters),
+      image_count: Number(actualSizes.image_count),
+    },
+    protocol_version: PROVIDER_RETRIEVAL_PROTOCOL,
+    request_nonce: raw.request_nonce as string,
+    request_timestamp: requestTimestamp.value,
+    response_created_at: responseCreatedAt.value,
+    body_sha256: raw.body_sha256,
+    response_profile: PROOF_EXCERPT_RESPONSE_PROFILE,
+    response_hmac_contract: PROVIDER_RESPONSE_HMAC_CONTRACT,
+    proof_excerpt: {
+      contract: PROOF_EXCERPT_CONTRACT,
+      algorithm: PROOF_EXCERPT_ALGORITHM,
+      max_code_points: PROOF_EXCERPT_MAX_CODE_POINTS,
+      sha256: raw.proof_excerpt.sha256,
+      utf8_bytes: Number(raw.proof_excerpt.utf8_bytes),
+      code_points: Number(raw.proof_excerpt.code_points),
+    },
+    response_hmac: raw.response_hmac,
+  };
+}
+
 function parseFetchAudit(
   response: Response,
   requested: URL,
   maxRedirects: number,
   expectedLimits: DocumentExtractionLimits,
   protocol: { nonce: string; requestTimestamp: string; now: number },
-): DocumentFetchAudit {
+): ManualNewsFetchAudit {
   const encoded = response.headers.get('X-AIFeeds-Fetch-Audit') || '';
   if (!encoded || encoded.length > 8_192) throw new Error('unsafe_gateway_audit:missing');
   let raw: unknown;
   try { raw = JSON.parse(decodeURIComponent(encoded)); } catch { throw new Error('unsafe_gateway_audit:invalid_json'); }
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)
+    && (raw as Record<string, unknown>).protocol_version === PROVIDER_RETRIEVAL_PROTOCOL) {
+    return parseProviderRetrievalAudit(raw as Record<string, unknown>, requested, protocol);
+  }
   const auditKeys = [
     'hops', 'source_content_type', 'extraction', 'requested_limits', 'applied_limits',
     'actual_sizes', 'truncation', 'parser', 'protocol_version', 'request_nonce',
@@ -457,8 +822,8 @@ function parseFetchAudit(
   if (!['article_text', 'text', 'json', 'pdf_text'].includes(raw.extraction)) {
     throw new Error('unsafe_gateway_audit:extraction');
   }
-  const extraction = raw.extraction as PublicDocument['extraction'];
-  const expectedExtraction: Record<string, PublicDocument['extraction']> = {
+  const extraction = raw.extraction as DocumentFetchAudit['extraction'];
+  const expectedExtraction: Record<string, DocumentFetchAudit['extraction']> = {
     'text/html': 'article_text', 'application/xhtml+xml': 'article_text', 'text/plain': 'text',
     'application/json': 'json', 'application/pdf': 'pdf_text',
   };
@@ -665,7 +1030,16 @@ async function postTrusted(
   const pending = injectedFetcher ? injectedFetcher(endpoint.url, init) : fetch(endpoint.url, init);
   const response = await withinDeadline(pending, deadline, controller);
   if (!response.ok) {
+    const providerError = response.headers.get('X-AIFeeds-Provider-Error') || '';
     controller.abort();
+    if (((response.status === 409 && [
+      'provider_billing_indeterminate',
+      'provider_operation_identity_mismatch',
+      'provider_billing_retry_exhausted',
+    ].includes(providerError))
+      || (response.status === 422 && providerError === 'provider_identity_rejected'))) {
+      throw new Error(providerError);
+    }
     throw new Error(`trusted_gateway_http_${response.status}`);
   }
   return { response, deadline, controller };
@@ -687,6 +1061,8 @@ export async function fetchPublicDocument(
     maxSourceBytes?: number;
     maxTextCharacters?: number;
     maxRedirects?: number;
+    retrievalOperationId?: string;
+    retrievalGeneration?: number;
   } = {},
 ): Promise<PublicDocument> {
   const target = validatePublicHttpUrl(input);
@@ -709,6 +1085,25 @@ export async function fetchPublicDocument(
   const requestNonce = (deps.service?.nonceFactory || randomRequestNonce)();
   if (!validRequestNonce(requestNonce)) throw new Error('invalid_trusted_research_nonce');
   const requestTimestamp = new Date(requestNow).toISOString();
+  const hasRetrievalOperation = deps.retrievalOperationId !== undefined
+    || deps.retrievalGeneration !== undefined;
+  let retrievalFields: { retrieval_operation_id: string; retrieval_generation: number } | undefined;
+  if (hasRetrievalOperation) {
+    let normalizedWeChatUrl: string;
+    try { normalizedWeChatUrl = normalizeWeChatArticleUrl(target.toString()); }
+    catch { throw new Error('invalid_provider_retrieval_operation'); }
+    if (normalizedWeChatUrl !== target.toString()
+      || typeof deps.retrievalOperationId !== 'string'
+      || !/^[a-f0-9]{64}$/.test(deps.retrievalOperationId)
+      || !Number.isSafeInteger(deps.retrievalGeneration)
+      || Number(deps.retrievalGeneration) < 0) {
+      throw new Error('invalid_provider_retrieval_operation');
+    }
+    retrievalFields = {
+      retrieval_operation_id: deps.retrievalOperationId,
+      retrieval_generation: Number(deps.retrievalGeneration),
+    };
+  }
   const requestedLimits: DocumentExtractionLimits = {
     source_bytes: maxSourceBytes,
     extracted_text_bytes: maxBytes,
@@ -724,6 +1119,7 @@ export async function fetchPublicDocument(
       response_profile: PROOF_EXCERPT_RESPONSE_PROFILE,
       request_nonce: requestNonce,
       request_timestamp: requestTimestamp,
+      ...(retrievalFields || {}),
     }, timeoutMs,
   );
   try {
@@ -733,11 +1129,24 @@ export async function fetchPublicDocument(
       nonce: requestNonce,
       requestTimestamp,
       now: protocolNow(),
+      ...(retrievalFields ? {
+        retrievalOperationId: retrievalFields.retrieval_operation_id,
+        retrievalGeneration: retrievalFields.retrieval_generation,
+      } : {}),
     });
-    const body = await readBoundedBody(response, maxBytes, deadline, controller);
+    const body = await readBoundedBody(
+      response,
+      audit.protocol_version === PROVIDER_RETRIEVAL_PROTOCOL ? Math.min(maxBytes, ARTICLE_TEXT_MAX_BYTES) : maxBytes,
+      deadline,
+      controller,
+    );
+    const providerRetrieval = audit.protocol_version === PROVIDER_RETRIEVAL_PROTOCOL;
     let responseKeyId: string | null = null;
     for (const [keyId, secret] of responseKeys.keys) {
-      if (await verifyDocumentFetchAuditResponseHmac(audit, secret)) {
+      const verified = providerRetrieval
+        ? await verifyProviderRetrievalAuditResponseHmac(audit as ProviderRetrievalAudit, secret)
+        : await verifyDocumentFetchAuditResponseHmac(audit as DocumentFetchAudit, secret);
+      if (verified) {
         responseKeyId = keyId;
         break;
       }
@@ -745,36 +1154,70 @@ export async function fetchPublicDocument(
     if (!responseKeyId) {
       throw new Error('unsafe_gateway_audit:response_hmac');
     }
+    if (providerRetrieval) {
+      const providerAudit = audit as ProviderRetrievalAudit;
+      if (providerAudit.operation_id !== await deriveRedFoxProviderOperationId(
+        providerAudit.input_url,
+        providerAudit.retrieval_operation_id,
+        providerAudit.retrieval_generation,
+      )) {
+        throw new Error('unsafe_gateway_provider:operation_identity');
+      }
+    }
     const bodyCharacters = Array.from(body.text).length;
-    if (audit.actual_sizes.extracted_text_bytes !== body.bytes
-      || audit.actual_sizes.extracted_text_characters !== bodyCharacters) {
+    if (providerRetrieval && bodyCharacters < 40) throw new Error('unsafe_gateway_provider:body');
+    const extractedSizes = providerRetrieval
+      ? (audit as ProviderRetrievalAudit).actual_sizes
+      : (audit as DocumentFetchAudit).actual_sizes;
+    if (extractedSizes.extracted_text_bytes !== body.bytes
+      || extractedSizes.extracted_text_characters !== bodyCharacters) {
       throw new Error('unsafe_gateway_audit:body_size_mismatch');
     }
     if (await sha256Hex(body.text) !== audit.body_sha256) {
       throw new Error('unsafe_gateway_audit:body_digest');
     }
-    if (audit.extraction === 'article_text') validateCompleteArticleText(body.text, body.bytes);
+    if (providerRetrieval || (audit as DocumentFetchAudit).extraction === 'article_text') {
+      validateCompleteArticleText(body.text, body.bytes);
+    }
     const excerpt = deriveManualNewsProofExcerpt(body.text);
     body.text = '';
     const excerptBytes = new TextEncoder().encode(excerpt).byteLength;
     const excerptCodePoints = Array.from(excerpt).length;
-    if (await sha256Hex(excerpt) !== audit.proof_excerpt!.sha256
-      || excerptBytes !== audit.proof_excerpt!.utf8_bytes
-      || excerptCodePoints !== audit.proof_excerpt!.code_points) {
+    const proofExcerpt = audit.proof_excerpt!;
+    if (await sha256Hex(excerpt) !== proofExcerpt.sha256
+      || excerptBytes !== proofExcerpt.utf8_bytes
+      || excerptCodePoints !== proofExcerpt.code_points) {
       throw new Error('unsafe_gateway_audit:proof_excerpt');
     }
+    if (providerRetrieval) {
+      const providerAudit = audit as ProviderRetrievalAudit;
+      return {
+        url: providerAudit.canonical_original_url,
+        content_type: 'text/plain',
+        extraction: 'provider_article_text',
+        excerpt,
+        redirects: 0,
+        fetch_audit: providerAudit,
+        response_key_id: responseKeyId,
+        title: providerAudit.title,
+        publisher: providerAudit.publisher,
+        published_at: providerAudit.published_at,
+        content_complete: true,
+      };
+    }
+    const directAudit = audit as DocumentFetchAudit;
     return {
-      url: audit.hops.at(-1)!.url,
-      content_type: audit.source_content_type,
-      extraction: audit.extraction,
+      url: directAudit.hops.at(-1)!.url,
+      content_type: directAudit.source_content_type,
+      extraction: directAudit.extraction,
       excerpt,
-      redirects: audit.hops.length - 1,
-      fetch_audit: audit,
+      redirects: directAudit.hops.length - 1,
+      fetch_audit: directAudit,
       response_key_id: responseKeyId,
-      ...(audit.document ? {
-        title: audit.document.title,
-        published_at: audit.document.published_at,
-        selection: audit.document.selection,
+      ...(directAudit.document ? {
+        title: directAudit.document.title,
+        published_at: directAudit.document.published_at,
+        selection: directAudit.document.selection,
         content_complete: true as const,
       } : {}),
     };

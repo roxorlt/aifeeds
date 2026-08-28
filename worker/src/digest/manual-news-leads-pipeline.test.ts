@@ -18,7 +18,7 @@ import {
   type ManualLeadPriorEvent,
   type ManualNewsProcessedAssessment,
 } from './manual-news-leads';
-import type { PublicDocument } from '../security/safe-url-fetch';
+import type { DocumentFetchAudit, PublicDocument } from '../security/safe-url-fetch';
 import { callDeepSeekJson, DEEPSEEK_PRO } from '../hf-paper/llm';
 import { ManualNewsProviderError } from './manual-news-provider';
 
@@ -30,7 +30,7 @@ afterEach(() => {
 function documentFixture(
   url: string,
   body: string,
-  extraction: PublicDocument['extraction'] = 'html',
+  extraction: DocumentFetchAudit['extraction'] = 'html',
 ): PublicDocument {
   const bytes = new TextEncoder().encode(body).byteLength;
   const contentType = extraction === 'pdf_text' ? 'application/pdf' : 'text/html';
@@ -92,6 +92,7 @@ function memoryStore(initial = lead()) {
   const priorEvents: ManualLeadPriorEvent[] = [];
   const store: ManualLeadProcessingStore = {
     async getLead() { return structuredClone(current); },
+    async getPaidRetrievalEpoch() { return 0; },
     async hasPersistedAssessment() { return !!current.assessment; },
     async transition(_id, from, to, patch = {}) {
       expect(current.status).toBe(from);
@@ -1855,7 +1856,7 @@ describe('manual lead processing pipeline', () => {
     expect(memory.transitions).not.toContain('verifying->failed');
   });
 
-  test.each([400, 401, 403, 422])(
+  test.each([400, 401, 403, 409, 422])(
     'keeps permanent DeepSeek HTTP %i on the terminal assessment failure path',
     async (status) => {
       vi.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -1873,6 +1874,18 @@ describe('manual lead processing pipeline', () => {
       expect(memory.current()).toMatchObject({
         status: 'failed', error_code: 'assessment_failed', error_message: `HTTP ${status}`,
       });
+    },
+  );
+
+  test.each([
+    'provider_billing_indeterminate',
+    'provider_billing_retry_exhausted',
+    'provider_operation_identity_mismatch',
+    'provider_identity_rejected',
+  ])(
+    'never classifies terminal RedFox outcome %s as a durable Workflow retry',
+    (code) => {
+      expect(isTransientManualLeadError(new Error(code))).toBe(false);
     },
   );
 

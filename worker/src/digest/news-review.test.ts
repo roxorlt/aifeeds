@@ -172,6 +172,7 @@ describe('daily news review contract', () => {
       }),
     }]));
     const inserted: Array<{ sql: string; binds: unknown[] }> = [];
+    const preparedSql: string[] = [];
     const manualAssessment = {
       title: 'Anthropic披露部分Claude输出的水印与来源标记',
       summary: '官方文档将范围限定为受支持的模型与产品。',
@@ -183,6 +184,7 @@ describe('daily news review contract', () => {
       DAILY_NEWS_REVIEW_SECRET: 'secret',
       DB: {
         prepare(sql: string) {
+          preparedSql.push(sql);
           let binds: unknown[] = [];
           const stmt = {
             bind(...values: unknown[]) { binds = values; return stmt; },
@@ -235,6 +237,9 @@ describe('daily news review contract', () => {
     });
     expect(inserted.some((entry) => /INSERT INTO daily_news_review_batches/i.test(entry.sql))).toBe(true);
     expect(inserted.some((entry) => /UPDATE manual_news_leads SET confirmed_batch_id/i.test(entry.sql))).toBe(false);
+    const confirmedOrderSql = preparedSql.find((sql) => sql.includes('news_review:prefreeze_confirmed_manual')) || '';
+    expect(confirmedOrderSql).toContain("audit.action = 'confirm_candidate'");
+    expect(confirmedOrderSql).toMatch(/l\.confirmed_at ASC, l\.id ASC/);
   });
 
   test('a new batch compares against the previous production defaults when no human choice exists', async () => {

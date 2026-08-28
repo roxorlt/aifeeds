@@ -17,7 +17,7 @@ import {
   MANUAL_NEWS_PROVIDER_PROMPT_MAX_CHARS,
   MANUAL_NEWS_PROVIDER_TIMEOUT_MS,
 } from './manual-news-leads-runtime';
-import type { PublicDocument } from '../security/safe-url-fetch';
+import type { DocumentFetchAudit, PublicDocument } from '../security/safe-url-fetch';
 import { callDeepSeekJson, DEEPSEEK_PRO } from '../hf-paper/llm';
 import {
   ManualNewsProviderError,
@@ -93,7 +93,7 @@ function canonicalJson(value: unknown): string {
   return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(',')}}`;
 }
 
-function withResponseHmac(audit: PublicDocument['fetch_audit']): PublicDocument['fetch_audit'] {
+function withResponseHmac(audit: DocumentFetchAudit): DocumentFetchAudit {
   const { response_hmac: _placeholder, ...unsigned } = audit;
   return {
     ...unsigned,
@@ -105,10 +105,10 @@ function withResponseHmac(audit: PublicDocument['fetch_audit']): PublicDocument[
 function auditObject(
   url: string,
   sourceContentType: string,
-  extraction: PublicDocument['extraction'],
+  extraction: DocumentFetchAudit['extraction'],
   body: string,
   protocol: { request_nonce?: string; request_timestamp?: string } = {},
-): PublicDocument['fetch_audit'] {
+): DocumentFetchAudit {
   const extractedBytes = new TextEncoder().encode(body).byteLength;
   const articleText = extraction === 'article_text';
   return withResponseHmac({
@@ -152,7 +152,7 @@ function auditObject(
 function signedAudit(
   url: string,
   sourceContentType: string,
-  extraction: PublicDocument['extraction'],
+  extraction: DocumentFetchAudit['extraction'],
   body: string,
   protocol: { request_nonce: string; request_timestamp: string },
 ): string {
@@ -163,7 +163,7 @@ function signedAudit(
 function documentFixture(
   url: string,
   body: string,
-  extraction: PublicDocument['extraction'] = 'article_text',
+  extraction: DocumentFetchAudit['extraction'] = 'article_text',
   metadata: { title?: string; published_at?: string | null; selection?: 'article' | 'main' } = {},
 ): PublicDocument {
   const contentType = {
@@ -196,6 +196,91 @@ function documentFixture(
       content_complete: true as const,
     } : {}),
   };
+}
+
+function providerDocumentFixture(
+  body: string,
+  options: { inputUrl?: string; canonicalUrl?: string; publisher?: string } = {},
+): PublicDocument {
+  const inputUrl = options.inputUrl || 'https://mp.weixin.qq.com/s/a0kOMCJ78T8GlQ8dJ_fUDw';
+  const canonicalUrl = options.canonicalUrl
+    || 'https://mp.weixin.qq.com/s?__biz=MzA3MzI4MjgzMw==&mid=2651052842&idx=1&sn=b51e7dcdefdc1d5e9bd54f005456bc19';
+  const excerpt = referenceProofExcerpt(body);
+  const bodyBytes = new TextEncoder().encode(body).byteLength;
+  const publisher = options.publisher || '机器之心';
+  const operationIdentity = {
+    extraction_mode: 'article_text_v2',
+    normalized_url: inputUrl,
+    response_profile: 'proof_excerpt_v1',
+  };
+  const unsigned = {
+    retrieval_type: 'provider',
+    provider_id: 'redfox_gzh_article_content_v1',
+    operation_id: createHash('sha256')
+      .update(`aifeeds-redfox-operation-v1\0${canonicalJson(operationIdentity)}`).digest('hex'),
+    input_url: inputUrl,
+    canonical_original_url: canonicalUrl,
+    identity_assertion: {
+      contract: 'provider_asserted_wechat_article_identity_v1',
+      requested_url: inputUrl,
+      requested_short_url: inputUrl,
+      provider_asserted_source_url: canonicalUrl,
+      provider_asserted_canonical_url: canonicalUrl,
+      provider_asserted_publisher: publisher,
+      provider_asserted_wechat_biz: new URL(canonicalUrl).searchParams.get('__biz')!,
+      assurance: 'provider_assertion_not_independently_verified',
+    },
+    title: 'Alibaba reportedly bans employees from using Claude Code',
+    publisher,
+    published_at: '2026-08-28T07:31:29+08:00',
+    provider_retrieved_at: '2026-08-12T00:00:00.000Z',
+    cache_status: 'miss',
+    limits: {
+      provider_response_bytes: 2_097_152,
+      extracted_text_bytes: 28_000,
+      extracted_text_characters: 28_000,
+      image_count: 64,
+    },
+    actual_sizes: {
+      provider_response_bytes: bodyBytes + 512,
+      extracted_text_bytes: bodyBytes,
+      extracted_text_characters: Array.from(body).length,
+      image_count: 4,
+    },
+    protocol_version: 'provider_retrieval_v1',
+    request_nonce: '22'.repeat(16),
+    request_timestamp: '2026-08-12T00:00:00.000Z',
+    response_created_at: '2026-08-12T00:00:00.000Z',
+    body_sha256: createHash('sha256').update(body).digest('hex'),
+    response_profile: 'proof_excerpt_v1',
+    response_hmac_contract: 'hmac-sha256-domain-separated-canonical-json-all-fields-except-response_hmac-v1',
+    proof_excerpt: {
+      contract: 'proof_excerpt_v1',
+      algorithm: 'utf8-nfc-ws1-codepoint-prefix-v1',
+      max_code_points: 3_000,
+      sha256: createHash('sha256').update(excerpt).digest('hex'),
+      utf8_bytes: new TextEncoder().encode(excerpt).byteLength,
+      code_points: Array.from(excerpt).length,
+    },
+  };
+  const fetchAudit = {
+    ...unsigned,
+    response_hmac: createHmac('sha256', Buffer.from(responseSecret, 'hex'))
+      .update(`aifeeds-provider-retrieval-v1\0${canonicalJson(unsigned)}`).digest('hex'),
+  };
+  return {
+    response_key_id: 'response-key-2026-08-11',
+    url: canonicalUrl,
+    content_type: 'text/plain',
+    extraction: 'provider_article_text',
+    excerpt,
+    redirects: 0,
+    fetch_audit: fetchAudit,
+    title: unsigned.title,
+    publisher: unsigned.publisher,
+    published_at: unsigned.published_at,
+    content_complete: true,
+  } as unknown as PublicDocument;
 }
 
 const alibabaSupport = 'Alibaba reportedly bans employees from using Claude Code.';
@@ -380,6 +465,50 @@ async function createGoogleSheetsCanvasProof(input: {
 }
 
 describe('manual lead evidence extraction', () => {
+  test('keeps paid retrieval identity and lead generation stable across Workflow durable retries', async () => {
+    const payloads: Array<Record<string, unknown>> = [];
+    const researchFetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      payloads.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify({ error: 'provider_billing_indeterminate' }), {
+        status: 409,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-AIFeeds-Provider-Error': 'provider_billing_indeterminate',
+        },
+      });
+    });
+    const env = {
+      DB: {},
+      MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
+      MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
+      MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: responseSecret,
+      MANUAL_NEWS_RESEARCH_RESPONSE_KEY_ID: 'response-key-2026-08-11',
+    } as never;
+    const inputUrl = 'https://mp.weixin.qq.com/s/a0kOMCJ78T8GlQ8dJ_fUDw';
+
+    for (const processingAttempt of [1, 2]) {
+      const adapters = createManualNewsLeadRuntimeAdapters(env, {
+        researchFetcher,
+        modelContext: { leadId: 'ml-stable-paid-generation', processingAttempt },
+      });
+      await expect(adapters.fetch(inputUrl, { retrieval_generation: 7 }))
+        .rejects.toThrow('provider_billing_indeterminate');
+    }
+    const explicitRetry = createManualNewsLeadRuntimeAdapters(env, {
+      researchFetcher,
+      modelContext: { leadId: 'ml-stable-paid-generation', processingAttempt: 3 },
+    });
+    await expect(explicitRetry.fetch(inputUrl, { retrieval_generation: 10 }))
+      .rejects.toThrow('provider_billing_indeterminate');
+
+    expect(payloads).toHaveLength(3);
+    expect(payloads[0].retrieval_operation_id).toMatch(/^[a-f0-9]{64}$/);
+    expect(payloads[1].retrieval_operation_id).toBe(payloads[0].retrieval_operation_id);
+    expect(payloads[2].retrieval_operation_id).toBe(payloads[0].retrieval_operation_id);
+    expect(payloads.map((payload) => payload.retrieval_generation)).toEqual([7, 7, 10]);
+    expect(payloads[0].request_nonce).not.toBe(payloads[1].request_nonce);
+  });
+
   test('uses one 210-second provider call per assessment or verification invocation and records only safe metrics', async () => {
     const mockedCall = vi.mocked(callDeepSeekJson);
     mockedCall
@@ -582,6 +711,56 @@ describe('manual lead evidence extraction', () => {
     await expect(createAlibabaCurrentProof(evidence!)).resolves.toBe(true);
   });
 
+  test('keeps provider retrieval explicit while accepting it through evidence persistence and current-proof validation', async () => {
+    const document = providerDocumentFixture(alibabaSupport);
+    const evidence = await extractManualNewsEvidence(document, undefined, 1234);
+
+    expect(evidence).toMatchObject({
+      url: document.url,
+      publisher: '机器之心',
+      title: 'Alibaba reportedly bans employees from using Claude Code',
+      published_at: '2026-08-28T07:31:29+08:00',
+      excerpt: alibabaSupport,
+      fetch_audit: {
+        protocol_version: 'provider_retrieval_v1',
+        provider_id: 'redfox_gzh_article_content_v1',
+        canonical_original_url: document.url,
+      },
+    });
+    expect(evidence?.fetch_audit).not.toHaveProperty('hops');
+    await expect(createAlibabaCurrentProof(evidence!)).resolves.toBe(true);
+
+    const { proofInput, secret } = await createAlibabaProof(evidence!);
+    for (const mutation of [
+      (audit: Record<string, any>) => { audit.response_hmac = '00'.repeat(32); },
+      (audit: Record<string, any>) => { audit.input_url = 'https://mp.weixin.qq.com/s/other'; },
+      (audit: Record<string, any>) => { audit.canonical_original_url = 'https://mp.weixin.qq.com/s/other'; },
+      (audit: Record<string, any>) => { audit.body_sha256 = '00'.repeat(32); },
+      (audit: Record<string, any>) => { audit.proof_excerpt.sha256 = '00'.repeat(32); },
+    ]) {
+      const tampered = structuredClone(proofInput);
+      mutation(tampered.evidence[0]!.fetch_audit as unknown as Record<string, any>);
+      await expect(createManualLeadVerificationProof(tampered, secret))
+        .rejects.toThrow(/manual_news_evidence_(?:provenance|response_hmac|proof_excerpt)_invalid/);
+    }
+  });
+
+  test('does not promote a provider publisher display name without its exact WeChat account binding', async () => {
+    const document = providerDocumentFixture(alibabaSupport, {
+      inputUrl: 'https://mp.weixin.qq.com/s/another_valid_short_id',
+      canonicalUrl: 'https://mp.weixin.qq.com/s?__biz=MzA3MzI4MjgzNw==&mid=2651052842&idx=1&sn=b51e7dcdefdc1d5e9bd54f005456bc19',
+    });
+    const evidence = await extractManualNewsEvidence(document, undefined, 1234);
+
+    expect(evidence).toMatchObject({
+      publisher: '机器之心',
+      source_type: 'other',
+      reliable: false,
+    });
+    await expect(createAlibabaCurrentProof(evidence!))
+      .rejects.toThrow('evidence_disposition_classification_uncertain');
+  });
+
   test('rejects an otherwise active v9 proof at the direct current-proof boundary', async () => {
     const evidence = await extractManualNewsEvidence(documentFixture(
       'https://techcrunch.com/2026/07/04/alibaba-claude-code/', alibabaSupport,
@@ -649,14 +828,20 @@ describe('manual lead evidence extraction', () => {
     const legacyClaims = legacyMax.evidence[0]!.fetch_audit!.proof_excerpt! as unknown as Record<string, unknown>;
     delete legacyClaims.max_code_points;
     legacyClaims.max = 3_000;
-    legacyMax.evidence[0]!.fetch_audit = withResponseHmac(legacyMax.evidence[0]!.fetch_audit!);
+    legacyMax.evidence[0]!.fetch_audit = withResponseHmac(
+      legacyMax.evidence[0]!.fetch_audit! as DocumentFetchAudit,
+    );
     const wrongMax = structuredClone(proofInput);
     (wrongMax.evidence[0]!.fetch_audit!.proof_excerpt! as unknown as Record<string, unknown>)
       .max_code_points = 2_999;
-    wrongMax.evidence[0]!.fetch_audit = withResponseHmac(wrongMax.evidence[0]!.fetch_audit!);
+    wrongMax.evidence[0]!.fetch_audit = withResponseHmac(
+      wrongMax.evidence[0]!.fetch_audit! as DocumentFetchAudit,
+    );
     const ambiguousMax = structuredClone(proofInput);
     (ambiguousMax.evidence[0]!.fetch_audit!.proof_excerpt! as unknown as Record<string, unknown>).max = 3_000;
-    ambiguousMax.evidence[0]!.fetch_audit = withResponseHmac(ambiguousMax.evidence[0]!.fetch_audit!);
+    ambiguousMax.evidence[0]!.fetch_audit = withResponseHmac(
+      ambiguousMax.evidence[0]!.fetch_audit! as DocumentFetchAudit,
+    );
 
     await expect(createManualLeadVerificationProof(unsigned, secret))
       .rejects.toThrow(/manual_news_evidence_provenance_invalid/);
@@ -698,7 +883,7 @@ describe('manual lead evidence extraction', () => {
       } else {
         claims.max = 3_000;
       }
-      malformed.fetch_audit = withResponseHmac(malformed.fetch_audit);
+      malformed.fetch_audit = withResponseHmac(malformed.fetch_audit as DocumentFetchAudit);
       await expect(extractManualNewsEvidence(malformed)).resolves.toBeNull();
     }
   });

@@ -20,6 +20,12 @@ const requestTimestamp = new Date(protocolNow).toISOString();
 const responseProfile = 'proof_excerpt_v1';
 const responseHmacContract = 'hmac-sha256-canonical-json-all-fields-except-response_hmac-v1';
 const proofExcerptAlgorithm = 'utf8-nfc-ws1-codepoint-prefix-v1';
+const providerResponseHmacContract = 'hmac-sha256-domain-separated-canonical-json-all-fields-except-response_hmac-v1';
+const providerHmacDomain = 'aifeeds-provider-retrieval-v1\0';
+const retrievalOperationId = '44'.repeat(32);
+const wechatInputUrl = 'https://mp.weixin.qq.com/s/a0kOMCJ78T8GlQ8dJ_fUDw';
+const wechatCanonicalUrl = 'https://mp.weixin.qq.com/s?__biz=MzA3MzI4MjgzMw==&mid=2651052842&idx=1&sn=b51e7dcdefdc1d5e9bd54f005456bc19';
+const otherWechatCanonicalUrl = 'https://mp.weixin.qq.com/s?__biz=MzA3MzI4MjgzNw==&mid=2651052842&idx=1&sn=b51e7dcdefdc1d5e9bd54f005456bc19';
 const goldenFixtureSha256 = '213f5b82e0e89d6c66b7c41d7d44824eea77196b5ee032c8b02e971adffb5a4c';
 const expectedExtractionModes = ['article_text', 'text', 'json', 'pdf_text'] as const;
 type GoldenExtractionMode = typeof expectedExtractionModes[number];
@@ -214,6 +220,84 @@ function gatewayResponse(body: BodyInit | null, input: Parameters<typeof fetchAu
   });
 }
 
+function providerAuditObject(
+  body: string,
+  operation?: { retrieval_operation_id: string; retrieval_generation: number },
+) {
+  const excerptClaims = proofExcerptClaims(body);
+  const bodyBytes = new TextEncoder().encode(body).byteLength;
+  const operationIdentity = {
+    extraction_mode: 'article_text_v2',
+    normalized_url: wechatInputUrl,
+    response_profile: responseProfile,
+    ...(operation || {}),
+  };
+  const unsigned = {
+    retrieval_type: 'provider',
+    provider_id: 'redfox_gzh_article_content_v1',
+    operation_id: createHash('sha256')
+      .update(`aifeeds-redfox-operation-v1\0${canonicalJson(operationIdentity)}`).digest('hex'),
+    ...(operation || {}),
+    input_url: wechatInputUrl,
+    canonical_original_url: wechatCanonicalUrl,
+    identity_assertion: {
+      contract: 'provider_asserted_wechat_article_identity_v1',
+      requested_url: wechatInputUrl,
+      requested_short_url: wechatInputUrl,
+      provider_asserted_source_url: wechatCanonicalUrl,
+      provider_asserted_canonical_url: wechatCanonicalUrl,
+      provider_asserted_publisher: '机器之心',
+      provider_asserted_wechat_biz: 'MzA3MzI4MjgzMw==',
+      assurance: 'provider_assertion_not_independently_verified',
+    },
+    title: '刚刚，Anthropic发布物理MCP：Claude开始接管真实世界',
+    publisher: '机器之心',
+    published_at: '2026-08-28T07:31:29+08:00',
+    provider_retrieved_at: requestTimestamp,
+    cache_status: 'miss',
+    limits: {
+      provider_response_bytes: 2 * 1024 * 1024,
+      extracted_text_bytes: 28_000,
+      extracted_text_characters: 28_000,
+      image_count: 64,
+    },
+    actual_sizes: {
+      provider_response_bytes: bodyBytes + 512,
+      extracted_text_bytes: bodyBytes,
+      extracted_text_characters: Array.from(body).length,
+      image_count: 4,
+    },
+    protocol_version: 'provider_retrieval_v1',
+    request_nonce: requestNonce,
+    request_timestamp: requestTimestamp,
+    response_created_at: requestTimestamp,
+    body_sha256: createHash('sha256').update(body).digest('hex'),
+    response_profile: responseProfile,
+    response_hmac_contract: providerResponseHmacContract,
+    proof_excerpt: excerptClaims,
+  };
+  return {
+    ...unsigned,
+    response_hmac: createHmac('sha256', Buffer.from(responseSecret, 'hex'))
+      .update(`${providerHmacDomain}${canonicalJson(unsigned)}`).digest('hex'),
+  };
+}
+
+function providerGatewayResponse(
+  body: string,
+  mutateAudit?: (audit: Record<string, any>) => void,
+  operation?: { retrieval_operation_id: string; retrieval_generation: number },
+) {
+  const audit = providerAuditObject(body, operation) as Record<string, any>;
+  mutateAudit?.(audit);
+  return new Response(body, {
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'X-AIFeeds-Fetch-Audit': encodeURIComponent(JSON.stringify(audit)),
+    },
+  });
+}
+
 const publicHop = (url = 'https://example.com/story') => ({
   url, validated_ip: '93.184.216.34', connected_ip: '93.184.216.34',
 });
@@ -369,6 +453,100 @@ describe('trusted manual-news research boundary', () => {
         final_url: 'https://example.com/story',
       },
     });
+  });
+
+  test('accepts a signed provider retrieval without inventing an original-site hop', async () => {
+    const body = '机器之心报道 Anthropic 发布物理 MCP，并给出完整事实、时间与上下文。'.repeat(12);
+    const operation = { retrieval_operation_id: retrievalOperationId, retrieval_generation: 7 };
+    const document = await fetchPublicDocument(wechatInputUrl, {
+      service: service(async (_input, init) => {
+        expect(JSON.parse(String(init?.body))).toMatchObject(operation);
+        return providerGatewayResponse(body, undefined, operation) as never;
+      }),
+      retrievalOperationId,
+      retrievalGeneration: 7,
+    });
+
+    expect(document).toMatchObject({
+      url: wechatCanonicalUrl,
+      content_type: 'text/plain',
+      extraction: 'provider_article_text',
+      title: '刚刚，Anthropic发布物理MCP：Claude开始接管真实世界',
+      publisher: '机器之心',
+      published_at: '2026-08-28T07:31:29+08:00',
+      content_complete: true,
+      excerpt: body,
+      fetch_audit: {
+        protocol_version: 'provider_retrieval_v1',
+        provider_id: 'redfox_gzh_article_content_v1',
+        operation_id: expect.stringMatching(/^[a-f0-9]{64}$/),
+        retrieval_operation_id: retrievalOperationId,
+        retrieval_generation: 7,
+        input_url: wechatInputUrl,
+        canonical_original_url: wechatCanonicalUrl,
+        identity_assertion: {
+          requested_short_url: wechatInputUrl,
+          provider_asserted_canonical_url: wechatCanonicalUrl,
+          provider_asserted_wechat_biz: 'MzA3MzI4MjgzMw==',
+          assurance: 'provider_assertion_not_independently_verified',
+        },
+        response_hmac_contract: providerResponseHmacContract,
+      },
+    });
+    expect(document.fetch_audit).not.toHaveProperty('hops');
+    expect(JSON.stringify(document.fetch_audit)).not.toContain('validated_ip');
+  });
+
+  test('rejects provider evidence when nonce, timestamp, URL, body, proof, metadata, or HMAC is tampered', async () => {
+    const body = '机器之心报道 Anthropic 发布物理 MCP，并给出完整事实、时间与上下文。'.repeat(12);
+    const mutations: Array<[string, (audit: Record<string, any>) => void]> = [
+      ['nonce', (audit) => { audit.request_nonce = '33'.repeat(16); }],
+      ['request timestamp', (audit) => { audit.request_timestamp = '2026-08-11T23:00:00.000Z'; }],
+      ['response timestamp', (audit) => { audit.response_created_at = '2026-08-11T23:00:00.000Z'; }],
+      ['input URL', (audit) => { audit.input_url = 'https://mp.weixin.qq.com/s/other'; }],
+      ['canonical URL', (audit) => { audit.canonical_original_url = 'https://mp.weixin.qq.com/s/other'; }],
+      ['other legal canonical', (audit) => { audit.canonical_original_url = otherWechatCanonicalUrl; }],
+      ['operation identity', (audit) => { audit.operation_id = '00'.repeat(32); }],
+      ['requested short assertion', (audit) => { audit.identity_assertion.requested_short_url = 'https://mp.weixin.qq.com/s/another_short_id'; }],
+      ['asserted canonical', (audit) => { audit.identity_assertion.provider_asserted_canonical_url = otherWechatCanonicalUrl; }],
+      ['asserted publisher', (audit) => { audit.identity_assertion.provider_asserted_publisher = '另一公众号'; }],
+      ['asserted biz', (audit) => { audit.identity_assertion.provider_asserted_wechat_biz = 'MzA3MzI4MjgzNw=='; }],
+      ['provider id', (audit) => { audit.provider_id = 'other-provider'; }],
+      ['title', (audit) => { audit.title = 'tampered title'; }],
+      ['publisher', (audit) => { audit.publisher = 'tampered publisher'; }],
+      ['published at', (audit) => { audit.published_at = '2026-08-29T07:31:29+08:00'; }],
+      ['provider timestamp', (audit) => { audit.provider_retrieved_at = '2026-08-11T23:59:59.000Z'; }],
+      ['cache status', (audit) => { audit.cache_status = 'hit'; }],
+      ['body digest', (audit) => { audit.body_sha256 = '00'.repeat(32); }],
+      ['body size', (audit) => { audit.actual_sizes.extracted_text_bytes += 1; }],
+      ['provider response size', (audit) => { audit.actual_sizes.provider_response_bytes += 1; }],
+      ['image count', (audit) => { audit.actual_sizes.image_count += 1; }],
+      ['proof excerpt', (audit) => { audit.proof_excerpt.sha256 = '00'.repeat(32); }],
+      ['HMAC contract', (audit) => { audit.response_hmac_contract = responseHmacContract; }],
+      ['HMAC', (audit) => { audit.response_hmac = '00'.repeat(32); }],
+    ];
+    for (const [label, mutate] of mutations) {
+      await expect(fetchPublicDocument(wechatInputUrl, {
+        service: service(async () => providerGatewayResponse(body, mutate) as never),
+      }), label).rejects.toThrow(/unsafe_gateway_(?:provider|audit)/);
+    }
+  });
+
+  test('recognizes HK provider billing and identity outcomes as explicit terminal errors', async () => {
+    for (const [status, code] of [
+      [409, 'provider_billing_indeterminate'],
+      [422, 'provider_identity_rejected'],
+    ] as const) {
+      await expect(fetchPublicDocument(wechatInputUrl, {
+        service: service(async () => new Response(JSON.stringify({ error: code }), {
+          status,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-AIFeeds-Provider-Error': code,
+          },
+        }) as never),
+      })).rejects.toThrow(code);
+    }
   });
 
   test('negotiates proof_excerpt_v1 and returns only the independently derived excerpt', async () => {

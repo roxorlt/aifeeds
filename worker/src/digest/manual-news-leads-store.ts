@@ -14,7 +14,9 @@ import {
   MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
   manualLeadAssessmentValidationFailure,
   manualNewsAssessmentGenerationAudit,
+  MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT,
   mergeManualLeadCandidate,
+  TOTAL_NEWS_REVIEW_CANDIDATE_LIMIT,
   validateManualLeadFactVerification,
   validateManualNewsProcessedAssessment,
   validateManualNewsLeadInput,
@@ -147,6 +149,10 @@ async function sha256Hex(value: string): Promise<string> {
 
 function createMutationNonce(action: string): string {
   return `${action}:${crypto.randomUUID()}`;
+}
+
+async function manualEventClaimNonce(reviewDate: string, eventKey: string): Promise<string> {
+  return `confirm-event:${await sha256Hex(`manual-news-confirm-event-v1\0${reviewDate}\0${eventKey}`)}`;
 }
 
 function validatedTransitionAuditMetadata(
@@ -403,6 +409,23 @@ export async function getManualNewsLeadCandidateState(
 ): Promise<{ batch_id: string; revision: number } | null> {
   const active = await getActiveNewsReviewBatch(env, date);
   return active ? { batch_id: active.batch_id, revision: active.batch_revision } : null;
+}
+
+export async function getManualNewsLeadPaidRetrievalEpoch(
+  env: Env,
+  id: string,
+): Promise<number> {
+  const audit = await env.DB.prepare(
+    `/* manual_audit:paid_retrieval_epoch */ SELECT id
+     FROM manual_news_lead_audit
+     WHERE lead_id = ? AND action = 'retry' AND idempotency_key IS NOT NULL
+       AND from_status IN ('failed', 'needs_review', 'rejected') AND to_status = 'validating'
+     ORDER BY resulting_version DESC, id DESC LIMIT 1`,
+  ).bind(id).first<{ id: number }>();
+  if (!audit) return 0;
+  const epoch = Number(audit.id);
+  if (!Number.isSafeInteger(epoch) || epoch <= 0) throw new Error('invalid_paid_retrieval_epoch');
+  return epoch;
 }
 
 export async function submitManualNewsLead(
@@ -855,6 +878,10 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
 
   getLead(id: string): Promise<ManualNewsLeadRecord | null> {
     return getManualNewsLead(this.env, id);
+  }
+
+  getPaidRetrievalEpoch(id: string): Promise<number> {
+    return getManualNewsLeadPaidRetrievalEpoch(this.env, id);
   }
 
   async hasPersistedAssessment(id: string): Promise<boolean> {
@@ -1659,6 +1686,7 @@ export async function confirmManualNewsLeadCandidate(
     return { ok: false, status: 409, error: 'lead_not_fact_verified', lead };
   }
   const assessment = verified.assessment;
+  const eventClaimNonce = await manualEventClaimNonce(lead.review_date, assessment.event_key);
   if (row?.last_mutation_kind === 'confirm' && row.last_mutation_idempotency_key === idempotencyKey) {
     const batch = row.confirmed_batch_id
       ? await getNewsReviewBatch(env, row.review_date, row.confirmed_batch_id)
@@ -1679,6 +1707,12 @@ export async function confirmManualNewsLeadCandidate(
   if (lead.version !== expectedVersion) return { ok: false, status: 409, error: 'lead_version_conflict', lead };
   if (!['recommended', 'needs_review'].includes(lead.status)) {
     return { ok: false, status: 409, error: 'lead_not_confirmable', lead };
+  }
+  const existingEventOwner = await confirmedManualEventOwner(
+    env, lead.review_date, assessment.event_key, eventClaimNonce,
+  );
+  if (existingEventOwner && existingEventOwner !== id) {
+    return { ok: false, status: 409, error: 'manual_candidate_event_conflict', lead };
   }
 
   const primaryEvidence = lead.evidence.find((item) => item.reliable) || lead.evidence[0];
@@ -1706,23 +1740,35 @@ export async function confirmManualNewsLeadCandidate(
     event_fingerprint: assessment.event_key,
     manual_lead: { lead_id: lead.id, evidence_ids: lead.evidence.map((item) => item.id) },
   });
-  const confirmationNonce = createMutationNonce('confirm');
+  // The successful confirmation audit is the event ownership record. Its existing
+  // unique mutation_nonce index atomically selects one owner without a separate
+  // claim that could survive a downstream zero-row guard.
+  const confirmationNonce = eventClaimNonce;
   let active = await getActiveNewsReviewBatch(env, lead.review_date);
   const activeSanitization = active
     ? await sanitizeCurrentNewsReviewBatch(env, lead.review_date, now)
     : null;
   if (activeSanitization) active = activeSanitization.batch;
   if ((active?.batch_revision || 0) !== expectedBatchRevision) {
+    const eventOwner = await confirmedManualEventOwner(
+      env, lead.review_date, assessment.event_key, eventClaimNonce,
+    );
+    if (eventOwner && eventOwner !== id) {
+      return { ok: false, status: 409, error: 'manual_candidate_event_conflict', lead };
+    }
     return { ok: false, status: 409, error: 'candidate_batch_revision_conflict', lead };
   }
   if (!active) {
-    const results = await env.DB.batch([
+    let results: Array<{ meta?: { changes?: number } }>;
+    try {
+      results = await env.DB.batch([
       env.DB.prepare(
         `/* manual_lead:candidate_generation_init */ INSERT OR IGNORE INTO daily_news_review_candidate_generations
          (review_date, lineage_id, generation, updated_at) VALUES (?, ?, 0, ?)`,
       ).bind(lead.review_date, lead.review_date, now),
       confirmedLeadItemStatement(
-        env, lead, expectedVersion, candidate, publishedAt, itemExtra, now, verified.record, undefined, true,
+        env, lead, expectedVersion, candidate, publishedAt, itemExtra, now, verified.record,
+        undefined, true,
       ),
       env.DB.prepare(
         `/* manual_lead:confirm_prefreeze */ UPDATE manual_news_leads SET
@@ -1731,9 +1777,12 @@ export async function confirmManualNewsLeadCandidate(
          WHERE id = ? AND version = ? AND status IN ('recommended', 'needs_review')
            AND NOT EXISTS (SELECT 1 FROM daily_news_review_batches
              WHERE review_date = ? AND lineage_id = ? AND is_current = 1)
+           AND (SELECT COUNT(*) FROM manual_news_leads
+             WHERE review_date = ? AND confirmed_at IS NOT NULL) < ${MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT}
            AND ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}`,
       ).bind(
         now, idempotencyKey, confirmationNonce, now, id, expectedVersion, lead.review_date, lead.review_date,
+        lead.review_date,
         ...manualVerificationSnapshotGuardBindings(id, verified.record),
       ),
       env.DB.prepare(
@@ -1755,7 +1804,16 @@ export async function confirmManualNewsLeadCandidate(
         idempotencyKey, resultingVersion: expectedVersion + 1,
         metadata: { pending_initial_freeze: true }, createdAt: now,
       }),
-    ]) as Array<{ meta?: { changes?: number } }>;
+      ]) as Array<{ meta?: { changes?: number } }>;
+    } catch (error) {
+      const eventOwner = await confirmedManualEventOwner(
+        env, lead.review_date, assessment.event_key, eventClaimNonce,
+      );
+      if (eventOwner && eventOwner !== id) {
+        return { ok: false, status: 409, error: 'manual_candidate_event_conflict', lead };
+      }
+      throw error;
+    }
     const changed = auditedMutationChanges(results, 2, 4);
     const latestRow = await env.DB.prepare(
       `/* manual_lead:by_id */ SELECT * FROM manual_news_leads WHERE id = ?`,
@@ -1769,9 +1827,22 @@ export async function confirmManualNewsLeadCandidate(
           pending_initial_freeze: true, rerender_enqueued: false,
         };
       }
+      const eventOwner = await confirmedManualEventOwner(
+        env, lead.review_date, assessment.event_key, eventClaimNonce,
+      );
+      if (eventOwner && eventOwner !== id) {
+        return { ok: false, status: 409, error: 'manual_candidate_event_conflict', lead: updated };
+      }
       const latestActive = await getActiveNewsReviewBatch(env, lead.review_date);
       if (latestActive) {
         return { ok: false, status: 409, error: 'candidate_batch_revision_conflict', lead: updated };
+      }
+      const confirmedCount = await env.DB.prepare(
+        `SELECT COUNT(*) AS count FROM manual_news_leads
+         WHERE review_date = ? AND confirmed_at IS NOT NULL`,
+      ).bind(lead.review_date).first<{ count: number }>();
+      if (Number(confirmedCount?.count || 0) >= MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT) {
+        return { ok: false, status: 409, error: 'manual_candidate_limit_exceeded', lead: updated };
       }
       return { ok: false, status: 409, error: 'lead_version_conflict', lead: updated };
     }
@@ -1796,11 +1867,15 @@ export async function confirmManualNewsLeadCandidate(
       previous_default_selected_ids: active.default_selected_ids,
       published_selected_ids: publishedIds,
       candidate,
-      max_candidates: 10,
+      max_candidates: TOTAL_NEWS_REVIEW_CANDIDATE_LIMIT,
     });
   } catch (error) {
-    if (error instanceof Error && error.message === 'candidate_cap_exhausted') {
-      return { ok: false, status: 409, error: 'candidate_cap_exhausted', lead };
+    if (error instanceof Error && [
+      'manual_candidate_limit_exceeded',
+      'automatic_candidate_limit_exceeded',
+      'review_candidate_total_limit_exceeded',
+    ].includes(error.message)) {
+      return { ok: false, status: 409, error: error.message, lead };
     }
     throw error;
   }
@@ -1812,7 +1887,7 @@ export async function confirmManualNewsLeadCandidate(
   });
   const candidateIds = merged.candidates.map((item) => item.item_id);
   // 人审优先：确认线索只改候选池，不得把人审选择序列扔回自动排序。带人审标记时
-  // 把人审序列（剔除已不在候选池的条目、补位追加在末尾）继续写进新版本的
+  // 把人审序列（同事件替换按别名原位改写，其他失效条目剔除）继续写进新版本的
   // applied_selected_ids，并继承标记，供后续自动冻结继续保护。
   const inheritsHumanSelection = active.human_reviewed && merged.default_selected_ids.length > 0;
   const inheritedSelectionHash = inheritsHumanSelection
@@ -1827,8 +1902,8 @@ export async function confirmManualNewsLeadCandidate(
 
   const statements = [
     confirmedLeadItemStatement(
-      env, lead, expectedVersion, candidate, publishedAt, itemExtra, now, verified.record, active,
-      false, existingManualVerifications,
+      env, lead, expectedVersion, candidate, publishedAt, itemExtra, now, verified.record,
+      active, false, existingManualVerifications,
     ),
     env.DB.prepare(
       `/* manual_lead:confirm_batch */ INSERT INTO daily_news_review_batches (
@@ -1891,11 +1966,23 @@ export async function confirmManualNewsLeadCandidate(
       metadata: {
         batch_id: batchId, revision: batchRevision, supersedes: active.batch_id,
         evicted_ids: merged.evicted_ids,
+        event_aliases: merged.event_aliases,
       },
       createdAt: now,
     }),
   ];
-  const results = await env.DB.batch(statements) as Array<{ meta?: { changes?: number } }>;
+  let results: Array<{ meta?: { changes?: number } }>;
+  try {
+    results = await env.DB.batch(statements) as Array<{ meta?: { changes?: number } }>;
+  } catch (error) {
+    const eventOwner = await confirmedManualEventOwner(
+      env, lead.review_date, assessment.event_key, eventClaimNonce,
+    );
+    if (eventOwner && eventOwner !== id) {
+      return { ok: false, status: 409, error: 'manual_candidate_event_conflict', lead };
+    }
+    throw error;
+  }
   const changed = auditedMutationChanges(results, 4, 5);
   const updated = await getManualNewsLead(env, id);
   const batch = await getNewsReviewBatch(env, lead.review_date, batchId);
@@ -1910,6 +1997,12 @@ export async function confirmManualNewsLeadCandidate(
     };
   }
   if (!updated || updated.confirmed_batch_id !== batchId || !batch || !changed) {
+    const eventOwner = await confirmedManualEventOwner(
+      env, lead.review_date, assessment.event_key, eventClaimNonce,
+    );
+    if (eventOwner && eventOwner !== id) {
+      return { ok: false, status: 409, error: 'manual_candidate_event_conflict', ...(updated ? { lead: updated } : {}) };
+    }
     return { ok: false, status: 409, error: 'lead_version_conflict', ...(updated ? { lead: updated } : {}) };
   }
   if (updatedRow?.last_mutation_nonce !== confirmationNonce) {
@@ -1923,6 +2016,30 @@ export async function confirmManualNewsLeadCandidate(
     pending_initial_freeze: false,
     rerender_enqueued: false,
   };
+}
+
+async function confirmedManualEventOwner(
+  env: Env,
+  reviewDate: string,
+  eventKey: string,
+  mutationNonce: string,
+): Promise<string | null> {
+  const owner = await env.DB.prepare(
+    `/* manual_lead:confirm_event_owner */ SELECT lead_id FROM manual_news_lead_audit
+     WHERE action = 'confirm_candidate' AND mutation_nonce = ? LIMIT 1`,
+  ).bind(mutationNonce).first<{ lead_id: string }>();
+  if (owner?.lead_id) return owner.lead_id;
+  const confirmed = await env.DB.prepare(
+    `/* manual_lead:confirmed_event_owner */ SELECT l.id AS lead_id
+     FROM manual_news_leads l
+     JOIN manual_news_assessment_verifications v
+       ON v.lead_id = l.id AND v.status = 'active'
+     JOIN manual_news_event_assessments a
+       ON a.lead_id = v.lead_id AND a.assessment_version = v.assessment_version
+     WHERE l.review_date = ? AND l.confirmed_at IS NOT NULL AND a.event_key = ?
+     ORDER BY l.confirmed_at ASC, l.id ASC LIMIT 1`,
+  ).bind(reviewDate, eventKey).first<{ lead_id: string }>();
+  return confirmed?.lead_id || null;
 }
 
 function confirmedLeadItemStatement(
@@ -1952,7 +2069,9 @@ function confirmedLeadItemStatement(
          WHERE review_date = ? AND lineage_id = ? AND batch_id = ? AND batch_revision = ? AND is_current = 1)`
     : requireNoActiveBatch
       ? ` AND NOT EXISTS (SELECT 1 FROM daily_news_review_batches
-           WHERE review_date = ? AND lineage_id = ? AND is_current = 1)`
+           WHERE review_date = ? AND lineage_id = ? AND is_current = 1)
+         AND (SELECT COUNT(*) FROM manual_news_leads
+           WHERE review_date = ? AND confirmed_at IS NOT NULL) < ${MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT}`
       : '';
   const existingManualGuard = requiredManualVerifications.length
     ? requiredManualVerifications.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
@@ -1977,7 +2096,7 @@ function confirmedLeadItemStatement(
   if (expectedActiveBatch) {
     values.push(lead.review_date, lead.review_date, expectedActiveBatch.batch_id, expectedActiveBatch.batch_revision);
   } else if (requireNoActiveBatch) {
-    values.push(lead.review_date, lead.review_date);
+    values.push(lead.review_date, lead.review_date, lead.review_date);
   }
   return env.DB.prepare(
     `/* manual_lead:confirm_item */ INSERT INTO items (
