@@ -27,6 +27,9 @@ const fact = 'Anthropic 开放 Model Hardware Standard（MHS）研究预览。';
 const excerpt = 'Anthropic is opening a research preview of the Model Hardware Standard (MHS), '
   + 'a shared specification for AI agents to safely operate physical devices, '
   + 'to a first group of scientific research labs and advanced manufacturers.';
+const firstPersonExcerpt = 'We’re opening a research preview of the Model Hardware Standard (MHS), '
+  + 'a shared specification for AI agents to safely operate physical devices, '
+  + 'to a first group of scientific research labs and advanced manufacturers.';
 
 function evidence(overrides: Partial<ManualNewsEvidence> = {}): ManualNewsEvidence {
   return withSignedArticleTextV2Audit({
@@ -41,6 +44,38 @@ function evidence(overrides: Partial<ManualNewsEvidence> = {}): ManualNewsEviden
     claims_supported: [excerpt],
     reliable: true,
     ...overrides,
+  });
+}
+
+function firstPersonEvidence(overrides: Partial<ManualNewsEvidence> = {}): ManualNewsEvidence {
+  return evidence({
+    publisher: 'anthropic.com',
+    excerpt: firstPersonExcerpt,
+    ...overrides,
+  });
+}
+
+async function firstPersonPayload(rawExcerpt = firstPersonExcerpt): Promise<ManualNewsSourceSupportPayload> {
+  const signedEvidence = firstPersonEvidence({ excerpt: rawExcerpt });
+  const selection = validateManualNewsSourceSupportSelection(
+    { evidence_id: signedEvidence.id, quote: rawExcerpt },
+    { fact, evidence: [signedEvidence] },
+  );
+  const verification = validateManualNewsSourceSupportVerification(
+    { supported: true, evidence_id: signedEvidence.id }, selection,
+  );
+  return createManualNewsSourceSupportPayload({
+    lead: {
+      id: 'ml-20260828-mhs-first-person', review_date: '2026-08-28', input_type: 'text_url',
+      input_text: fact, input_url: signedEvidence.url, note: '',
+    },
+    authorization: {
+      audit_id: 42,
+      candidate_authorization: 'source_support_v1',
+      submit_identity_digest: '2'.repeat(64),
+      idempotency_key: 'submit-mhs-first-person',
+    },
+    evidence: [signedEvidence], selection, verification,
   });
 }
 
@@ -72,6 +107,151 @@ async function payload(): Promise<ManualNewsSourceSupportPayload> {
 }
 
 describe('manual news source_support_v1', () => {
+  test('accepts the raw Anthropic first-person production excerpt and binds it byte-for-byte', async () => {
+    const signedEvidence = firstPersonEvidence();
+    const selection = validateManualNewsSourceSupportSelection(
+      { evidence_id: signedEvidence.id, quote: firstPersonExcerpt },
+      { fact, evidence: [signedEvidence] },
+    );
+    expect(selection).toEqual({ evidence_id: signedEvidence.id, quote: firstPersonExcerpt });
+
+    const curlyPayload = await firstPersonPayload();
+    const curlyProof = await createManualNewsSourceSupportProof(
+      { lead_id: 'ml-20260828-mhs-first-person', assessment_version: 7, payload: curlyPayload },
+      testManualNewsVerificationKeyring(verificationSecret), testManualNewsResponseKeyring(),
+    );
+    await expect(isCurrentManualNewsSourceSupportProof(
+      { lead_id: 'ml-20260828-mhs-first-person', assessment_version: 7, payload: curlyPayload },
+      curlyProof,
+      testManualNewsVerificationKeyring(verificationSecret), testManualNewsResponseKeyring(),
+    )).resolves.toBe(true);
+
+    const asciiExcerpt = firstPersonExcerpt.replace('We’re', "We're");
+    const asciiPayload = await firstPersonPayload(asciiExcerpt);
+    const asciiProof = await createManualNewsSourceSupportProof(
+      { lead_id: 'ml-20260828-mhs-first-person', assessment_version: 7, payload: asciiPayload },
+      testManualNewsVerificationKeyring(verificationSecret), testManualNewsResponseKeyring(),
+    );
+    expect(asciiProof.canonical_digest).not.toBe(curlyProof.canonical_digest);
+    await expect(isCurrentManualNewsSourceSupportProof(
+      {
+        lead_id: 'ml-20260828-mhs-first-person', assessment_version: 7,
+        payload: { ...curlyPayload, selection: asciiPayload.selection },
+      },
+      curlyProof,
+      testManualNewsVerificationKeyring(verificationSecret), testManualNewsResponseKeyring(),
+    )).resolves.toBe(false);
+  });
+
+  test.each([
+    firstPersonExcerpt,
+    firstPersonExcerpt.replace('We’re', "We're"),
+    firstPersonExcerpt.replace('We’re', 'We are'),
+  ])('accepts only an enumerated first-person opening prefix: %s', (rawExcerpt) => {
+    const signedEvidence = firstPersonEvidence({ excerpt: ` \t\r\n${rawExcerpt}` });
+    expect(validateManualNewsSourceSupportSelection(
+      { evidence_id: signedEvidence.id, quote: rawExcerpt },
+      { fact, evidence: [signedEvidence] },
+    )).toEqual({ evidence_id: signedEvidence.id, quote: rawExcerpt });
+  });
+
+  test.each([
+    [
+      'whitespace folding cannot create a quote match',
+      firstPersonExcerpt.replace('We’re opening', 'We’re  opening'),
+      firstPersonExcerpt,
+    ],
+    [
+      'NFC composition cannot create a quote match',
+      excerpt.replace('specification', 'spe\u0301cification'),
+      excerpt.replace('specification', 'spécification'),
+    ],
+  ])('requires a raw code-unit substring: %s', (_label, rawExcerpt, rawQuote) => {
+    const signedEvidence = firstPersonEvidence({ excerpt: rawExcerpt });
+    expect(() => validateManualNewsSourceSupportSelection(
+      { evidence_id: signedEvidence.id, quote: rawQuote },
+      { fact, evidence: [signedEvidence] },
+    )).toThrow(/source_support_quote_invalid/);
+  });
+
+  test.each([
+    ['bare domain', { url: 'https://anthropic.com/news/model-hardware-standard-research-preview' }],
+    ['other subdomain', { url: 'https://evil.www.anthropic.com/news/model-hardware-standard-research-preview' }],
+    ['suffix deception', { url: 'https://www.anthropic.com.evil/news/model-hardware-standard-research-preview' }],
+    ['userinfo', { url: 'https://user:pass@www.anthropic.com/news/model-hardware-standard-research-preview' }],
+    ['port', { url: 'https://www.anthropic.com:8443/news/model-hardware-standard-research-preview' }],
+    ['trailing dot', { url: 'https://www.anthropic.com./news/model-hardware-standard-research-preview' }],
+    ['IDN host', { url: 'https://www.anthrοpic.com/news/model-hardware-standard-research-preview' }],
+    ['http', { url: 'http://www.anthropic.com/news/model-hardware-standard-research-preview' }],
+    ['wrong path', { url: 'https://www.anthropic.com/news/model-hardware-standard' }],
+    ['query', { url: 'https://www.anthropic.com/news/model-hardware-standard-research-preview?ref=test' }],
+    ['hash', { url: 'https://www.anthropic.com/news/model-hardware-standard-research-preview#intro' }],
+    ['wrong publisher', { publisher: 'Anthropic' }],
+    ['unsafe publisher', { publisher: 'anthropic.com\u061c' }],
+    ['secondary evidence', { source_type: 'independent_media' as const }],
+    ['unreliable evidence', { reliable: false }],
+  ])('rejects first-person evidence with invalid official binding: %s', (_label, overrides) => {
+    const signedEvidence = firstPersonEvidence(overrides);
+    expect(() => validateManualNewsSourceSupportSelection(
+      { evidence_id: signedEvidence.id, quote: firstPersonExcerpt },
+      { fact, evidence: [signedEvidence] },
+    )).toThrow();
+  });
+
+  test.each([
+    `Partner says, “${firstPersonExcerpt}”`,
+    `“${firstPersonExcerpt}”`,
+    `—${firstPersonExcerpt}`,
+    `\u00a0${firstPersonExcerpt}`,
+    `Earlier context. ${firstPersonExcerpt}`,
+  ])('rejects an internal or non-ASCII-leading first-person quote: %s', (rawExcerpt) => {
+    const signedEvidence = firstPersonEvidence({ excerpt: rawExcerpt });
+    expect(() => validateManualNewsSourceSupportSelection(
+      { evidence_id: signedEvidence.id, quote: firstPersonExcerpt },
+      { fact, evidence: [signedEvidence] },
+    )).toThrow();
+  });
+
+  test.each([
+    'We plan to open a research preview of the Model Hardware Standard (MHS).',
+    'We intend to open a research preview of the Model Hardware Standard (MHS).',
+    'We will open a research preview of the Model Hardware Standard (MHS).',
+    'We may open a research preview of the Model Hardware Standard (MHS).',
+    'We’re not opening a research preview of the Model Hardware Standard (MHS).',
+    'We’re opening access to the Model Hardware Standard (MHS).',
+    'We’re releasing the Model Hardware Standard (MHS).',
+  ])('does not reinterpret non-preview first-person semantics: %s', (rawExcerpt) => {
+    const signedEvidence = firstPersonEvidence({ excerpt: rawExcerpt });
+    expect(() => validateManualNewsSourceSupportSelection(
+      { evidence_id: signedEvidence.id, quote: rawExcerpt },
+      { fact, evidence: [signedEvidence] },
+    )).toThrow();
+  });
+
+  test('keeps actor, object, atomicity, bidi, and zero-width gates after first-person binding', () => {
+    const signedEvidence = firstPersonEvidence();
+    for (const unsupportedFact of [
+      'Google 开放 Model Hardware Standard（MHS）研究预览。',
+      'Anthropic 开放 Claude 研究预览。',
+    ]) {
+      expect(() => validateManualNewsSourceSupportSelection(
+        { evidence_id: signedEvidence.id, quote: firstPersonExcerpt },
+        { fact: unsupportedFact, evidence: [signedEvidence] },
+      )).toThrow();
+    }
+    for (const rawExcerpt of [
+      `${firstPersonExcerpt.slice(0, -1)}, and we also release Claude.`,
+      firstPersonExcerpt.replace('We’re', 'We\u202ere'),
+      firstPersonExcerpt.replace('We’re', 'We\u200bre'),
+    ]) {
+      const unsafeEvidence = firstPersonEvidence({ excerpt: rawExcerpt });
+      expect(() => validateManualNewsSourceSupportSelection(
+        { evidence_id: unsafeEvidence.id, quote: rawExcerpt },
+        { fact, evidence: [unsafeEvidence] },
+      )).toThrow();
+    }
+  });
+
   test('derives one strict MHS preview identity locally and keeps preview distinct', async () => {
     const identity = await deriveManualEventIdentityV1(fact);
     expect(identity).toMatchObject({
@@ -268,12 +448,12 @@ describe('manual news source_support_v1', () => {
     )).toThrow(/source_support_(?:quote|fact|evidence)_invalid/);
   });
 
-  test('normalizes NFC and whitespace but still requires a contiguous excerpt substring', () => {
+  test('does not use normalized whitespace to manufacture a contiguous excerpt substring', () => {
     const spacedExcerpt = excerpt.replace('is opening', 'is   opening');
     const signed = evidence({ excerpt: spacedExcerpt, claims_supported: [spacedExcerpt] });
-    expect(validateManualNewsSourceSupportSelection(
+    expect(() => validateManualNewsSourceSupportSelection(
       { evidence_id: signed.id, quote: excerpt }, { fact, evidence: [signed] },
-    ).quote).toBe(excerpt);
+    )).toThrow(/source_support_quote_invalid/);
     expect(() => validateManualNewsSourceSupportSelection(
       { evidence_id: signed.id, quote: 'Anthropic opening Model Hardware Standard (MHS)' },
       { fact, evidence: [signed] },
