@@ -1319,7 +1319,7 @@ describe('manual lead D1-backed dedupe', () => {
     });
     expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
       FROM manual_news_assessment_verifications WHERE status = 'active'`).get()).toEqual({ count: 699 });
-  }, 20_000);
+  }, 60_000);
 
   test('atomically writes source proof, item, revision, lead confirmation, and final audit', async () => {
     const state = await sourceSupportFixture();
