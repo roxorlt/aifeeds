@@ -80,6 +80,7 @@ export interface ManualSearchResult {
 
 export interface ManualLeadProcessingStore {
   getLead(id: string): Promise<ManualNewsLeadRecord | null>;
+  getPaidRetrievalEpoch(id: string): Promise<number>;
   hasPersistedAssessment(id: string): Promise<boolean>;
   transition(
     id: string,
@@ -210,7 +211,7 @@ function assessmentGenerationAuditFromCycle(
 
 export interface ManualLeadProcessingAdapters {
   search(input: { date: string; text: string; note: string }): Promise<ManualSearchResult[]>;
-  fetch(url: string): Promise<PublicDocument>;
+  fetch(url: string, context?: { retrieval_generation: number }): Promise<PublicDocument>;
   extract(document: PublicDocument, hint?: ManualSearchResult): Promise<ManualNewsEvidence | null>;
   assess(prompt: { system: string; user: string }, context?: ManualNewsProviderCallContext): Promise<unknown>;
   verify(prompt: { system: string; user: string }, context?: ManualNewsProviderCallContext): Promise<unknown>;
@@ -315,6 +316,11 @@ export async function processManualNewsLead(
   let lead = await store.getLead(leadId);
   if (!lead) throw new Error('manual_news_lead_not_found');
   let status = lead.status;
+  if (!PROCESSABLE_STATUSES.has(status)) throw new Error(`lead_not_processable:${status}`);
+  const retrievalGeneration = await store.getPaidRetrievalEpoch(leadId);
+  if (!Number.isSafeInteger(retrievalGeneration) || retrievalGeneration < 0) {
+    throw new Error('invalid_paid_retrieval_epoch');
+  }
   let assessmentGenerationAudit: ManualLeadTransitionPatch['audit_metadata'];
   let providerCallSequence = 0;
   const providerCallContext = (
@@ -328,7 +334,6 @@ export async function processManualNewsLead(
       attempt: lead!.processing_attempt,
     };
   };
-  if (!PROCESSABLE_STATUSES.has(status)) throw new Error(`lead_not_processable:${status}`);
   const transition = async (
     to: ManualNewsLeadStatus,
     patch: ManualLeadTransitionPatch = {},
@@ -365,7 +370,12 @@ export async function processManualNewsLead(
       let transientSourceError: unknown = null;
       for (const source of sources) {
         try {
-          const document = await adapters.fetch(source.url);
+          const document = await adapters.fetch(source.url, { retrieval_generation: retrievalGeneration });
+          if (source.url === normalized.url
+            && document.fetch_audit.protocol_version === 'provider_retrieval_v1'
+            && document.fetch_audit.input_url !== normalized.url) {
+            throw new Error('provider_identity_rejected');
+          }
           const extracted = await adapters.extract(document, source.hint);
           if (extracted && !evidence.some((item) => item.id === extracted.id)) evidence.push(extracted);
         } catch (error) {

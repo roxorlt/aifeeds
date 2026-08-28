@@ -277,7 +277,7 @@ describe('manual lead candidate confirmation', () => {
     vi.mocked(newsReviewExpiresAt).mockReturnValue(999);
   });
 
-  test('atomically supersedes V1 with a capped V2 while preserving current published Top selection', async () => {
+  test('atomically appends the manual candidate after the automatic ten while preserving current published selection', async () => {
     const memory = await fakeConfirmationEnv();
     const result = await confirmManualNewsLeadCandidate(
       memory.env, memory.row.id, 7, 1, 'confirm-key-1', 100,
@@ -287,13 +287,15 @@ describe('manual lead candidate confirmation', () => {
       ok: true, changed: true, rerender_enqueued: false, pending_initial_freeze: false,
       batch: { batch_id: 'nr-20260811-newnewnewnew', revision: 2, supersedes_revision: 1, current: true },
     });
-    expect(insertedBatch.candidates).toHaveLength(10);
+    expect(insertedBatch.candidates).toHaveLength(11);
+    expect(insertedBatch.candidates.slice(0, 10).map((item: any) => item.item_id))
+      .toEqual(previousCandidates.map((item) => item.item_id));
     expect(insertedBatch.candidates.at(-1)).toMatchObject({
       item_id: `blog:manual:${memory.row.id}`, origin: 'manual_lead', lead_id: memory.row.id,
       title: 'Anthropic已披露2026年8月10日仅适用于受支持Claude输出的来源信息。',
       summary: 'Anthropic已披露2026年8月10日仅适用于受支持Claude输出的来源信息。',
     });
-    expect(insertedBatch.candidates.some((item: any) => item.item_id === 'news-10')).toBe(false);
+    expect(insertedBatch.candidates.some((item: any) => item.item_id === 'news-10')).toBe(true);
     expect(insertedBatch.default_selected_ids).toEqual(['news-2', 'news-1', 'news-5']);
     expect(insertedBatch.applied_selected_ids).toBeNull();
   });
@@ -336,6 +338,9 @@ describe('manual lead candidate confirmation', () => {
     });
     const itemStatement = memory.prepared.find((statement) => statement.sql.includes('manual_lead:confirm_item'));
     expect(itemStatement?.sql).toMatch(/NOT EXISTS \(SELECT 1 FROM daily_news_review_batches/);
+    expect(itemStatement?.sql).toMatch(/COUNT\(\*\).*confirmed_at IS NOT NULL\) < 50/s);
+    const confirmStatement = memory.prepared.find((statement) => statement.sql.includes('manual_lead:confirm_prefreeze'));
+    expect(confirmStatement?.sql).toMatch(/COUNT\(\*\).*confirmed_at IS NOT NULL\) < 50/s);
     expect(memory.prepared.some((statement) => statement.sql.includes('manual_lead:candidate_generation_init'))).toBe(true);
     expect(memory.prepared.some((statement) => statement.sql.includes('manual_lead:candidate_generation_advance'))).toBe(true);
     expect(memory.prepared.some((statement) => statement.sql.includes('manual_lead:confirm_batch'))).toBe(false);

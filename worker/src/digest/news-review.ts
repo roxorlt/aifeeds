@@ -1,6 +1,11 @@
 import type { Env } from '../index';
 import { pushDeerMessage } from '../notifier';
-import { mergeManualLeadCandidate } from './manual-news-leads';
+import {
+  AUTOMATIC_NEWS_REVIEW_CANDIDATE_LIMIT,
+  MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT,
+  mergeManualLeadCandidate,
+  TOTAL_NEWS_REVIEW_CANDIDATE_LIMIT,
+} from './manual-news-leads';
 import {
   authorizeFormalNewsSet,
   formalNewsFinalGuardBindings,
@@ -482,7 +487,13 @@ async function freezeNewsReviewBatchAtGeneration(
   candidateGeneration: number,
   generationRetry: number,
 ): Promise<FreezeNewsReviewBatchResult> {
-  if (candidates.length < 5 || candidates.length > 10) throw new Error('review_candidates_must_be_five_to_ten');
+  if (candidates.length < 5) throw new Error('review_candidates_must_be_five_to_ten');
+  const submittedManualCount = candidates.filter(isManualCandidateSnapshot).length;
+  if (submittedManualCount > MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT) throw new Error('manual_candidate_limit_exceeded');
+  if (candidates.length - submittedManualCount > AUTOMATIC_NEWS_REVIEW_CANDIDATE_LIMIT) {
+    throw new Error('automatic_candidate_limit_exceeded');
+  }
+  if (candidates.length > TOTAL_NEWS_REVIEW_CANDIDATE_LIMIT) throw new Error('review_candidate_total_limit_exceeded');
   const submittedCandidateIds = candidates.map((candidate) => candidate.item_id);
   if (new Set(submittedCandidateIds).size !== submittedCandidateIds.length) throw new Error('review_candidates_must_be_unique');
   const previous = await getActiveNewsReviewBatch(env, date);
@@ -490,6 +501,14 @@ async function freezeNewsReviewBatchAtGeneration(
     env, date, candidates, defaultSelectedIds, previous,
   );
   const effectiveCandidates = preserved.candidates;
+  const effectiveManualCount = effectiveCandidates.filter(isManualCandidateSnapshot).length;
+  if (effectiveManualCount > MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT) throw new Error('manual_candidate_limit_exceeded');
+  if (effectiveCandidates.length - effectiveManualCount > AUTOMATIC_NEWS_REVIEW_CANDIDATE_LIMIT) {
+    throw new Error('automatic_candidate_limit_exceeded');
+  }
+  if (effectiveCandidates.length > TOTAL_NEWS_REVIEW_CANDIDATE_LIMIT) {
+    throw new Error('review_candidate_total_limit_exceeded');
+  }
   const candidateIds = effectiveCandidates.map((candidate) => candidate.item_id);
   const freezeAuthorization = await authorizeFormalNewsSet(
     env, date, candidateIds, 'review_freeze_final_guard',
@@ -1141,7 +1160,10 @@ async function durableConfirmedManualCandidates(env: Env, date: string): Promise
      FROM manual_news_leads l
      WHERE l.review_date = ? AND l.confirmed_at IS NOT NULL
        AND l.status IN ('recommended', 'needs_review')
-     ORDER BY l.confirmed_at ASC, l.id ASC`,
+     ORDER BY COALESCE((
+       SELECT MIN(audit.id) FROM manual_news_lead_audit audit
+       WHERE audit.lead_id = l.id AND audit.action = 'confirm_candidate'
+     ), 9223372036854775807) ASC, l.confirmed_at ASC, l.id ASC`,
   ).bind(date).all<ConfirmedManualCandidateRow>();
   const candidates: NewsReviewCandidate[] = [];
   for (const row of confirmed.results || []) {
@@ -1179,7 +1201,7 @@ async function preserveConfirmedManualCandidates(
       manuals.push(candidate);
     }
   }
-  if (manuals.length > 10) throw new Error('candidate_cap_exhausted');
+  if (manuals.length > MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT) throw new Error('manual_candidate_limit_exceeded');
 
   const defaultAliases = new Map<string, string>();
   const availableById = new Map<string, NewsReviewCandidate>();
@@ -1203,7 +1225,9 @@ async function preserveConfirmedManualCandidates(
     if (candidate.event_key) seenEventKeys.add(candidate.event_key);
     protectedScheduled.push(candidate);
   }
-  if (manuals.length + protectedScheduled.length > 10) throw new Error('candidate_cap_exhausted');
+  if (protectedScheduled.length > AUTOMATIC_NEWS_REVIEW_CANDIDATE_LIMIT) {
+    throw new Error('automatic_candidate_limit_exceeded');
+  }
 
   const unselectedScheduled: NewsReviewCandidate[] = [];
   for (const candidate of submittedCandidates) {
@@ -1222,12 +1246,15 @@ async function preserveConfirmedManualCandidates(
     if (candidate.event_key) seenEventKeys.add(candidate.event_key);
     unselectedScheduled.push(candidate);
   }
-  const scheduledCapacity = 10 - manuals.length;
+  const scheduledCapacity = AUTOMATIC_NEWS_REVIEW_CANDIDATE_LIMIT;
   const candidates = [
     ...protectedScheduled,
-    ...unselectedScheduled.slice(0, scheduledCapacity - protectedScheduled.length),
+    ...unselectedScheduled.slice(0, Math.max(0, scheduledCapacity - protectedScheduled.length)),
     ...manuals,
   ];
+  if (candidates.length > TOTAL_NEWS_REVIEW_CANDIDATE_LIMIT) {
+    throw new Error('review_candidate_total_limit_exceeded');
+  }
   const candidateIds = new Set(candidates.map((candidate) => candidate.item_id));
   const defaultSelectedIds = [...new Set(submittedDefaultIds.map((id) => defaultAliases.get(id) || id))]
     .filter((id) => candidateIds.has(id));
@@ -1300,7 +1327,10 @@ export async function freezeNewsReviewBatchFromPool(
      FROM manual_news_leads l
      WHERE l.review_date = ? AND l.confirmed_at IS NOT NULL AND l.confirmed_batch_id IS NULL
        AND l.status IN ('recommended', 'needs_review')
-     ORDER BY l.confirmed_at ASC`,
+     ORDER BY COALESCE((
+       SELECT MIN(audit.id) FROM manual_news_lead_audit audit
+       WHERE audit.lead_id = l.id AND audit.action = 'confirm_candidate'
+     ), 9223372036854775807) ASC, l.confirmed_at ASC, l.id ASC`,
   ).bind(date).all<ConfirmedManualCandidateRow>();
   for (const row of confirmed.results || []) {
     const candidate = await verifiedManualCandidate(env, row);
@@ -1310,7 +1340,7 @@ export async function freezeNewsReviewBatchFromPool(
       previous_default_selected_ids: freezeDefaults,
       published_selected_ids: freezeDefaults,
       candidate,
-      max_candidates: 10,
+      max_candidates: TOTAL_NEWS_REVIEW_CANDIDATE_LIMIT,
     });
     candidates = merged.candidates;
     freezeDefaults = merged.default_selected_ids;

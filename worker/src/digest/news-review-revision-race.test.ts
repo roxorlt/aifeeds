@@ -362,6 +362,11 @@ function activeCount(db: SerialSqliteD1): number {
     WHERE review_date = '2026-08-11' AND lineage_id = '2026-08-11' AND is_current = 1`).get() as { count: number }).count);
 }
 
+function confirmEventClaimCount(db: SerialSqliteD1, leadId: string): number {
+  return Number((db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+    WHERE lead_id = ? AND action = 'confirm_event_claim'`).get(leadId) as { count: number }).count);
+}
+
 describe('news review revision CAS', () => {
   test('verified selection snapshot binds the active revision and fails closed on a soft-deleted selected item', async () => {
     const current = state();
@@ -756,6 +761,60 @@ describe('news review revision CAS', () => {
     expect(activeCount(current.db)).toBe(1);
   });
 
+  test('confirmation leaves no event owner when a sanitized manual candidate proof becomes stale in the final CAS', async () => {
+    const current = state();
+    const existingLeadId = 'ml-20260811-existingproof';
+    const targetLeadId = 'ml-20260811-targetproof01';
+    await insertLead(current.db, existingLeadId, 'existing-proof-event');
+    const frozen = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('existing-proof-race'),
+      candidates('existing-proof-race').map((item) => item.item_id), 100,
+    );
+    const first = await confirmManualNewsLeadCandidate(
+      current.env, existingLeadId, 7, frozen.batch.batch_revision, 'confirm-existing-proof', 110,
+    );
+    expect(first).toMatchObject({ ok: true, batch: { revision: 2 } });
+    await insertLead(current.db, targetLeadId, 'target-proof-event');
+    const gate = current.db.pauseNextBatch();
+
+    const confirmation = confirmManualNewsLeadCandidate(
+      current.env, targetLeadId, 7, 2, 'confirm-after-existing-proof-check', 150,
+    );
+    await gate.entered;
+    current.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications
+      SET status = 'invalidated', reason = 'concurrent_takeover', invalidated_at = 151
+      WHERE lead_id = ? AND status = 'active'`).run(existingLeadId);
+    gate.release();
+
+    await expect(confirmation).resolves.toMatchObject({ ok: false, status: 409 });
+    expect(current.db.sqlite.prepare(`SELECT confirmed_at FROM manual_news_leads WHERE id = ?`)
+      .get(targetLeadId)).toEqual({ confirmed_at: null });
+    expect(current.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM items WHERE id = ?`)
+      .get(`blog:manual:${targetLeadId}`)).toEqual({ count: 0 });
+    expect(confirmEventClaimCount(current.db, targetLeadId)).toBe(0);
+  });
+
+  test('prefreeze manual cap rejection leaves no event owner claim', async () => {
+    const current = state();
+    const insertConfirmed = current.db.sqlite.prepare(`INSERT INTO manual_news_leads (
+      id, review_date, input_type, input_text, input_url, note, status, version,
+      submit_idempotency_key, processing_owner, processing_attempt, confirmed_at, created_at, updated_at
+    ) VALUES (?, '2026-08-11', 'text', 'seed', '', '', 'recommended', 1,
+      ?, 'workflow-owner', 1, 1, 1, 1)`);
+    for (let index = 0; index < 50; index += 1) {
+      insertConfirmed.run(`ml-20260811-cap-seed-${index}`, `submit-cap-seed-${index}`);
+    }
+    const leadId = 'ml-20260811-cap-target01';
+    await insertLead(current.db, leadId, 'prefreeze-cap-target-event');
+
+    await expect(confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, 0, 'confirm-prefreeze-cap-target', 150,
+    )).resolves.toMatchObject({
+      ok: false, status: 409, error: 'manual_candidate_limit_exceeded',
+    });
+    expect(confirmEventClaimCount(current.db, leadId)).toBe(0);
+  });
+
   test('confirmation cannot commit after verification JSON changes between validation and CAS', async () => {
     const current = state();
     const leadId = 'ml-20260811-q00000000001';
@@ -907,6 +966,7 @@ describe('news review revision CAS', () => {
     expect(current.db.sqlite.prepare(
       "SELECT COUNT(*) AS count FROM manual_news_lead_audit WHERE lead_id = ? AND action = 'confirm_candidate'",
     ).get(leadId)).toEqual({ count: 0 });
+    expect(confirmEventClaimCount(current.db, leadId)).toBe(0);
     expect(current.db.sqlite.prepare(
       "SELECT generation FROM daily_news_review_candidate_generations WHERE review_date = '2026-08-11' AND lineage_id = '2026-08-11'",
     ).get()).toEqual({ generation: 0 });
@@ -1015,7 +1075,7 @@ describe('news review revision CAS', () => {
     expect(activeCount(current.db)).toBe(1);
   });
 
-  test('a changed scheduled V3 preserves the confirmed manual candidate from V2 before deterministic capping', async () => {
+  test('a changed scheduled V3 preserves all ten automatic candidates and appends the confirmed manual candidate', async () => {
     const current = state();
     const base = candidates('base');
     const initial = await freezeNewsReviewBatch(
@@ -1043,7 +1103,9 @@ describe('news review revision CAS', () => {
       default_selected_ids: initial.batch.default_selected_ids,
       applied_selected_ids: null,
     });
-    expect(scheduled.batch.candidates).toHaveLength(10);
+    expect(scheduled.batch.candidates).toHaveLength(11);
+    expect(scheduled.batch.candidates.slice(0, 10).map((candidate) => candidate.item_id))
+      .toEqual(changedScheduled.map((candidate) => candidate.item_id));
     expect(scheduled.batch.candidates.filter((candidate) => candidate.origin === 'manual_lead')).toEqual([
       expect.objectContaining({
         item_id: `blog:manual:${leadId}`,
@@ -1051,7 +1113,7 @@ describe('news review revision CAS', () => {
         event_key: 'event-manual-durable',
       }),
     ]);
-    expect(scheduled.batch.candidate_ids).not.toContain('fresh-5');
+    expect(scheduled.batch.candidate_ids).toContain('fresh-5');
     expect(activeCount(current.db)).toBe(1);
   });
 
@@ -1209,7 +1271,7 @@ describe('news review revision CAS', () => {
   });
 
   // This gate serially builds/signs six complete leads and runs six CAS confirmations; 10s avoids shared-CI 5s jitter without weakening behavior.
-  test('sixth manual candidate cannot evict five published selections or five confirmed manual candidates', async () => {
+  test('six manual confirmations append in order without evicting the automatic ten or changing selection', async () => {
     const current = state();
     const scheduled = [...candidates('selected'), ...candidates('tail')];
     const initial = await freezeNewsReviewBatch(
@@ -1219,28 +1281,128 @@ describe('news review revision CAS', () => {
     for (let index = 1; index <= 6; index++) {
       const leadId = `ml-20260811-${String(index).repeat(12)}`;
       await insertLead(current.db, leadId, `manual-cap-event-${index}`);
-      const beforeBatchCount = Number((current.db.sqlite.prepare(
-        "SELECT COUNT(*) AS count FROM daily_news_review_batches WHERE review_date = '2026-08-11'",
-      ).get() as { count: number }).count);
       const result = await confirmManualNewsLeadCandidate(
         current.env, leadId, 7, revision, `confirm-cap-${index}`, 100 + index,
       );
-      if (index <= 5) {
-        expect(result).toMatchObject({ ok: true, batch: { revision: revision + 1 } });
-        revision += 1;
-      } else {
-        expect(result).toMatchObject({ ok: false, status: 409, error: 'candidate_cap_exhausted' });
-        expect(Number((current.db.sqlite.prepare(
-          "SELECT COUNT(*) AS count FROM daily_news_review_batches WHERE review_date = '2026-08-11'",
-        ).get() as { count: number }).count)).toBe(beforeBatchCount);
-        expect(current.db.sqlite.prepare(
-          'SELECT version, confirmed_at, confirmed_batch_id FROM manual_news_leads WHERE id = ?',
-        ).get(leadId)).toEqual({ version: 7, confirmed_at: null, confirmed_batch_id: null });
-      }
+      expect(result).toMatchObject({ ok: true, rerender_enqueued: false, batch: { revision: revision + 1 } });
+      revision += 1;
     }
     const active = await getActiveNewsReviewBatch(current.env, '2026-08-11');
-    expect(active?.candidates.filter((candidate) => candidate.origin === 'manual_lead')).toHaveLength(5);
-    expect(active?.candidate_ids.slice(0, 5)).toEqual(scheduled.slice(0, 5).map((item) => item.item_id));
+    expect(active?.candidates).toHaveLength(16);
+    expect(active?.candidate_ids.slice(0, 10)).toEqual(scheduled.map((item) => item.item_id));
+    expect(active?.candidates.filter((candidate) => candidate.origin === 'manual_lead')
+      .map((candidate) => candidate.lead_id)).toEqual(Array.from(
+      { length: 6 }, (_, index) => `ml-20260811-${String(index + 1).repeat(12)}`,
+    ));
+    expect(active?.default_selected_ids).toEqual(initial.batch.default_selected_ids);
+  }, 10_000);
+
+  test('same-event replacement rewrites default and human-applied selections in place through D1 CAS', async () => {
+    const automaticOnly = state();
+    const automatic = candidates('event-alias-default');
+    const initial = await freezeNewsReviewBatch(
+      automaticOnly.env, '2026-08-11', automatic, automatic.map((item) => item.item_id), 100,
+    );
+    const defaultLeadId = 'ml-20260811-aliasdefault';
+    await insertLead(automaticOnly.db, defaultLeadId, automatic[2].event_key!);
+    const defaultResult = await confirmManualNewsLeadCandidate(
+      automaticOnly.env, defaultLeadId, 7, initial.batch.batch_revision, 'confirm-alias-default', 110,
+    );
+    expect(defaultResult).toMatchObject({ ok: true });
+    expect((await getActiveNewsReviewBatch(automaticOnly.env, '2026-08-11'))?.default_selected_ids).toEqual([
+      automatic[0].item_id,
+      automatic[1].item_id,
+      `blog:manual:${defaultLeadId}`,
+      automatic[3].item_id,
+      automatic[4].item_id,
+    ]);
+
+    const human = state();
+    const humanAutomatic = candidates('event-alias-human');
+    const humanInitial = await freezeNewsReviewBatch(
+      human.env, '2026-08-11', humanAutomatic, humanAutomatic.map((item) => item.item_id), 100,
+    );
+    const humanOrder = [
+      humanAutomatic[4].item_id,
+      humanAutomatic[1].item_id,
+      humanAutomatic[3].item_id,
+    ];
+    const token = await createNewsReviewToken('test-secret', '2026-08-11', humanInitial.batch.batch_id);
+    expect(await submitNewsReviewSelection(human.env, {
+      date: '2026-08-11', batch_id: humanInitial.batch.batch_id, token, selected_ids: humanOrder,
+    }, 105)).toMatchObject({ ok: true, changed: true });
+    const humanLeadId = 'ml-20260811-aliashuman';
+    await insertLead(human.db, humanLeadId, humanAutomatic[1].event_key!);
+    const humanResult = await confirmManualNewsLeadCandidate(
+      human.env, humanLeadId, 7, humanInitial.batch.batch_revision, 'confirm-alias-human', 110,
+    );
+    expect(humanResult).toMatchObject({ ok: true });
+    expect(await getAppliedNewsReviewSelection(human.env, '2026-08-11')).toEqual([
+      humanAutomatic[4].item_id,
+      `blog:manual:${humanLeadId}`,
+      humanAutomatic[3].item_id,
+    ]);
+  });
+
+  test('concurrent same-event confirmations atomically choose one owner before and after freeze', async () => {
+    const prefreeze = state();
+    const prefreezeIds = ['ml-20260811-prefreeze-a', 'ml-20260811-prefreeze-b'];
+    for (const id of prefreezeIds) await insertLead(prefreeze.db, id, 'shared-prefreeze-event-2026-08-11');
+    const prefreezeResults = await Promise.all(prefreezeIds.map((id, index) => confirmManualNewsLeadCandidate(
+      prefreeze.env, id, 7, 0, `confirm-prefreeze-${index}`, 100,
+    )));
+    expect(prefreezeResults.filter((result) => result.ok)).toHaveLength(1);
+    expect(prefreezeResults.filter((result) => !result.ok)).toEqual([
+      expect.objectContaining({ ok: false, status: 409, error: 'manual_candidate_event_conflict' }),
+    ]);
+
+    const active = state();
+    const frozen = await freezeNewsReviewBatch(
+      active.env, '2026-08-11', candidates('concurrent-active'), candidates('concurrent-active').map((item) => item.item_id), 100,
+    );
+    const activeIds = ['ml-20260811-active-a', 'ml-20260811-active-b'];
+    for (const id of activeIds) await insertLead(active.db, id, 'shared-active-event-2026-08-11');
+    const activeResults = await Promise.all(activeIds.map((id, index) => confirmManualNewsLeadCandidate(
+      active.env, id, 7, frozen.batch.batch_revision, `confirm-active-${index}`, 110,
+    )));
+    expect(activeResults.filter((result) => result.ok)).toHaveLength(1);
+    expect(activeResults.filter((result) => !result.ok)).toEqual([
+      expect.objectContaining({ ok: false, status: 409, error: 'manual_candidate_event_conflict' }),
+    ]);
+    expect((await getActiveNewsReviewBatch(active.env, '2026-08-11'))?.candidates
+      .filter((candidate) => candidate.event_key === 'shared-active-event-2026-08-11')).toHaveLength(1);
+    expect(prefreeze.db.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM manual_news_lead_audit WHERE action = 'confirm_candidate'",
+    ).get()).toEqual({ count: 1 });
+    expect(active.db.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM manual_news_lead_audit WHERE action = 'confirm_candidate'",
+    ).get()).toEqual({ count: 1 });
+    expect(prefreezeIds.map((id) => confirmEventClaimCount(prefreeze.db, id))).toEqual([0, 0]);
+    expect(activeIds.map((id) => confirmEventClaimCount(active.db, id))).toEqual([0, 0]);
+  }, 10_000);
+
+  test('same-millisecond confirmations retain audit commit order when z confirms before a', async () => {
+    const current = state();
+    const scheduled = candidates('audit-order-base');
+    let revision = (await freezeNewsReviewBatch(
+      current.env, '2026-08-11', scheduled, scheduled.map((item) => item.item_id), 100,
+    )).batch.batch_revision;
+    const zLead = 'ml-20260811-z-order';
+    const aLead = 'ml-20260811-a-order';
+    await insertLead(current.db, zLead, 'audit-order-event-z');
+    await insertLead(current.db, aLead, 'audit-order-event-a');
+    for (const [leadId, key] of [[zLead, 'confirm-z-order'], [aLead, 'confirm-a-order']] as const) {
+      const result = await confirmManualNewsLeadCandidate(current.env, leadId, 7, revision, key, 200);
+      expect(result).toMatchObject({ ok: true });
+      revision += 1;
+    }
+    const refreshedScheduled = candidates('audit-order-refresh');
+    const refreshed = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', refreshedScheduled,
+      refreshedScheduled.map((item) => item.item_id), 300,
+    );
+    expect(refreshed.batch.candidates.filter((candidate) => candidate.origin === 'manual_lead')
+      .map((candidate) => candidate.lead_id)).toEqual([zLead, aLead]);
   }, 10_000);
 
   test('confirming a manual lead carries the human sequence and its review flag into the new revision', async () => {

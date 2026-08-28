@@ -487,6 +487,8 @@ describe('daily video content-addressed persistence', () => {
   });
 
   test('patched page timestamps are updated and IndexNow receives the watch page plus discovery URLs', async () => {
+    const uploadTime = new Date('2026-08-27T08:09:10.000Z');
+    vi.setSystemTime(uploadTime);
     const events: Event[] = [];
     const r2 = makeR2(events);
     seedDailyPage(r2);
@@ -504,7 +506,7 @@ describe('daily video content-addressed persistence', () => {
     expect(pageUpdate!.sql).not.toContain('generated_at');
     expect(pageUpdate!.args).toHaveLength(6);
     expect(pageUpdate!.args?.slice(0, 2)).toEqual([
-      expect.stringMatching(/^2026-08-27T/), '2026-07-14',
+      uploadTime.toISOString(), '2026-07-14',
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];

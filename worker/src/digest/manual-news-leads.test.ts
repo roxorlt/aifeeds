@@ -6233,7 +6233,7 @@ describe('manual news lead domain', () => {
       .toMatchObject({ duplicate: false, matched_lead_id: 'old' });
   });
 
-  test('creates a capped superseding candidate snapshot without changing the published selection', () => {
+  test('appends a confirmed manual candidate after the automatic ten without changing the published selection', () => {
     const previous = Array.from({ length: 10 }, (_, index) => ({
       item_id: `news-${index + 1}`, title: `新闻${index + 1}`, summary: '摘要', source: '来源', score: 100 - index,
       event_key: `event-${index + 1}`,
@@ -6246,52 +6246,57 @@ describe('manual news lead domain', () => {
         item_id: 'manual-news:lead-1', title: '手工线索', summary: '核验摘要', source: '官方', score: 88,
         event_key: 'manual-event', origin: 'manual_lead', lead_id: 'lead-1',
       },
-      max_candidates: 10,
+      max_candidates: 60,
     });
-    expect(merged.candidates).toHaveLength(10);
+    expect(merged.candidates).toHaveLength(11);
+    expect(merged.candidates.slice(0, 10).map((item) => item.item_id))
+      .toEqual(previous.map((item) => item.item_id));
     expect(merged.candidates.at(-1)?.item_id).toBe('manual-news:lead-1');
-    expect(merged.evicted_ids).toEqual(['news-10']);
+    expect(merged.evicted_ids).toEqual([]);
     expect(merged.default_selected_ids).toEqual(['news-2', 'news-1', 'news-5']);
     expect(merged.published_selected_ids).toEqual(['news-2', 'news-1', 'news-5']);
     expect(merged.enqueue_rerender).toBe(false);
   });
 
-  test('never evicts selected or manual candidates and fails closed when only protected candidates remain', () => {
-    const selected = Array.from({ length: 5 }, (_, index) => ({
-      item_id: `selected-${index + 1}`, title: '已选', summary: '摘要', source: '来源', score: 90 - index,
+  test('allows fifty manual appends and returns a dedicated error at the independent abuse limit', () => {
+    const automatic = Array.from({ length: 10 }, (_, index) => ({
+      item_id: `news-${index + 1}`, title: '自动', summary: '摘要', source: '来源', score: 100 - index,
+      event_key: `news-event-${index + 1}`,
     }));
-    const manuals = Array.from({ length: 5 }, (_, index) => ({
-      item_id: `manual-${index + 1}`, title: '手工', summary: '摘要', source: '来源', score: 80 - index,
-      event_key: `manual-event-${index + 1}`, origin: 'manual_lead' as const, lead_id: `lead-${index + 1}`,
-    }));
+    let merged: Pick<ReturnType<typeof mergeManualLeadCandidate>,
+      'candidates' | 'default_selected_ids' | 'published_selected_ids'> = {
+      candidates: automatic,
+      default_selected_ids: automatic.slice(0, 5).map((item) => item.item_id),
+      published_selected_ids: automatic.slice(0, 5).map((item) => item.item_id),
+    };
+    for (let index = 1; index <= 50; index++) {
+      merged = mergeManualLeadCandidate({
+        previous_candidates: merged.candidates,
+        previous_default_selected_ids: merged.default_selected_ids,
+        published_selected_ids: merged.published_selected_ids,
+        candidate: {
+          item_id: `manual-${index}`, title: '手工', summary: '摘要', source: '来源', score: 80 - index,
+          event_key: `manual-event-${index}`, origin: 'manual_lead', lead_id: `lead-${index}`,
+        },
+        max_candidates: 60,
+      });
+    }
+    expect(merged.candidates).toHaveLength(60);
+    expect(merged.candidates.slice(0, 10).map((item) => item.item_id))
+      .toEqual(automatic.map((item) => item.item_id));
     expect(() => mergeManualLeadCandidate({
-      previous_candidates: [...selected, ...manuals],
-      previous_default_selected_ids: selected.map((item) => item.item_id),
-      published_selected_ids: selected.map((item) => item.item_id),
+      previous_candidates: merged.candidates,
+      previous_default_selected_ids: merged.default_selected_ids,
+      published_selected_ids: merged.published_selected_ids,
       candidate: {
-        item_id: 'manual-6', title: '第六条手工', summary: '摘要', source: '来源', score: 75,
-        event_key: 'manual-event-6', origin: 'manual_lead', lead_id: 'lead-6',
+        item_id: 'manual-51', title: '手工', summary: '摘要', source: '来源', score: 1,
+        event_key: 'manual-event-51', origin: 'manual_lead', lead_id: 'lead-51',
       },
-      max_candidates: 10,
-    })).toThrow(/candidate_cap_exhausted/);
-
-    const tenManuals = Array.from({ length: 10 }, (_, index) => ({
-      item_id: `all-manual-${index + 1}`, title: '手工', summary: '摘要', source: '来源', score: 80 - index,
-      event_key: `all-manual-event-${index + 1}`, origin: 'manual_lead' as const, lead_id: `all-lead-${index + 1}`,
-    }));
-    expect(() => mergeManualLeadCandidate({
-      previous_candidates: tenManuals,
-      previous_default_selected_ids: tenManuals.slice(0, 5).map((item) => item.item_id),
-      published_selected_ids: tenManuals.slice(0, 5).map((item) => item.item_id),
-      candidate: {
-        item_id: 'all-manual-11', title: '手工', summary: '摘要', source: '来源', score: 70,
-        event_key: 'all-manual-event-11', origin: 'manual_lead', lead_id: 'all-lead-11',
-      },
-      max_candidates: 10,
-    })).toThrow(/candidate_cap_exhausted/);
+      max_candidates: 60,
+    })).toThrow(/manual_candidate_limit_exceeded/);
   });
 
-  test('successive manual confirmations evict only the deterministic scheduled tail', () => {
+  test('10 automatic plus one, two, and three manual confirmations yields 11, 12, and 13 in confirmation order', () => {
     const scheduled = Array.from({ length: 10 }, (_, index) => ({
       item_id: `news-${index + 1}`, title: '新闻', summary: '摘要', source: '来源', score: 100 - index,
     }));
@@ -6304,10 +6309,48 @@ describe('manual news lead domain', () => {
       previous_candidates: first.candidates, previous_default_selected_ids: selected, published_selected_ids: selected,
       candidate: { item_id: 'manual-2', title: '手工2', summary: '摘要', source: '来源', score: 89, origin: 'manual_lead', lead_id: 'lead-2' },
     });
-    expect(first.evicted_ids).toEqual(['news-10']);
-    expect(second.evicted_ids).toEqual(['news-9']);
-    expect(second.candidates.map((item) => item.item_id)).toEqual([
-      'news-1', 'news-2', 'news-3', 'news-4', 'news-5', 'news-6', 'news-7', 'news-8', 'manual-1', 'manual-2',
-    ]);
+    const third = mergeManualLeadCandidate({
+      previous_candidates: second.candidates, previous_default_selected_ids: selected, published_selected_ids: selected,
+      candidate: { item_id: 'manual-3', title: '手工3', summary: '摘要', source: '来源', score: 88, origin: 'manual_lead', lead_id: 'lead-3' },
+    });
+    expect(first.candidates).toHaveLength(11);
+    expect(second.candidates).toHaveLength(12);
+    expect(third.candidates).toHaveLength(13);
+    expect(first.evicted_ids).toEqual([]);
+    expect(second.evicted_ids).toEqual([]);
+    expect(third.evicted_ids).toEqual([]);
+    expect(third.candidates.slice(0, 10).map((item) => item.item_id))
+      .toEqual(scheduled.map((item) => item.item_id));
+    expect(third.candidates.slice(10).map((item) => item.item_id))
+      .toEqual(['manual-1', 'manual-2', 'manual-3']);
+  });
+
+  test('same-event manual confirmation replaces only its automatic duplicate and remains idempotent', () => {
+    const automatic = Array.from({ length: 10 }, (_, index) => ({
+      item_id: `news-${index + 1}`, title: '自动', summary: '摘要', source: '来源', score: 100 - index,
+      event_key: `event-${index + 1}`,
+    }));
+    const candidate = {
+      item_id: 'manual-duplicate', title: '人工核验', summary: '摘要', source: '来源', score: 90,
+      event_key: 'event-4', origin: 'manual_lead' as const, lead_id: 'lead-duplicate',
+    };
+    const first = mergeManualLeadCandidate({
+      previous_candidates: automatic,
+      previous_default_selected_ids: automatic.slice(0, 5).map((item) => item.item_id),
+      published_selected_ids: automatic.slice(0, 5).map((item) => item.item_id),
+      candidate,
+    });
+    const replay = mergeManualLeadCandidate({
+      previous_candidates: first.candidates,
+      previous_default_selected_ids: first.default_selected_ids,
+      published_selected_ids: first.published_selected_ids,
+      candidate,
+    });
+    expect(first.candidates).toHaveLength(10);
+    expect(first.candidates.map((item) => item.item_id)).not.toContain('news-4');
+    expect(first.candidates.at(-1)).toEqual(candidate);
+    expect(first.default_selected_ids).toEqual(['news-1', 'news-2', 'news-3', 'manual-duplicate', 'news-5']);
+    expect(first.published_selected_ids).toEqual(['news-1', 'news-2', 'news-3', 'manual-duplicate', 'news-5']);
+    expect(replay.candidates).toEqual(first.candidates);
   });
 });

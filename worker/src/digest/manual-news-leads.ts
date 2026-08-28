@@ -1,8 +1,13 @@
 import {
+  deriveRedFoxProviderOperationId,
   isPublicIpAddress,
+  normalizeWeChatArticleUrl,
   validatePublicHttpUrl,
   verifyDocumentFetchAuditResponseHmac,
+  verifyProviderRetrievalAuditResponseHmac,
   type DocumentFetchAudit,
+  type ManualNewsFetchAudit,
+  type ProviderRetrievalAudit,
 } from '../security/safe-url-fetch';
 import type { ManualNewsKeyring } from '../security/manual-news-keyring';
 
@@ -10,6 +15,9 @@ export const MANUAL_NEWS_LEAD_STATUSES = [
   'submitted', 'validating', 'researching', 'extracting', 'verifying', 'clustering', 'scored',
   'recommended', 'needs_review', 'duplicate', 'rejected', 'failed',
 ] as const;
+export const AUTOMATIC_NEWS_REVIEW_CANDIDATE_LIMIT = 10;
+export const MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT = 50;
+export const TOTAL_NEWS_REVIEW_CANDIDATE_LIMIT = 60;
 
 export type ManualNewsLeadStatus = (typeof MANUAL_NEWS_LEAD_STATUSES)[number];
 export type ManualNewsEventType = 'product_release' | 'product_documentation' | 'political_regulatory' | 'industry_event' | 'other';
@@ -34,7 +42,7 @@ export interface ManualNewsEvidence {
   excerpt: string;
   claims_supported: string[];
   reliable: boolean;
-  fetch_audit?: DocumentFetchAudit | null;
+  fetch_audit?: ManualNewsFetchAudit | null;
 }
 
 export type ManualFactSubjectRole = 'authority' | 'organization' | 'person' | 'product' | 'other';
@@ -2670,7 +2678,7 @@ function promptEvidenceContainmentKey(value: string): string {
 function promptEvidenceDocument(item: ManualNewsEvidence) {
   let excerpt = normalizedPromptEvidenceText(item.excerpt);
   const signedNonArticleBody = item.fetch_audit?.protocol_version === 'article_text_v2'
-    && item.fetch_audit.extraction !== 'article_text';
+    && 'extraction' in item.fetch_audit && item.fetch_audit.extraction !== 'article_text';
   const uniqueClaims = (signedNonArticleBody ? [] : item.claims_supported)
     .map(normalizedPromptEvidenceText)
     .filter((claim, index, all) => !!claim && all.indexOf(claim) === index);
@@ -5886,7 +5894,18 @@ const MANUAL_NEWS_EXCERPT_MAX_CODE_POINTS = 3_000;
 const MANUAL_NEWS_EXCERPT_MAX_UTF8_BYTES = 12_000;
 const MANUAL_NEWS_RESPONSE_PROFILE = 'proof_excerpt_v1';
 const MANUAL_NEWS_RESPONSE_HMAC_CONTRACT = 'hmac-sha256-canonical-json-all-fields-except-response_hmac-v1';
+const MANUAL_NEWS_PROVIDER_RESPONSE_HMAC_CONTRACT = 'hmac-sha256-domain-separated-canonical-json-all-fields-except-response_hmac-v1';
+const MANUAL_NEWS_PROVIDER_ID = 'redfox_gzh_article_content_v1';
+const MANUAL_NEWS_PROVIDER_IDENTITY_ASSERTION_CONTRACT = 'provider_asserted_wechat_article_identity_v1';
+const MANUAL_NEWS_PROVIDER_IDENTITY_ASSERTION_ASSURANCE = 'provider_assertion_not_independently_verified';
 const MANUAL_NEWS_PROOF_EXCERPT_ALGORITHM = 'utf8-nfc-ws1-codepoint-prefix-v1';
+const FROZEN_MANUAL_NEWS_PROVIDER_SHORT_ASSERTIONS = new Map([
+  ['https://mp.weixin.qq.com/s/a0kOMCJ78T8GlQ8dJ_fUDw', {
+    canonical_url: 'https://mp.weixin.qq.com/s?__biz=MzA3MzI4MjgzMw==&mid=2651052842&idx=1&sn=b51e7dcdefdc1d5e9bd54f005456bc19',
+    publisher: '机器之心',
+    wechat_biz: 'MzA3MzI4MjgzMw==',
+  }],
+]);
 
 function invalidManualNewsEvidenceProvenance(): never {
   throw new Error('manual_news_evidence_provenance_invalid');
@@ -5946,8 +5965,200 @@ function normalizedProvenanceLimits(
   return limits as { source_bytes: number; extracted_text_bytes: number; extracted_text_characters: number };
 }
 
-function normalizedSignedEvidenceProvenance(item: ManualNewsEvidence): DocumentFetchAudit {
-  const raw = item.fetch_audit;
+function canonicalPersistedProviderPublishedAt(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\+08:00$/.exec(value);
+  if (!match) return null;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+    && Number(hourText) <= 23 && Number(minuteText) <= 59 && Number(secondText) <= 59 ? value : null;
+}
+
+function normalizedPersistedProviderIdentityAssertion(
+  value: unknown,
+  inputUrl: string,
+  canonicalOriginalUrl: string,
+  publisher: string,
+): ProviderRetrievalAudit['identity_assertion'] {
+  const keys = [
+    'contract', 'requested_url', 'requested_short_url', 'provider_asserted_source_url',
+    'provider_asserted_canonical_url', 'provider_asserted_publisher', 'provider_asserted_wechat_biz',
+    'assurance',
+  ];
+  const canonical = new URL(canonicalOriginalUrl);
+  const expectedShortUrl = new URL(inputUrl).pathname === '/s' ? null : inputUrl;
+  const expectedBiz = canonical.searchParams.get('__biz') || '';
+  if (!hasExactKeys(value, keys)
+    || value.contract !== MANUAL_NEWS_PROVIDER_IDENTITY_ASSERTION_CONTRACT
+    || value.requested_url !== inputUrl
+    || value.requested_short_url !== expectedShortUrl
+    || value.provider_asserted_source_url !== canonicalOriginalUrl
+    || value.provider_asserted_canonical_url !== canonicalOriginalUrl
+    || value.provider_asserted_publisher !== publisher
+    || value.provider_asserted_wechat_biz !== expectedBiz
+    || value.assurance !== MANUAL_NEWS_PROVIDER_IDENTITY_ASSERTION_ASSURANCE
+    || !expectedBiz) return invalidManualNewsEvidenceProvenance();
+  const frozen = FROZEN_MANUAL_NEWS_PROVIDER_SHORT_ASSERTIONS.get(inputUrl);
+  if (frozen && (frozen.canonical_url !== canonicalOriginalUrl
+    || frozen.publisher !== publisher || frozen.wechat_biz !== expectedBiz)) {
+    return invalidManualNewsEvidenceProvenance();
+  }
+  return value as ProviderRetrievalAudit['identity_assertion'];
+}
+
+function normalizedProviderEvidenceProvenance(
+  item: ManualNewsEvidence,
+  raw: Record<string, unknown>,
+): ProviderRetrievalAudit {
+  const keys = [
+    'retrieval_type', 'provider_id', 'operation_id', 'input_url', 'canonical_original_url',
+    'identity_assertion', 'title', 'publisher', 'published_at', 'provider_retrieved_at',
+    'cache_status', 'limits', 'actual_sizes',
+    'protocol_version', 'request_nonce', 'request_timestamp', 'response_created_at', 'body_sha256',
+    'response_profile', 'response_hmac_contract', 'proof_excerpt', 'response_hmac',
+  ];
+  const generatedOperation = hasExactKeys(raw, [
+    ...keys, 'retrieval_operation_id', 'retrieval_generation',
+  ]);
+  if ((!hasExactKeys(raw, keys) && !generatedOperation)
+    || raw.retrieval_type !== 'provider'
+    || raw.provider_id !== MANUAL_NEWS_PROVIDER_ID
+    || raw.protocol_version !== 'provider_retrieval_v1'
+    || raw.response_profile !== MANUAL_NEWS_RESPONSE_PROFILE
+    || raw.response_hmac_contract !== MANUAL_NEWS_PROVIDER_RESPONSE_HMAC_CONTRACT
+    || typeof raw.operation_id !== 'string' || !/^[a-f0-9]{64}$/.test(raw.operation_id)
+    || (generatedOperation && (typeof raw.retrieval_operation_id !== 'string'
+      || !/^[a-f0-9]{64}$/.test(raw.retrieval_operation_id)
+      || !Number.isSafeInteger(raw.retrieval_generation)
+      || Number(raw.retrieval_generation) < 0))
+    || !['miss', 'hit', 'coalesced', 'durable'].includes(String(raw.cache_status))
+    || !/^(?:[a-f0-9]{32,128}|[A-Za-z0-9_-]{22,171})$/.test(String(raw.request_nonce || ''))
+    || typeof raw.body_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(raw.body_sha256)
+    || typeof raw.response_hmac !== 'string' || !/^[a-f0-9]{64}$/.test(raw.response_hmac)) {
+    return invalidManualNewsEvidenceProvenance();
+  }
+  let inputUrl: string;
+  let canonicalOriginalUrl: string;
+  try {
+    inputUrl = normalizeWeChatArticleUrl(String(raw.input_url));
+    canonicalOriginalUrl = normalizeWeChatArticleUrl(String(raw.canonical_original_url));
+  } catch {
+    return invalidManualNewsEvidenceProvenance();
+  }
+  if (inputUrl !== raw.input_url || canonicalOriginalUrl !== raw.canonical_original_url
+    || new URL(canonicalOriginalUrl).pathname !== '/s' || canonicalOriginalUrl !== item.url
+    || (new URL(inputUrl).pathname === '/s' && canonicalOriginalUrl !== inputUrl)
+    || typeof raw.title !== 'string' || raw.title !== item.title || !raw.title
+    || raw.title !== raw.title.trim() || raw.title.normalize('NFC') !== raw.title
+    || Array.from(raw.title).length > 220 || new TextEncoder().encode(raw.title).byteLength > 1_024
+    || typeof raw.publisher !== 'string' || raw.publisher !== item.publisher || !raw.publisher
+    || raw.publisher !== raw.publisher.trim() || raw.publisher.normalize('NFC') !== raw.publisher
+    || Array.from(raw.publisher).length > 120 || new TextEncoder().encode(raw.publisher).byteLength > 512
+    || canonicalPersistedProviderPublishedAt(raw.published_at) === null
+    || raw.published_at !== item.published_at) {
+    return invalidManualNewsEvidenceProvenance();
+  }
+  const identityAssertion = normalizedPersistedProviderIdentityAssertion(
+    raw.identity_assertion,
+    inputUrl,
+    canonicalOriginalUrl,
+    raw.publisher,
+  );
+  const requestTimestamp = canonicalPersistedTimestamp(raw.request_timestamp);
+  const responseCreatedAt = canonicalPersistedTimestamp(raw.response_created_at);
+  const providerRetrievedAt = canonicalPersistedTimestamp(raw.provider_retrieved_at);
+  if (requestTimestamp === null || responseCreatedAt === null || providerRetrievedAt === null
+    || responseCreatedAt < requestTimestamp - 30_000
+    || responseCreatedAt - requestTimestamp > MANUAL_NEWS_PROVENANCE_MAX_EXTRACTION_DELAY_MS
+    || providerRetrievedAt > responseCreatedAt + 30_000
+    || (raw.cache_status !== 'durable' && requestTimestamp - providerRetrievedAt > 5 * 60_000)) {
+    return invalidManualNewsEvidenceProvenance();
+  }
+  const sizeKeys = ['provider_response_bytes', 'extracted_text_bytes', 'extracted_text_characters', 'image_count'];
+  if (!hasExactKeys(raw.limits, sizeKeys) || !hasExactKeys(raw.actual_sizes, sizeKeys)
+    || raw.limits.provider_response_bytes !== 2_097_152
+    || raw.limits.extracted_text_bytes !== MANUAL_NEWS_ARTICLE_PROVENANCE_MAX_BYTES
+    || raw.limits.extracted_text_characters !== MANUAL_NEWS_ARTICLE_PROVENANCE_MAX_CHARACTERS
+    || raw.limits.image_count !== 64) {
+    return invalidManualNewsEvidenceProvenance();
+  }
+  const limits = raw.limits as Record<string, unknown>;
+  const actualSizes = raw.actual_sizes as Record<string, unknown>;
+  if (sizeKeys.some((key) => !Number.isSafeInteger(actualSizes[key])
+    || Number(actualSizes[key]) < 0 || Number(actualSizes[key]) > Number(limits[key]))
+    || Number(actualSizes.provider_response_bytes) < 1) return invalidManualNewsEvidenceProvenance();
+  if (!hasExactKeys(raw.proof_excerpt, [
+    'contract', 'algorithm', 'max_code_points', 'sha256', 'utf8_bytes', 'code_points',
+  ])
+    || raw.proof_excerpt.contract !== MANUAL_NEWS_RESPONSE_PROFILE
+    || raw.proof_excerpt.algorithm !== MANUAL_NEWS_PROOF_EXCERPT_ALGORITHM
+    || raw.proof_excerpt.max_code_points !== MANUAL_NEWS_EXCERPT_MAX_CODE_POINTS
+    || typeof raw.proof_excerpt.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(raw.proof_excerpt.sha256)
+    || !Number.isSafeInteger(raw.proof_excerpt.utf8_bytes)
+    || Number(raw.proof_excerpt.utf8_bytes) < 0
+    || Number(raw.proof_excerpt.utf8_bytes) > MANUAL_NEWS_EXCERPT_MAX_UTF8_BYTES
+    || !Number.isSafeInteger(raw.proof_excerpt.code_points)
+    || Number(raw.proof_excerpt.code_points) < 0
+    || Number(raw.proof_excerpt.code_points) > MANUAL_NEWS_EXCERPT_MAX_CODE_POINTS) {
+    return invalidManualNewsEvidenceProvenance();
+  }
+  return {
+    retrieval_type: 'provider',
+    provider_id: MANUAL_NEWS_PROVIDER_ID,
+    operation_id: raw.operation_id,
+    ...(generatedOperation ? {
+      retrieval_operation_id: raw.retrieval_operation_id as string,
+      retrieval_generation: raw.retrieval_generation as number,
+    } : {}),
+    input_url: inputUrl,
+    canonical_original_url: canonicalOriginalUrl,
+    identity_assertion: identityAssertion,
+    title: raw.title,
+    publisher: raw.publisher,
+    published_at: raw.published_at as string,
+    provider_retrieved_at: raw.provider_retrieved_at as string,
+    cache_status: raw.cache_status as ProviderRetrievalAudit['cache_status'],
+    limits: {
+      provider_response_bytes: 2_097_152,
+      extracted_text_bytes: MANUAL_NEWS_ARTICLE_PROVENANCE_MAX_BYTES,
+      extracted_text_characters: MANUAL_NEWS_ARTICLE_PROVENANCE_MAX_CHARACTERS,
+      image_count: 64,
+    },
+    actual_sizes: {
+      provider_response_bytes: Number(actualSizes.provider_response_bytes),
+      extracted_text_bytes: Number(actualSizes.extracted_text_bytes),
+      extracted_text_characters: Number(actualSizes.extracted_text_characters),
+      image_count: Number(actualSizes.image_count),
+    },
+    protocol_version: 'provider_retrieval_v1',
+    request_nonce: raw.request_nonce as string,
+    request_timestamp: raw.request_timestamp as string,
+    response_created_at: raw.response_created_at as string,
+    body_sha256: raw.body_sha256,
+    response_profile: MANUAL_NEWS_RESPONSE_PROFILE,
+    response_hmac_contract: MANUAL_NEWS_PROVIDER_RESPONSE_HMAC_CONTRACT,
+    proof_excerpt: {
+      contract: MANUAL_NEWS_RESPONSE_PROFILE,
+      algorithm: MANUAL_NEWS_PROOF_EXCERPT_ALGORITHM,
+      max_code_points: MANUAL_NEWS_EXCERPT_MAX_CODE_POINTS,
+      sha256: raw.proof_excerpt.sha256,
+      utf8_bytes: Number(raw.proof_excerpt.utf8_bytes),
+      code_points: Number(raw.proof_excerpt.code_points),
+    },
+    response_hmac: raw.response_hmac,
+  };
+}
+
+function normalizedSignedEvidenceProvenance(item: ManualNewsEvidence): ManualNewsFetchAudit {
+  const candidate = item.fetch_audit;
+  if (candidate?.protocol_version === 'provider_retrieval_v1') {
+    return normalizedProviderEvidenceProvenance(item, candidate as unknown as Record<string, unknown>);
+  }
+  const raw = candidate as DocumentFetchAudit | null | undefined;
   const articleText = raw?.extraction === 'article_text';
   const auditKeys = [
     'hops', 'source_content_type', 'extraction', 'requested_limits', 'applied_limits',
@@ -6161,8 +6372,19 @@ async function assertManualNewsEvidenceBodyDigests(
     const responseSecret = typeof item.response_key_id === 'string'
       ? responseKeys.keys.get(item.response_key_id) : undefined;
     if (!responseSecret) throw new Error('manual_news_response_key_unavailable');
-    if (!await verifyDocumentFetchAuditResponseHmac(provenance, responseSecret)) {
+    const hmacValid = provenance.protocol_version === 'provider_retrieval_v1'
+      ? await verifyProviderRetrievalAuditResponseHmac(provenance, responseSecret)
+      : await verifyDocumentFetchAuditResponseHmac(provenance, responseSecret);
+    if (!hmacValid) {
       throw new Error('manual_news_evidence_response_hmac_invalid');
+    }
+    if (provenance.protocol_version === 'provider_retrieval_v1'
+      && provenance.operation_id !== await deriveRedFoxProviderOperationId(
+        provenance.input_url,
+        provenance.retrieval_operation_id,
+        provenance.retrieval_generation,
+      )) {
+      throw new Error('manual_news_evidence_provider_operation_identity_invalid');
     }
     const excerptBytes = new TextEncoder().encode(item.excerpt).byteLength;
     const excerptCodePoints = Array.from(item.excerpt).length;
@@ -6705,6 +6927,13 @@ export function classifyManualLeadDuplicate(
   };
 }
 
+function isManualReviewCandidate(candidate: ManualReviewCandidate): boolean {
+  return candidate.origin === 'manual_lead'
+    || !!candidate.lead_id
+    || candidate.item_id.startsWith('blog:manual:')
+    || candidate.item_id.startsWith('manual-news:');
+}
+
 export function mergeManualLeadCandidate(input: {
   previous_candidates: readonly ManualReviewCandidate[];
   previous_default_selected_ids: readonly string[];
@@ -6716,47 +6945,43 @@ export function mergeManualLeadCandidate(input: {
   default_selected_ids: string[];
   published_selected_ids: string[];
   evicted_ids: string[];
+  event_aliases: Record<string, string>;
   enqueue_rerender: false;
 } {
-  const max = Math.max(5, Math.min(20, input.max_candidates ?? 10));
   const sameEventRemoved = input.previous_candidates.filter((item) => {
     if (item.item_id === input.candidate.item_id) return false;
     if (!input.candidate.event_key || item.event_key !== input.candidate.event_key) return true;
     // A confirmed manual candidate is durable provenance, never an eviction
     // target. A scheduled duplicate may be replaced by its verified manual lead.
-    return item.origin === 'manual_lead';
+    return isManualReviewCandidate(item);
   });
   const candidates = [...sameEventRemoved, input.candidate];
-  const protectedIds = new Set(input.published_selected_ids.length
-    ? input.published_selected_ids
-    : input.previous_default_selected_ids);
   const evicted: string[] = input.previous_candidates
     .filter((item) => !sameEventRemoved.some((candidate) => candidate.item_id === item.item_id))
     .map((item) => item.item_id);
-  while (candidates.length > max) {
-    let index = -1;
-    for (let cursor = candidates.length - 1; cursor >= 0; cursor--) {
-      const item = candidates[cursor];
-      if (item.origin !== 'manual_lead' && !protectedIds.has(item.item_id)) { index = cursor; break; }
-    }
-    if (index < 0) throw new Error('candidate_cap_exhausted');
-    evicted.push(candidates[index].item_id);
-    candidates.splice(index, 1);
+  const eventAliases = Object.fromEntries(evicted.map((itemId) => [itemId, input.candidate.item_id]));
+  const manualCount = candidates.filter(isManualReviewCandidate).length;
+  const automaticCount = candidates.length - manualCount;
+  if (manualCount > MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT) throw new Error('manual_candidate_limit_exceeded');
+  if (automaticCount > AUTOMATIC_NEWS_REVIEW_CANDIDATE_LIMIT) {
+    throw new Error('automatic_candidate_limit_exceeded');
+  }
+  if (candidates.length > TOTAL_NEWS_REVIEW_CANDIDATE_LIMIT) {
+    throw new Error('review_candidate_total_limit_exceeded');
   }
   const candidateIds = new Set(candidates.map((item) => item.item_id));
-  const preferred = input.published_selected_ids.length
-    ? input.published_selected_ids
-    : input.previous_default_selected_ids;
-  const defaultSelected = preferred.filter((id) => candidateIds.has(id)).slice(0, 5);
-  for (const item of candidates) {
-    if (defaultSelected.length >= Math.max(1, Math.min(5, preferred.length || 5))) break;
-    if (!defaultSelected.includes(item.item_id)) defaultSelected.push(item.item_id);
-  }
+  const rewriteSelection = (ids: readonly string[]) => [...new Set(ids.map((id) => eventAliases[id] || id))]
+    .filter((id) => candidateIds.has(id)).slice(0, 5);
+  const publishedSelected = rewriteSelection(input.published_selected_ids);
+  const defaultSelected = input.published_selected_ids.length
+    ? publishedSelected
+    : rewriteSelection(input.previous_default_selected_ids);
   return {
     candidates,
     default_selected_ids: defaultSelected,
-    published_selected_ids: [...input.published_selected_ids],
+    published_selected_ids: publishedSelected,
     evicted_ids: [...new Set(evicted)],
+    event_aliases: eventAliases,
     enqueue_rerender: false,
   };
 }

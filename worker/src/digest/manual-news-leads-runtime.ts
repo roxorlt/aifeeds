@@ -1,10 +1,13 @@
 import type { Env } from '../index';
 import { callDeepSeekJson, DEEPSEEK_PRO } from '../hf-paper/llm';
 import {
+  deriveManualNewsRetrievalOperationId,
   fetchPublicDocument,
   validateCompleteArticleText,
   searchPublicWeb,
   type PublicDocument,
+  type DocumentFetchAudit,
+  type ProviderRetrievalAudit,
   type TrustedGatewayFetcher,
   type TrustedResearchService,
 } from '../security/safe-url-fetch';
@@ -94,6 +97,19 @@ const INDEPENDENT_MEDIA_DOMAINS = new Set([
   'axios.com', 'reuters.com', 'apnews.com', 'theverge.com', 'techcrunch.com', 'bloomberg.com',
   'wsj.com', 'nytimes.com', 'ft.com', 'jiqizhixin.com', 'qbitai.com', '36kr.com',
 ]);
+const TRUSTED_WECHAT_INDEPENDENT_PUBLISHERS = new Map([
+  ['机器之心\0MzA3MzI4MjgzMw==', 'jiqizhixin.com'],
+]);
+
+function trustedWeChatIndependentPublisher(document: PublicDocument): string | undefined {
+  if (document.fetch_audit.protocol_version !== 'provider_retrieval_v1' || !document.publisher) return undefined;
+  try {
+    const accountId = new URL(document.url).searchParams.get('__biz') || '';
+    return TRUSTED_WECHAT_INDEPENDENT_PUBLISHERS.get(`${document.publisher}\0${accountId}`);
+  } catch {
+    return undefined;
+  }
+}
 
 function allowlistedRegistrableDomain(host: string, domains: ReadonlySet<string>): string | null {
   for (const domain of domains) {
@@ -140,50 +156,92 @@ function normalizedHintPublishedAt(value: string | null | undefined): string | n
 }
 
 async function completeTrustedArticle(document: PublicDocument): Promise<boolean> {
-  const fullTextBytes = document.fetch_audit.actual_sizes.extracted_text_bytes;
-  const fullTextCodePoints = document.fetch_audit.actual_sizes.extracted_text_characters;
-  if (document.extraction !== 'article_text'
+  const providerRetrieval = document.fetch_audit.protocol_version === 'provider_retrieval_v1';
+  const audit = document.fetch_audit as DocumentFetchAudit | ProviderRetrievalAudit;
+  const fullTextBytes = audit.actual_sizes.extracted_text_bytes;
+  const fullTextCodePoints = audit.actual_sizes.extracted_text_characters;
+  if (providerRetrieval) {
+    const providerAudit = audit as ProviderRetrievalAudit;
+    if (document.extraction !== 'provider_article_text'
+      || document.content_type !== 'text/plain'
+      || document.content_complete !== true
+      || document.title !== providerAudit.title
+      || document.publisher !== providerAudit.publisher
+      || document.published_at !== providerAudit.published_at
+      || document.url !== providerAudit.canonical_original_url
+      || providerAudit.retrieval_type !== 'provider'
+      || providerAudit.provider_id !== 'redfox_gzh_article_content_v1'
+      || !/^[a-f0-9]{64}$/.test(providerAudit.operation_id)
+      || !providerAudit.identity_assertion
+      || Object.keys(providerAudit.identity_assertion).length !== 8
+      || providerAudit.identity_assertion.contract !== 'provider_asserted_wechat_article_identity_v1'
+      || providerAudit.identity_assertion.requested_url !== providerAudit.input_url
+      || providerAudit.identity_assertion.requested_short_url
+        !== (new URL(providerAudit.input_url).pathname === '/s' ? null : providerAudit.input_url)
+      || providerAudit.identity_assertion.provider_asserted_source_url !== providerAudit.canonical_original_url
+      || providerAudit.identity_assertion.provider_asserted_canonical_url !== providerAudit.canonical_original_url
+      || providerAudit.identity_assertion.provider_asserted_publisher !== providerAudit.publisher
+      || providerAudit.identity_assertion.provider_asserted_wechat_biz
+        !== new URL(providerAudit.canonical_original_url).searchParams.get('__biz')
+      || providerAudit.identity_assertion.assurance !== 'provider_assertion_not_independently_verified'
+      || providerAudit.response_profile !== 'proof_excerpt_v1'
+      || providerAudit.response_hmac_contract !== 'hmac-sha256-domain-separated-canonical-json-all-fields-except-response_hmac-v1'
+      || !/^(?:[a-f0-9]{32,128}|[A-Za-z0-9_-]{22,171})$/.test(providerAudit.request_nonce)
+      || !/^\d{4}-\d{2}-\d{2}T.*Z$/.test(providerAudit.request_timestamp)
+      || !/^\d{4}-\d{2}-\d{2}T.*Z$/.test(providerAudit.response_created_at)
+      || !/^\d{4}-\d{2}-\d{2}T.*Z$/.test(providerAudit.provider_retrieved_at)
+      || !/^[a-f0-9]{64}$/.test(providerAudit.body_sha256)
+      || !/^[a-f0-9]{64}$/.test(providerAudit.response_hmac)
+      || providerAudit.limits.extracted_text_bytes !== 28_000
+      || providerAudit.limits.extracted_text_characters !== 28_000
+      || fullTextBytes <= 0 || fullTextBytes > providerAudit.limits.extracted_text_bytes
+      || fullTextCodePoints <= 0 || fullTextCodePoints > providerAudit.limits.extracted_text_characters) return false;
+  }
+  const directAudit = audit as DocumentFetchAudit;
+  if (!providerRetrieval && (document.extraction !== 'article_text'
     || !['text/html', 'application/xhtml+xml'].includes(document.content_type)
     || document.content_complete !== true
     || typeof document.title !== 'string' || !document.title.trim()
     || !['article', 'main'].includes(String(document.selection))
-    || !document.fetch_audit.document
-    || document.fetch_audit.document.title !== document.title
-    || document.fetch_audit.document.published_at !== document.published_at
-    || document.fetch_audit.document.selection !== document.selection
-    || document.fetch_audit.document.content_complete !== true
-    || document.fetch_audit.extraction !== 'article_text'
-    || document.fetch_audit.protocol_version !== 'article_text_v2'
-    || document.fetch_audit.response_profile !== 'proof_excerpt_v1'
-    || document.fetch_audit.response_hmac_contract !== 'hmac-sha256-canonical-json-all-fields-except-response_hmac-v1'
-    || !document.fetch_audit.proof_excerpt
-    || Object.keys(document.fetch_audit.proof_excerpt).length !== 6
-    || !Object.keys(document.fetch_audit.proof_excerpt).every((key) => [
+    || !directAudit.document
+    || directAudit.document.title !== document.title
+    || directAudit.document.published_at !== document.published_at
+    || directAudit.document.selection !== document.selection
+    || directAudit.document.content_complete !== true
+    || directAudit.extraction !== 'article_text'
+    || directAudit.protocol_version !== 'article_text_v2'
+    || directAudit.response_profile !== 'proof_excerpt_v1'
+    || directAudit.response_hmac_contract !== 'hmac-sha256-canonical-json-all-fields-except-response_hmac-v1'
+    || !directAudit.proof_excerpt
+    || Object.keys(directAudit.proof_excerpt).length !== 6
+    || !Object.keys(directAudit.proof_excerpt).every((key) => [
       'contract', 'algorithm', 'max_code_points', 'sha256', 'utf8_bytes', 'code_points',
     ].includes(key))
-    || document.fetch_audit.proof_excerpt?.contract !== 'proof_excerpt_v1'
-    || document.fetch_audit.proof_excerpt?.algorithm !== 'utf8-nfc-ws1-codepoint-prefix-v1'
-    || document.fetch_audit.proof_excerpt?.max_code_points !== 3_000
-    || document.fetch_audit.final_url !== document.url
-    || !/^(?:[a-f0-9]{32,128}|[A-Za-z0-9_-]{22,171})$/.test(document.fetch_audit.request_nonce || '')
-    || !/^\d{4}-\d{2}-\d{2}T.*Z$/.test(document.fetch_audit.request_timestamp || '')
-    || !/^\d{4}-\d{2}-\d{2}T.*Z$/.test(document.fetch_audit.extracted_at || '')
-    || !/^[a-f0-9]{64}$/.test(document.fetch_audit.body_sha256 || '')
-    || !/^[a-f0-9]{64}$/.test(document.fetch_audit.response_hmac || '')
-    || !/^chromium\/(\d+)\.\d+\.\d+\.\d+$/.test(document.fetch_audit.parser.version)
-    || Number(/^chromium\/(\d+)/.exec(document.fetch_audit.parser.version)?.[1] || 0) < 149
+    || directAudit.proof_excerpt?.contract !== 'proof_excerpt_v1'
+    || directAudit.proof_excerpt?.algorithm !== 'utf8-nfc-ws1-codepoint-prefix-v1'
+    || directAudit.proof_excerpt?.max_code_points !== 3_000
+    || directAudit.final_url !== document.url
+    || !/^(?:[a-f0-9]{32,128}|[A-Za-z0-9_-]{22,171})$/.test(directAudit.request_nonce || '')
+    || !/^\d{4}-\d{2}-\d{2}T.*Z$/.test(directAudit.request_timestamp || '')
+    || !/^\d{4}-\d{2}-\d{2}T.*Z$/.test(directAudit.extracted_at || '')
+    || !/^[a-f0-9]{64}$/.test(directAudit.body_sha256 || '')
+    || !/^[a-f0-9]{64}$/.test(directAudit.response_hmac || '')
+    || !/^chromium\/(\d+)\.\d+\.\d+\.\d+$/.test(directAudit.parser.version)
+    || Number(/^chromium\/(\d+)/.exec(directAudit.parser.version)?.[1] || 0) < 149
     || fullTextBytes <= 0 || fullTextBytes > 28_000
     || fullTextCodePoints <= 0 || fullTextCodePoints > 28_000
-    || fullTextBytes > document.fetch_audit.applied_limits.extracted_text_bytes
-    || fullTextCodePoints > document.fetch_audit.applied_limits.extracted_text_characters
-    || document.fetch_audit.truncation.source || document.fetch_audit.truncation.extracted_text) return false;
+    || fullTextBytes > directAudit.applied_limits.extracted_text_bytes
+    || fullTextCodePoints > directAudit.applied_limits.extracted_text_characters
+    || directAudit.truncation.source || directAudit.truncation.extracted_text)) return false;
+  const proofExcerpt = audit.proof_excerpt;
   const bytes = new TextEncoder().encode(document.excerpt).byteLength;
   const characters = Array.from(document.excerpt);
   if (!characters.length
     || bytes > MANUAL_NEWS_EXCERPT_MAX_BYTES
     || characters.length > MANUAL_NEWS_EXCERPT_MAX_CHARACTERS
-    || document.fetch_audit.proof_excerpt.utf8_bytes !== bytes
-    || document.fetch_audit.proof_excerpt.code_points !== characters.length) return false;
+    || !proofExcerpt
+    || proofExcerpt.utf8_bytes !== bytes
+    || proofExcerpt.code_points !== characters.length) return false;
   try {
     validateCompleteArticleText(document.excerpt, bytes);
   } catch {
@@ -191,7 +249,7 @@ async function completeTrustedArticle(document: PublicDocument): Promise<boolean
   }
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(document.excerpt));
   const excerptHash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-  return excerptHash === document.fetch_audit.proof_excerpt.sha256;
+  return excerptHash === proofExcerpt.sha256;
 }
 
 async function evidenceId(url: string): Promise<string> {
@@ -205,10 +263,14 @@ export async function extractManualNewsEvidence(
   hint?: ManualSearchResult,
   now = Date.now(),
 ): Promise<ManualNewsEvidence | null> {
-  const identity = sourceIdentity(document.url);
+  const providerPublisher = trustedWeChatIndependentPublisher(document);
+  const identity = providerPublisher
+    ? { source_type: 'independent_media' as const, reliable: true, publisher: providerPublisher }
+    : sourceIdentity(document.url);
   if (document.extraction === 'html') return null;
-  if (document.extraction === 'article_text' && !await completeTrustedArticle(document)) return null;
-  const articleText = document.extraction === 'article_text';
+  if (['article_text', 'provider_article_text'].includes(document.extraction)
+    && !await completeTrustedArticle(document)) return null;
+  const articleText = document.extraction === 'article_text' || document.extraction === 'provider_article_text';
   const title = articleText ? document.title! : compact(hint?.title || '', 220);
   const excerpt = document.excerpt;
   if (!title && !excerpt) return null;
@@ -217,7 +279,7 @@ export async function extractManualNewsEvidence(
     response_key_id: document.response_key_id,
     url: document.url,
     source_type: identity.source_type,
-    publisher: compact(identity.publisher, 120),
+    publisher: compact(document.publisher || identity.publisher, 120),
     published_at: articleText ? document.published_at! : normalizedHintPublishedAt(hint?.published_at),
     retrieved_at: now,
     title,
@@ -349,7 +411,19 @@ export function createManualNewsLeadRuntimeAdapters(
   };
   return {
     search: (input) => searchAllNews(env, input, deps.researchFetcher),
-    fetch: (url) => fetchPublicDocument(url, { service: researchService(env, deps.researchFetcher) }),
+    fetch: async (url, context) => {
+      const retrievalOperationId = await deriveManualNewsRetrievalOperationId(url);
+      if (retrievalOperationId && !Number.isSafeInteger(context?.retrieval_generation)) {
+        throw new Error('provider_retrieval_generation_required');
+      }
+      return fetchPublicDocument(url, {
+        service: researchService(env, deps.researchFetcher),
+        ...(retrievalOperationId ? {
+          retrievalOperationId,
+          retrievalGeneration: context!.retrieval_generation,
+        } : {}),
+      });
+    },
     extract: (document, hint) => extractManualNewsEvidence(document, hint),
     assess: callProJson('assessment'),
     verify: callProJson('verification'),
