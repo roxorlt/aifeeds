@@ -6414,12 +6414,19 @@ const ANTHROPIC_FIRST_PERSON_PREVIEW_PREFIXES = [
   "We're opening a research preview of ",
   'We are opening a research preview of ',
 ] as const;
+const OFFICIAL_PRIMARY_FIRST_PERSON_ACTOR_BINDING =
+  'official_primary_first_person_actor_v1' as const;
 
-function anthropicFirstPersonSourceSupportView(
+interface OfficialPrimaryFirstPersonActorBinding {
+  binding_contract: typeof OFFICIAL_PRIMARY_FIRST_PERSON_ACTOR_BINDING;
+  verification_quote: string;
+}
+
+function officialPrimaryFirstPersonActorBinding(
   selected: ManualNewsEvidence,
   rawQuote: string,
   parsedFact: ReturnType<typeof parsedManualNewsSourceSupportFact>,
-): string | null {
+): OfficialPrimaryFirstPersonActorBinding | null {
   if (!selected.reliable || selected.source_type !== 'official_primary'
     || MANUAL_NEWS_SOURCE_SUPPORT_UNSAFE_UNICODE.test(selected.publisher)) return null;
   const publisher = selected.publisher
@@ -6447,9 +6454,18 @@ function anthropicFirstPersonSourceSupportView(
   if (selected.excerpt.indexOf(rawQuote) !== excerptStart) return null;
   const prefix = ANTHROPIC_FIRST_PERSON_PREVIEW_PREFIXES.find((value) => rawQuote.startsWith(value));
   if (!prefix) return null;
-  return normalizeManualNewsSourceSupportText(
+  const verificationQuote = normalizeManualNewsSourceSupportText(
     `Anthropic is opening a research preview of ${rawQuote.slice(prefix.length)}`,
   );
+  if (factActionOccurrences(verificationQuote).length !== 1) return null;
+  return {
+    binding_contract: OFFICIAL_PRIMARY_FIRST_PERSON_ACTOR_BINDING,
+    verification_quote: verificationQuote,
+  };
+}
+
+function isFirstPersonSourceSupportQuote(rawQuote: string): boolean {
+  return /^We(?:[’']re|\s)/u.test(rawQuote);
 }
 
 export function validateManualNewsSourceSupportSelection(
@@ -6467,11 +6483,12 @@ export function validateManualNewsSourceSupportSelection(
   }
   if (!raw.quote || !selected.excerpt.includes(raw.quote)) throw new Error('source_support_quote_invalid');
   const parsedFact = parsedManualNewsSourceSupportFact(input.fact);
-  const firstPersonView = anthropicFirstPersonSourceSupportView(selected, raw.quote, parsedFact);
-  if (firstPersonView && factActionOccurrences(firstPersonView).length !== 1) {
+  const firstPersonBinding = officialPrimaryFirstPersonActorBinding(selected, raw.quote, parsedFact);
+  if (isFirstPersonSourceSupportQuote(raw.quote) && !firstPersonBinding) {
     throw new Error('source_support_fact_invalid:fact_verification_action_mismatch');
   }
-  const verificationQuote = firstPersonView || normalizeManualNewsSourceSupportText(raw.quote);
+  const verificationQuote = firstPersonBinding?.verification_quote
+    || normalizeManualNewsSourceSupportText(raw.quote);
   const relationError = structuredFactUnitVerificationError(
     parsedFact.verification_fact, verificationQuote,
   );
@@ -6514,10 +6531,30 @@ export function buildManualNewsSourceSupportVerificationPrompt(input: {
 }): { system: string; user: string } {
   const selected = validateManualNewsSourceSupportSelection(input.selection, input);
   const evidence = sourceSupportEvidence({ evidence: input.evidence, evidenceId: selected.evidence_id });
+  const parsedFact = parsedManualNewsSourceSupportFact(input.fact);
+  const firstPersonBinding = officialPrimaryFirstPersonActorBinding(
+    evidence, selected.quote, parsedFact,
+  );
+  const system = '独立判断 selected_evidence.quote 是否在同一原子关系、主体、动作、对象、极性、模态和时间上支持 fact。只输出且必须输出精确 JSON {"supported":true|false,"evidence_id":"..."}；evidence_id 必须保持不变。';
+  if (firstPersonBinding) {
+    return {
+      system: `${system} binding_contract=${firstPersonBinding.binding_contract} 表示 verification_quote 已通过本地严格 official publisher、正文首位和 fact actor 绑定，只将 raw quote 的第一人称主语替换为 Anthropic。你仍须独立检查 raw excerpt、raw quote 与 verification_quote 除该主语绑定外的原子关系、对象、动作、极性、模态、时间和第二动作；不得因该绑定自动判 true。`,
+      user: JSON.stringify({
+        fact: parsedFact.normalized_fact,
+        selected_evidence: {
+          evidence_id: evidence.id,
+          excerpt: evidence.excerpt,
+          quote: selected.quote,
+          verification_quote: firstPersonBinding.verification_quote,
+          binding_contract: firstPersonBinding.binding_contract,
+        },
+      }),
+    };
+  }
   return {
-    system: '独立判断 selected_evidence.quote 是否在同一原子关系、主体、动作、对象、极性、模态和时间上支持 fact。只输出且必须输出精确 JSON {"supported":true|false,"evidence_id":"..."}；evidence_id 必须保持不变。',
+    system,
     user: JSON.stringify({
-      fact: parsedManualNewsSourceSupportFact(input.fact).normalized_fact,
+      fact: parsedFact.normalized_fact,
       selected_evidence: { evidence_id: evidence.id, excerpt: evidence.excerpt, quote: selected.quote },
     }),
   };
