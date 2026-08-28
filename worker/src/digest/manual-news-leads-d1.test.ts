@@ -2195,6 +2195,72 @@ describe('manual lead D1-backed dedupe', () => {
     expect(result).toMatchObject({ status: 'recommended', assessment: { duplicate_scope: null, matched_lead_id: null } });
   });
 
+  test('bounds and deterministically orders verified manual and automatic prior events', async () => {
+    const state = fixture();
+    const store = new D1ManualLeadProcessingStore(state.env);
+    const addVerifiedManualPrior = async (leadId: string, reviewDate: string, eventKey: string) => {
+      state.db.sqlite.prepare(`INSERT INTO manual_news_leads (
+        id, review_date, input_type, input_text, input_url, note, status, version,
+        submit_idempotency_key, processing_owner, processing_attempt, created_at, updated_at
+      ) VALUES (?, ?, 'url', '', 'https://support.claude.com/example', '', 'verifying', 4,
+        ?, ?, 1, 1, 1)`).run(leadId, reviewDate, `submit-${leadId}`, PROCESSING_OWNER);
+      state.db.sqlite.prepare(`INSERT INTO manual_news_evidence (
+        lead_id, evidence_id, response_key_id, url, source_type, publisher, published_at,
+        retrieved_at, title, excerpt, claims_supported_json, fetch_audit_json, reliable
+      ) SELECT ?, evidence_id, response_key_id, url, source_type, publisher, published_at,
+        retrieved_at, title, excerpt, claims_supported_json, fetch_audit_json, reliable
+        FROM manual_news_evidence WHERE lead_id = ?`).run(leadId, state.leadId);
+      await saveFixtureAssessment(
+        new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1),
+        leadId,
+        4,
+        { ...processedAssessment(), event_key: eventKey },
+      );
+    };
+
+    const sharedEventKey = 'shared-prior-event-2026-08-28';
+    await addVerifiedManualPrior('manual-prior-shared', '2026-08-28', sharedEventKey);
+    await addVerifiedManualPrior('manual-prior-unique', '2026-08-27', 'manual-prior-unique-2026-08-27');
+    for (let index = 0; index < 36; index += 1) {
+      const reviewDate = `2026-08-${String(28 - (index % 14)).padStart(2, '0')}`;
+      const eventKey = index === 0 ? sharedEventKey : `automatic-prior-event-${String(index).padStart(2, '0')}`;
+      state.db.sqlite.prepare(`INSERT INTO items (
+        id, source_ref, extra, published_at, scraped_at, is_relevant, deleted_at
+      ) VALUES (?, 'rss', ?, ?, ?, 1, NULL)`).run(
+        `automatic-prior-${String(index).padStart(2, '0')}`,
+        JSON.stringify({ event_fingerprint: eventKey }),
+        reviewDate,
+        reviewDate,
+      );
+    }
+    state.db.sqlite.prepare(`INSERT INTO items (
+      id, source_ref, extra, published_at, scraped_at, is_relevant, deleted_at
+    ) VALUES ('automatic-outside-window', 'rss', ?, '2026-08-13', '2026-08-13', 1, NULL)`).run(
+      JSON.stringify({ event_fingerprint: 'outside-window-event-2026-08-13' }),
+    );
+
+    const priorEvents = await store.listRecentPriorEvents('2026-08-28', state.leadId);
+
+    expect(priorEvents).toHaveLength(24);
+    expect(new Set(priorEvents.map((event) => event.event_key))).toHaveLength(24);
+    expect(priorEvents).toEqual([...priorEvents].sort((left, right) =>
+      right.review_date.localeCompare(left.review_date)
+      || left.event_key.localeCompare(right.event_key)
+      || (Number(!left.verification_digest) - Number(!right.verification_digest))
+      || left.lead_id.localeCompare(right.lead_id)));
+    expect(priorEvents.find((event) => event.event_key === sharedEventKey)).toMatchObject({
+      lead_id: 'manual-prior-shared',
+      verification_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(priorEvents.some((event) => event.lead_id === 'manual-prior-unique')).toBe(true);
+    expect(priorEvents.some((event) => event.lead_id.startsWith('automatic-prior-'))).toBe(true);
+    expect(priorEvents.some((event) => event.event_key === 'outside-window-event-2026-08-13')).toBe(false);
+    const manualSql = state.db.preparedSql.find((sql) => sql.includes('manual_assessment:recent_prior_events')) || '';
+    const automaticSql = state.db.preparedSql.find((sql) => sql.includes('manual_assessment:recent_non_manual_items')) || '';
+    expect(manualSql).toMatch(/ORDER BY l\.review_date DESC, a\.event_key ASC, l\.id ASC\s+LIMIT \?/i);
+    expect(automaticSql).toMatch(/ORDER BY review_date DESC, event_key ASC, lead_id ASC\s+LIMIT \?/i);
+  });
+
   test('dedupe history ignores legacy rows and includes only independently verified assessments', async () => {
     const state = fixture();
     state.db.sqlite.prepare(`INSERT INTO manual_news_leads (

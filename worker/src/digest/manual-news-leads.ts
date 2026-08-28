@@ -225,6 +225,46 @@ export interface ManualLeadPriorEvent {
   claims?: Array<{ text: string; evidence_ids: string[] }>;
 }
 
+export const MANUAL_NEWS_PRIOR_EVENT_PROVIDER_LIMITS = {
+  max_events: 24,
+  max_verified_contexts: 8,
+  lead_id_chars: 96,
+  title_chars: 160,
+  summary_chars: 320,
+  max_claims: 2,
+  claim_chars: 240,
+} as const;
+
+function verifiedManualPriorEvent(event: ManualLeadPriorEvent): boolean {
+  return /^[a-f0-9]{64}$/.test(event.verification_digest || '')
+    && typeof event.title === 'string'
+    && typeof event.summary === 'string'
+    && Array.isArray(event.claims);
+}
+
+export function boundedManualLeadPriorEvents(
+  events: readonly ManualLeadPriorEvent[],
+): ManualLeadPriorEvent[] {
+  const sorted = events.filter((event) =>
+    /^[a-z0-9][a-z0-9:_-]{5,199}$/.test(event.event_key)
+    && validCalendarDate(event.review_date)
+    && typeof event.lead_id === 'string' && !!event.lead_id.trim())
+    .map((event) => ({ ...event }))
+    .sort((left, right) => right.review_date.localeCompare(left.review_date)
+      || left.event_key.localeCompare(right.event_key)
+      || Number(!verifiedManualPriorEvent(left)) - Number(!verifiedManualPriorEvent(right))
+      || left.lead_id.localeCompare(right.lead_id));
+  const seenEventKeys = new Set<string>();
+  const bounded: ManualLeadPriorEvent[] = [];
+  for (const event of sorted) {
+    if (seenEventKeys.has(event.event_key)) continue;
+    seenEventKeys.add(event.event_key);
+    bounded.push(event);
+    if (bounded.length === MANUAL_NEWS_PRIOR_EVENT_PROVIDER_LIMITS.max_events) break;
+  }
+  return bounded;
+}
+
 export interface ManualLeadVerifiedPriorContext {
   event_key: string;
   review_date: string;
@@ -2710,9 +2750,60 @@ function promptEvidenceDocuments(evidence: readonly ManualNewsEvidence[]) {
   return documents;
 }
 
+function promptPriorEventDocuments(priorEvents: readonly unknown[]) {
+  const parsed: ManualLeadPriorEvent[] = [];
+  for (const value of priorEvents) {
+    if (!isPlainObject(value)
+      || typeof value.event_key !== 'string'
+      || typeof value.review_date !== 'string'
+      || typeof value.lead_id !== 'string') continue;
+    parsed.push({
+      event_key: value.event_key,
+      review_date: value.review_date,
+      lead_id: value.lead_id,
+      ...(typeof value.verification_digest === 'string'
+        ? { verification_digest: value.verification_digest } : {}),
+      ...(typeof value.title === 'string' ? { title: value.title } : {}),
+      ...(typeof value.summary === 'string' ? { summary: value.summary } : {}),
+      ...(Array.isArray(value.claims) ? { claims: value.claims as ManualLeadPriorEvent['claims'] } : {}),
+    });
+  }
+  let verifiedContexts = 0;
+  return boundedManualLeadPriorEvents(parsed).map((event) => {
+    const base = {
+      event_key: event.event_key,
+      review_date: event.review_date,
+      lead_id: compact(event.lead_id, MANUAL_NEWS_PRIOR_EVENT_PROVIDER_LIMITS.lead_id_chars),
+    };
+    if (!verifiedManualPriorEvent(event)) return base;
+    const verified = { ...base, verification_digest: event.verification_digest! };
+    if (verifiedContexts >= MANUAL_NEWS_PRIOR_EVENT_PROVIDER_LIMITS.max_verified_contexts) {
+      return verified;
+    }
+    verifiedContexts += 1;
+    return {
+      ...verified,
+      title: compact(normalizedPromptEvidenceText(event.title!),
+        MANUAL_NEWS_PRIOR_EVENT_PROVIDER_LIMITS.title_chars),
+      summary: compact(normalizedPromptEvidenceText(event.summary!),
+        MANUAL_NEWS_PRIOR_EVENT_PROVIDER_LIMITS.summary_chars),
+      claims: event.claims!.map((claim) => compact(
+        normalizedPromptEvidenceText(isPlainObject(claim) && typeof claim.text === 'string' ? claim.text : ''),
+        MANUAL_NEWS_PRIOR_EVENT_PROVIDER_LIMITS.claim_chars,
+      )).filter(Boolean).slice(0, MANUAL_NEWS_PRIOR_EVENT_PROVIDER_LIMITS.max_claims),
+    };
+  });
+}
+
 export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromptInput): { system: string; user: string } {
   const allowedEvidenceIds = input.evidence.map((item) => item.id);
-  const promptInput = { ...input, evidence: promptEvidenceDocuments(input.evidence) };
+  const promptInput = {
+    date: input.date,
+    text: input.text,
+    note: input.note,
+    evidence: promptEvidenceDocuments(input.evidence),
+    prior_events: promptPriorEventDocuments(input.prior_events),
+  };
   return {
     system: [
       '你是 AI Feeds 行业新闻事实核验、事件聚类与编辑评分器，只返回符合给定 schema 的 JSON，不要 Markdown、解释或额外字段。',

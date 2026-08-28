@@ -5,6 +5,7 @@ import {
 } from '../security/manual-news-keyring';
 import {
   assertManualLeadTransition,
+  boundedManualLeadPriorEvents,
   createManualEvidenceDigest,
   createManualLeadVerificationProof,
   MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
@@ -15,6 +16,7 @@ import {
   manualLeadAssessmentValidationFailure,
   manualNewsAssessmentGenerationAudit,
   MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT,
+  MANUAL_NEWS_PRIOR_EVENT_PROVIDER_LIMITS,
   mergeManualLeadCandidate,
   TOTAL_NEWS_REVIEW_CANDIDATE_LIMIT,
   validateManualLeadFactVerification,
@@ -1377,6 +1379,7 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
   }
 
   async listRecentPriorEvents(date: string, excludeLeadId: string): Promise<ManualLeadPriorEvent[]> {
+    const sourceScanLimit = MANUAL_NEWS_PRIOR_EVENT_PROVIDER_LIMITS.max_events * 2;
     const manual = await this.env.DB.prepare(
       `/* manual_assessment:recent_prior_events */ SELECT a.event_key, l.review_date, l.id AS lead_id
        FROM manual_news_event_assessments a
@@ -1384,8 +1387,9 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
          ON v.lead_id = a.lead_id AND v.assessment_version = a.assessment_version AND v.status = 'active'
        JOIN manual_news_leads l ON l.id = a.lead_id
        WHERE l.id <> ? AND l.review_date BETWEEN date(?, '-14 days') AND ?
-      `,
-    ).bind(excludeLeadId, date, date)
+       ORDER BY l.review_date DESC, a.event_key ASC, l.id ASC
+       LIMIT ?`,
+    ).bind(excludeLeadId, date, date, sourceScanLimit)
       .all<{ event_key: string; review_date: string; lead_id: string }>();
     const verifiedManual: ManualLeadPriorEvent[] = [];
     for (const row of manual.results || []) {
@@ -1405,10 +1409,15 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
        FROM items
        WHERE id <> ? AND json_extract(extra, '$.event_fingerprint') IS NOT NULL
          AND COALESCE(source_ref, '') <> 'manual_lead'
-         AND substr(COALESCE(published_at, scraped_at), 1, 10) BETWEEN date(?, '-14 days') AND ?`,
-    ).bind(`blog:manual:${excludeLeadId}`, date, date)
+         AND substr(COALESCE(published_at, scraped_at), 1, 10) BETWEEN date(?, '-14 days') AND ?
+       ORDER BY review_date DESC, event_key ASC, lead_id ASC
+       LIMIT ?`,
+    ).bind(`blog:manual:${excludeLeadId}`, date, date, sourceScanLimit)
       .all<{ event_key: string; review_date: string; lead_id: string }>();
-    return [...verifiedManual, ...(items.results || [])].filter((item) => !!item.event_key);
+    return boundedManualLeadPriorEvents([
+      ...verifiedManual,
+      ...(items.results || []),
+    ]);
   }
 
   async findPriorEventsByEventKey(eventKey: string, excludeLeadId: string): Promise<ManualLeadPriorEvent[]> {
