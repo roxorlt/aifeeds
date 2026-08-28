@@ -6213,7 +6213,7 @@ function canonicalEvidence(evidence: readonly ManualNewsEvidence[]) {
 
 const MANUAL_NEWS_SOURCE_SUPPORT_HMAC_DOMAIN = 'manual-news-source-support-hmac-v1\0';
 const MANUAL_NEWS_SOURCE_SUPPORT_INPUT_DOMAIN = 'manual-news-source-support-input-v1\0';
-const MANUAL_NEWS_SOURCE_SUPPORT_UNSAFE_UNICODE = /[\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/u;
+const MANUAL_NEWS_SOURCE_SUPPORT_UNSAFE_UNICODE = /[\u061c\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/u;
 
 function normalizeManualNewsSourceSupportText(value: unknown): string {
   if (typeof value !== 'string' || MANUAL_NEWS_SOURCE_SUPPORT_UNSAFE_UNICODE.test(value)) {
@@ -6306,6 +6306,16 @@ export async function deriveManualEventIdentityV1(value: unknown): Promise<Manua
   };
 }
 
+function isCanonicalAutomaticMhsPreviewAnchor(value: string): boolean {
+  const normalized = value.normalize('NFKC').toLowerCase().replace(/\s+/gu, ' ').trim()
+    .replace(/[.!。！]+$/u, '');
+  const product = String.raw`(?:mhs|model hardware standard(?: \(mhs\))?)`;
+  return new RegExp(
+    String.raw`^anthropic (?:${product} research preview|(?:is )?opening (?:a )?research preview of (?:the )?${product})$`,
+    'u',
+  ).test(normalized);
+}
+
 export async function deriveAutomaticManualEventIdentityV1(
   value: unknown,
 ): Promise<ManualNewsEventIdentityV1 | null> {
@@ -6330,9 +6340,17 @@ export async function deriveAutomaticManualEventIdentityV1(
       MANUAL_NEWS_SOURCE_SUPPORT_UNSAFE_UNICODE.test(entry))) return null;
   const actor = canonicalSubjectIdentity(value.primary_actor);
   const product = exactSourceSupportProductTarget(value.primary_object);
-  const action = ({
+  const enumeratedAction = ({
     preview: 'preview', launch: 'release', release: 'release', open_access: 'open_access',
   } as const)[value.action as 'preview' | 'launch' | 'release' | 'open_access'];
+  const action = enumeratedAction || (value.action === 'other'
+    && value.event_type === 'research_result'
+    && actor === 'anthropic'
+    && product?.entity === 'mhs'
+    && product.components.length === 0
+    && isCanonicalAutomaticMhsPreviewAnchor(value.canonical_event)
+    ? 'preview'
+    : null);
   if (!actor || !product || !action) return null;
   const family = value.object_family.trim();
   if (family) {
@@ -7727,6 +7745,7 @@ export function mergeAuthorizedManualNewsCandidates(input: {
   previous_candidates: readonly ManualReviewCandidate[];
   previous_default_selected_ids: readonly string[];
   published_selected_ids: readonly string[];
+  automatic_event_identities?: Readonly<Record<string, string>>;
   manual_candidates: ReadonlyArray<{
     authorization_order: number;
     candidate: ManualReviewCandidate;
@@ -7762,7 +7781,8 @@ export function mergeAuthorizedManualNewsCandidates(input: {
   const placedManualIds = new Set<string>();
   const eventAliases: Record<string, string> = {};
   const candidates: ManualReviewCandidate[] = automatic.map((candidate) => {
-    const replacement = candidate.event_key ? manualByEvent.get(candidate.event_key) : undefined;
+    const eventKey = candidate.event_key || input.automatic_event_identities?.[candidate.item_id];
+    const replacement = eventKey ? manualByEvent.get(eventKey) : undefined;
     if (!replacement) return candidate;
     if (placedManualIds.has(replacement.item_id)) throw new Error('automatic_candidate_event_collision');
     placedManualIds.add(replacement.item_id);

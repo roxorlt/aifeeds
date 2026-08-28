@@ -52,7 +52,10 @@ function sqliteD1(sqlite: DatabaseSync, hooks?: { beforeExecute?: (sql: string) 
 function releaseDb(hooks?: { beforeExecute?: (sql: string) => void }): { sqlite: DatabaseSync; DB: D1Database } {
   const sqlite = new DatabaseSync(':memory:');
   sqlite.exec(`
-    CREATE TABLE items(id TEXT PRIMARY KEY,source_type TEXT,source_id TEXT,source_ref TEXT,extra TEXT,deleted_at TEXT);
+    CREATE TABLE items(
+      id TEXT PRIMARY KEY,source_type TEXT,source_id TEXT,source_ref TEXT,extra TEXT,deleted_at TEXT,
+      title TEXT,content TEXT,content_translated TEXT,author TEXT,url TEXT,published_at TEXT
+    );
     CREATE TABLE sources(id TEXT PRIMARY KEY,source_type TEXT,source_ref TEXT,config TEXT);
     CREATE TABLE manual_news_leads(id TEXT PRIMARY KEY,review_date TEXT,status TEXT,confirmed_at INTEGER,version INTEGER);
     CREATE TABLE manual_news_assessment_verifications(

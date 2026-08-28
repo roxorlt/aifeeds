@@ -39,6 +39,7 @@ import {
 import {
   loadManualNewsEvidence,
   loadVerifiedManualCandidateProof,
+  loadVerifiedManualSourceSupportProofs,
   loadVerifiedManualAssessment,
   MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL,
   manualVerificationSnapshotGuardBindings,
@@ -63,6 +64,7 @@ import {
   getActiveNewsReviewBatch,
   getNewsReviewBatch,
   getPublishedNewsReviewSelection,
+  loadAutomaticNewsReviewEventIdentitySidecar,
   newsReviewExpiresAt,
   newsReviewSecret,
   newsReviewSelectionHash,
@@ -1121,9 +1123,13 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       .all<{ lead_id: string; review_date: string }>();
     if ((manual.results || []).length > 700) throw new Error('source_support_prior_event_scan_limit');
     const events: ManualNewsSourceSupportPriorEvent[] = [];
+    const proofs = await loadVerifiedManualSourceSupportProofs(
+      this.env,
+      (manual.results || []).map((row) => row.lead_id),
+    );
     for (const row of manual.results || []) {
-      const proof = await loadVerifiedManualCandidateProof(this.env, row.lead_id);
-      if (proof?.policy_version !== MANUAL_NEWS_SOURCE_SUPPORT_POLICY) continue;
+      const proof = proofs.get(row.lead_id);
+      if (!proof) continue;
       events.push({
         event_key: proof.candidate.event_key,
         review_date: row.review_date,
@@ -1435,10 +1441,14 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
         || updated.confirmed_at === null) throw new Error('source_support_atomic_write_failed');
       return updated;
     }
+    const automaticEventIdentities = await loadAutomaticNewsReviewEventIdentitySidecar(
+      this.env, active.candidates,
+    );
     const merged = mergeAuthorizedManualNewsCandidates({
       previous_candidates: active.candidates,
       previous_default_selected_ids: active.default_selected_ids,
       published_selected_ids: active.applied_selected_ids || [],
+      automatic_event_identities: automaticEventIdentities,
       manual_candidates: [
         ...existingManual.map((entry) => ({
           authorization_order: entry.authorization_order,

@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'vitest';
 
+import { normalizeFeedEventFingerprint } from '../feeds/classify-translate';
+
 import {
   buildManualNewsSourceSupportSelectionPrompt,
   buildManualNewsSourceSupportVerificationPrompt,
@@ -88,27 +90,46 @@ describe('manual news source_support_v1', () => {
 
   test('projects only a complete high-confidence automatic fingerprint into the same canonical tuple', async () => {
     const manual = await deriveManualEventIdentityV1(fact);
-    const automatic = await deriveAutomaticManualEventIdentityV1({
+    const realAutomatic = normalizeFeedEventFingerprint({
       event_type: 'research_result',
       primary_actor: 'Anthropic',
       primary_object: 'Model Hardware Standard (MHS)',
       object_family: '',
       object_variant: '',
       object_version: '',
-      action: 'preview',
+      action: 'other',
       canonical_event: 'Anthropic MHS research preview',
       confidence: 0.98,
     });
+    expect(realAutomatic).not.toBeNull();
+    const automatic = await deriveAutomaticManualEventIdentityV1(realAutomatic);
     expect(automatic?.event_key).toBe(manual.event_key);
-    await expect(deriveAutomaticManualEventIdentityV1({
+
+    const release = normalizeFeedEventFingerprint({
       event_type: 'product_launch', primary_actor: 'Anthropic',
       primary_object: 'MHS', object_family: '', object_variant: '', object_version: '',
       action: 'launch', canonical_event: 'Anthropic launches MHS', confidence: 0.98,
-    })).resolves.not.toMatchObject({ event_key: manual.event_key });
-    await expect(deriveAutomaticManualEventIdentityV1({
+    });
+    await expect(deriveAutomaticManualEventIdentityV1(release))
+      .resolves.not.toMatchObject({ event_key: manual.event_key });
+    const openAccess = normalizeFeedEventFingerprint({
+      event_type: 'policy_access', primary_actor: 'Anthropic',
+      primary_object: 'MHS', object_family: '', object_variant: '', object_version: '',
+      action: 'other', canonical_event: 'Anthropic opens access to MHS', confidence: 0.98,
+    });
+    await expect(deriveAutomaticManualEventIdentityV1(openAccess)).resolves.toBeNull();
+    const lowConfidence = normalizeFeedEventFingerprint({
       event_type: 'research_result', primary_actor: 'Anthropic',
-      primary_object: 'MHS', action: 'preview', confidence: 0.4,
-    })).resolves.toBeNull();
+      primary_object: 'MHS', object_family: '', object_variant: '', object_version: '',
+      action: 'other', canonical_event: 'Anthropic MHS research preview', confidence: 0.4,
+    });
+    await expect(deriveAutomaticManualEventIdentityV1(lowConfidence)).resolves.toBeNull();
+    const wrongActor = normalizeFeedEventFingerprint({
+      event_type: 'research_result', primary_actor: 'Google',
+      primary_object: 'MHS', object_family: '', object_variant: '', object_version: '',
+      action: 'other', canonical_event: 'Google MHS research preview', confidence: 0.98,
+    });
+    await expect(deriveAutomaticManualEventIdentityV1(wrongActor)).resolves.toBeNull();
     await expect(deriveAutomaticManualEventIdentityV1({
       event_type: 'research_result', primary_actor: 'Anthropic',
       primary_object: 'Model Hardware Standard (MHS)', object_family: '',
@@ -121,6 +142,29 @@ describe('manual news source_support_v1', () => {
       object_variant: '', object_version: '', action: 'preview',
       canonical_event: 'Anthropic releases MHS', confidence: 0.98,
     })).resolves.toBeNull();
+  });
+
+  test('rejects U+061C across fact, signed excerpt, quote, and automatic fingerprint fields', async () => {
+    await expect(deriveManualEventIdentityV1(
+      `Anthropic\u061c 开放 Model Hardware Standard（MHS）研究预览。`,
+    )).rejects.toThrow(/source_support_fact_invalid/);
+
+    const bidiExcerpt = `${excerpt}\u061c`;
+    const signed = evidence({ excerpt: bidiExcerpt, claims_supported: [bidiExcerpt] });
+    expect(() => validateManualNewsSourceSupportSelection(
+      { evidence_id: signed.id, quote: excerpt }, { fact, evidence: [signed] },
+    )).toThrow(/source_support_quote_invalid/);
+    expect(() => validateManualNewsSourceSupportSelection(
+      { evidence_id: 'ev-anthropic-mhs', quote: `${excerpt}\u061c` },
+      { fact, evidence: [evidence()] },
+    )).toThrow(/source_support_quote_invalid/);
+
+    const automatic = normalizeFeedEventFingerprint({
+      event_type: 'research_result', primary_actor: 'Anthropic', primary_object: 'MHS',
+      object_family: '', object_variant: '', object_version: '', action: 'other',
+      canonical_event: `Anthropic MHS research preview\u061c`, confidence: 0.98,
+    });
+    await expect(deriveAutomaticManualEventIdentityV1(automatic)).resolves.toBeNull();
   });
 
   test('keeps automatic order, sorts manual suffix by authorization, and replaces same-event in place', () => {

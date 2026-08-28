@@ -2,6 +2,8 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import type { Env } from '../index';
+import { normalizeFeedEventFingerprint } from '../feeds/classify-translate';
+import { FEED_REGISTRY } from '../feeds/registry';
 import { handleManualNewsLeadsApi } from './manual-news-leads-api';
 import { processManualNewsLead, type ManualLeadProcessingAdapters } from './manual-news-leads-pipeline';
 import {
@@ -41,7 +43,11 @@ import {
 } from './manual-news-leads-verification';
 import { ManualNewsProviderError } from './manual-news-provider';
 import { authorizeFormalNewsSet } from './news-source-policy';
-import { newsReviewSelectionHash, sanitizeCurrentNewsReviewBatch } from './news-review';
+import {
+  freezeNewsReviewBatchFromPool,
+  newsReviewSelectionHash,
+  sanitizeCurrentNewsReviewBatch,
+} from './news-review';
 import {
   TEST_MANUAL_NEWS_RESPONSE_KEY_ID,
   proofForLegacyPolicy,
@@ -542,6 +548,73 @@ function installSourceSupportReviewSchema(
   );
   state.db.sqlite.prepare(`INSERT INTO daily_news_review_candidate_generations
     (review_date, lineage_id, generation, updated_at) VALUES ('2026-08-28', '2026-08-28', 0, 1)`).run();
+}
+
+function installSourceSupportAutomaticPool(
+  state: Awaited<ReturnType<typeof sourceSupportFixture>>,
+  mhsIndex: number | null,
+): Array<Record<string, unknown>> {
+  const feed = FEED_REGISTRY.find((entry) => entry.id === 'blog:anthropic');
+  if (!feed) throw new Error('Anthropic feed fixture missing');
+  state.db.sqlite.exec(`CREATE TABLE digest_pool (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, slot_key TEXT NOT NULL, source TEXT NOT NULL,
+    density TEXT NOT NULL, item_ids TEXT NOT NULL, items_meta TEXT, generated_at INTEGER NOT NULL,
+    UNIQUE(slot_key, source, density)
+  )`);
+  state.db.sqlite.prepare(
+    `INSERT INTO sources(id, source_type, source_ref, name, config) VALUES (?, ?, ?, ?, ?)`,
+  ).run(feed.id, feed.kind, feed.key, feed.name, JSON.stringify(feed));
+  const realMhsFingerprint = normalizeFeedEventFingerprint({
+    event_type: 'research_result', primary_actor: 'Anthropic',
+    primary_object: 'Model Hardware Standard (MHS)', object_family: '', object_variant: '',
+    object_version: '', action: 'other', canonical_event: 'Anthropic MHS research preview',
+    confidence: 0.98,
+  });
+  if (!realMhsFingerprint) throw new Error('MHS fingerprint fixture missing');
+  const candidates = Array.from({ length: 10 }, (_, index) => {
+    const sourceId = `${feed.key}:pool-${index + 1}`;
+    const itemId = `blog:${sourceId}`;
+    const title = `自动候选${index + 1}`;
+    const summary = `自动摘要${index + 1}`;
+    const url = `https://www.anthropic.com/news/pool-${index + 1}`;
+    const extra = {
+      feed_id: feed.id,
+      feed_key: feed.key,
+      editorial_type: feed.editorial_type,
+      title_zh: title,
+      ai_summary_zh: summary,
+      source_company: feed.name,
+      ...(index === mhsIndex ? { event_fingerprint: realMhsFingerprint } : {}),
+    };
+    state.db.sqlite.prepare(`INSERT INTO items (
+      id, source_type, source_id, source_ref, title, content, content_translated, author,
+      url, published_at, scraped_at, is_relevant, matched_by, lang, extra, deleted_at
+    ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, '2026-08-28T00:00:00.000Z',
+      '2026-08-28T00:00:00.000Z', 1, 'feed', 'zh', ?, NULL)`).run(
+      itemId, feed.kind, sourceId, title, summary, summary, feed.name, url,
+      JSON.stringify(extra),
+    );
+    return {
+      item_id: itemId, title, summary, source: feed.name, score: 100 - index, url,
+    };
+  });
+  state.db.sqlite.prepare(`INSERT INTO digest_pool (
+    slot_key, source, density, item_ids, items_meta, generated_at
+  ) VALUES ('2026-08-28-08', 'news', 'normal', ?, ?, 1)`).run(
+    JSON.stringify(candidates.slice(0, 5).map((candidate) => candidate.item_id)),
+    JSON.stringify({
+      candidate_ids_after_exact_dedup: candidates.map((candidate) => candidate.item_id),
+      candidates: candidates.map((candidate, index) => ({
+        rank: index + 1,
+        id: candidate.item_id,
+        title: candidate.title,
+        title_zh: candidate.title,
+        source_company: candidate.source,
+        adjusted_score: candidate.score,
+      })),
+    }),
+  );
+  return candidates;
 }
 
 function replacementEvidence(count: number): ManualNewsEvidence[] {
@@ -1153,6 +1226,101 @@ describe('manual lead D1-backed dedupe', () => {
     }]);
   });
 
+  test('bulk-verifies the legal 700 source-support prior proofs with a fixed query bound', async () => {
+    const state = await sourceSupportFixture();
+    const selection = validateManualNewsSourceSupportSelection(
+      { evidence_id: state.evidence.id, quote: sourceSupportExcerpt },
+      { fact: sourceSupportFact, evidence: [state.evidence] },
+    );
+    const verification = validateManualNewsSourceSupportVerification(
+      { supported: true, evidence_id: state.evidence.id }, selection,
+    );
+    const leadInsert = state.db.sqlite.prepare(`INSERT INTO manual_news_leads (
+      id, review_date, input_type, input_text, input_url, note, status, version,
+      submit_idempotency_key, processing_owner, processing_attempt, confirmed_at,
+      created_at, updated_at
+    ) VALUES (?, '2026-08-27', 'text_url', ?, ?, '', 'recommended', 5, ?, NULL, 1, 1, 1, 1)`);
+    const auditInsert = state.db.sqlite.prepare(`INSERT INTO manual_news_lead_audit (
+      lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
+      resulting_version, metadata_json, created_at
+    ) VALUES (?, 'submit', NULL, 'submitted', ?, ?, 1, ?, 1)`);
+    const evidenceInsert = state.db.sqlite.prepare(`INSERT INTO manual_news_evidence (
+      lead_id, evidence_id, response_key_id, url, source_type, publisher, published_at,
+      retrieved_at, title, excerpt, claims_supported_json, fetch_audit_json, reliable
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`);
+    const proofInsert = state.db.sqlite.prepare(`INSERT INTO manual_news_assessment_verifications (
+      verification_id, lead_id, assessment_version, policy_version, verification_key_id,
+      canonical_digest, hmac_sha256, verification_json, processing_owner, processing_attempt,
+      creation_nonce, status, reason, created_at, invalidated_at
+    ) VALUES (?, ?, 5000001, 'source_support_v1', ?, ?, ?, ?, 'prior-owner', 1,
+      ?, 'active', NULL, ?, NULL)`);
+    const leadIds: string[] = [];
+    for (let index = 0; index < 700; index += 1) {
+      const leadId = `ml-20260827-prior-${String(index).padStart(4, '0')}`;
+      const idempotencyKey = `submit-prior-${index}`;
+      const submitIdentityDigest = index.toString(16).padStart(64, '0');
+      leadInsert.run(leadId, sourceSupportFact, state.evidence.url, idempotencyKey);
+      const metadata = JSON.stringify({
+        input_type: 'text_url', candidate_authorization: 'source_support_v1',
+        submit_identity_contract: 'manual_news_submit_identity_v1',
+        submit_identity_digest: submitIdentityDigest,
+      });
+      const audit = auditInsert.run(
+        leadId, idempotencyKey, `submit-prior-nonce-${index}`, metadata,
+      );
+      const auditId = Number(audit.lastInsertRowid);
+      evidenceInsert.run(
+        leadId, state.evidence.id, state.evidence.response_key_id, state.evidence.url,
+        state.evidence.source_type, state.evidence.publisher, state.evidence.published_at,
+        state.evidence.retrieved_at, state.evidence.title, state.evidence.excerpt,
+        JSON.stringify(state.evidence.claims_supported), JSON.stringify(state.evidence.fetch_audit),
+      );
+      const priorPayload = await createManualNewsSourceSupportPayload({
+        lead: {
+          id: leadId, review_date: '2026-08-27', input_type: 'text_url',
+          input_text: sourceSupportFact, input_url: state.evidence.url, note: '',
+        },
+        authorization: {
+          audit_id: auditId, candidate_authorization: 'source_support_v1',
+          submit_identity_digest: submitIdentityDigest, idempotency_key: idempotencyKey,
+        },
+        evidence: [state.evidence], selection, verification,
+      });
+      const priorProof = await createManualNewsSourceSupportProof(
+        { lead_id: leadId, assessment_version: 5_000_001, payload: priorPayload },
+        testManualNewsVerificationKeyring(VERIFICATION_SECRET), testManualNewsResponseKeyring(),
+      );
+      proofInsert.run(
+        `mav:${leadId}`, leadId, priorProof.verification_key_id, priorProof.canonical_digest,
+        priorProof.hmac_sha256, JSON.stringify(priorPayload), `prior-creation-${index}`, index + 2,
+      );
+      leadIds.push(leadId);
+    }
+    const tamperedLeadId = leadIds[leadIds.length - 1]!;
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications
+      SET hmac_sha256 = ? WHERE lead_id = ?`).run('0'.repeat(64), tamperedLeadId);
+    const sqlStart = state.db.preparedSql.length;
+
+    const events = await new D1ManualLeadProcessingStore(state.env)
+      .listSourceSupportPriorEvents('2026-08-28', state.leadId);
+
+    const verificationQueries = state.db.preparedSql.slice(sqlStart).filter((sql) =>
+      /manual_(?:verification|evidence):|manual_source_support:recent_manual_events/.test(sql));
+    expect(verificationQueries.length).toBeLessThanOrEqual(40);
+    expect(events).toEqual([{
+      event_key: state.payload.event_identity.event_key,
+      review_date: '2026-08-27',
+      origin: 'manual',
+      item_id: `blog:manual:${leadIds[0]}`,
+    }]);
+    expect(state.db.sqlite.prepare(`SELECT status, reason
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(tamperedLeadId)).toEqual({
+      status: 'invalidated', reason: 'verification_integrity_invalid',
+    });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
+      FROM manual_news_assessment_verifications WHERE status = 'active'`).get()).toEqual({ count: 699 });
+  }, 20_000);
+
   test('atomically writes source proof, item, revision, lead confirmation, and final audit', async () => {
     const state = await sourceSupportFixture();
     installSourceSupportReviewSchema(state);
@@ -1422,9 +1590,19 @@ describe('manual lead D1-backed dedupe', () => {
     const candidates = Array.from({ length: 10 }, (_, index) => ({
       item_id: `auto-${index + 1}`, title: `自动${index + 1}`, summary: '摘要', source: '来源',
       score: 100 - index,
-      event_key: index === 3 ? state.payload.event_identity.event_key : `automatic-event-${index + 1}`,
     }));
     installSourceSupportReviewSchema(state, candidates);
+    const fingerprint = normalizeFeedEventFingerprint({
+      event_type: 'research_result', primary_actor: 'Anthropic',
+      primary_object: 'Model Hardware Standard (MHS)', object_family: '', object_variant: '',
+      object_version: '', action: 'other', canonical_event: 'Anthropic MHS research preview',
+      confidence: 0.98,
+    });
+    state.db.sqlite.prepare(`INSERT INTO items (
+      id, source_ref, extra, published_at, scraped_at, is_relevant, deleted_at
+    ) VALUES ('auto-4', 'rss', ?, '2026-08-28', '2026-08-28', 1, NULL)`).run(
+      JSON.stringify({ event_fingerprint: fingerprint }),
+    );
     state.db.sqlite.prepare(`UPDATE daily_news_review_batches
       SET applied_selected_ids = ?, selection_hash = ?, edit_revision = 2,
         publish_status = 'published', human_reviewed = 1
@@ -1455,6 +1633,67 @@ describe('manual lead D1-backed dedupe', () => {
       event_aliases: { 'auto-4': `blog:manual:${state.leadId}` },
       rerender_enqueued: false,
     });
+  });
+
+  test('freezes ten real pool items and replaces the MHS item from its sidecar fingerprint', async () => {
+    const state = await sourceSupportFixture();
+    installSourceSupportReviewSchema(state);
+    state.db.sqlite.prepare(`DELETE FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28'`).run();
+    const automatic = installSourceSupportAutomaticPool(state, 3);
+
+    await new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1)
+      .saveSourceSupportedCandidate(state.leadId, 4, state.payload);
+    const frozen = await freezeNewsReviewBatchFromPool(state.env, '2026-08-28', 100);
+
+    expect(frozen.batch.candidates).toHaveLength(10);
+    expect(frozen.batch.candidates[3]).toMatchObject({
+      item_id: `blog:manual:${state.leadId}`,
+      event_key: state.payload.event_identity.event_key,
+      origin: 'manual_lead',
+    });
+    expect(frozen.batch.default_selected_ids).toEqual([
+      'blog:anthropic:pool-1', 'blog:anthropic:pool-2', 'blog:anthropic:pool-3',
+      `blog:manual:${state.leadId}`, 'blog:anthropic:pool-5',
+    ]);
+    expect(new Set(frozen.batch.candidate_ids)).toHaveLength(10);
+    expect(JSON.stringify(frozen.batch.candidates.filter((candidate) => candidate.origin !== 'manual_lead')))
+      .toBe(JSON.stringify(automatic.filter((_candidate, index) => index !== 3)));
+    const audit = state.db.sqlite.prepare(`SELECT metadata_json FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'confirm_candidate'`).get(state.leadId) as { metadata_json: string };
+    expect(JSON.parse(audit.metadata_json)).toMatchObject({ rerender_enqueued: false });
+  });
+
+  test('freezes the prefreeze source-support suffix by first marker submit order', async () => {
+    const state = await sourceSupportFixture();
+    installSourceSupportReviewSchema(state);
+    state.db.sqlite.prepare(`DELETE FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28'`).run();
+    const automatic = installSourceSupportAutomaticPool(state, null);
+    const second = await addSourceSupportLead(state, {
+      idempotencyKey: 'submit-source-support-b-prefreeze', owner: 'source-support-owner-b-prefreeze',
+      fact: 'OpenAI 发布 GPT-5。', excerpt: 'OpenAI released GPT-5.',
+      url: 'https://openai.com/index/gpt-5/', evidenceId: 'ev-openai-gpt-5-prefreeze',
+      publisher: 'OpenAI', now: 20,
+    });
+
+    await new D1ManualLeadProcessingStore(state.env, second.owner, 1)
+      .saveSourceSupportedCandidate(second.leadId, 4, second.payload);
+    await new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1)
+      .saveSourceSupportedCandidate(state.leadId, 4, state.payload);
+    const frozen = await freezeNewsReviewBatchFromPool(state.env, '2026-08-28', 100);
+
+    expect(JSON.stringify(frozen.batch.candidates.slice(0, 10))).toBe(JSON.stringify(automatic));
+    expect(frozen.batch.candidates.slice(10).map((candidate) => candidate.item_id)).toEqual([
+      `blog:manual:${state.leadId}`,
+      `blog:manual:${second.leadId}`,
+    ]);
+    const prefreezeOrderSql = state.db.preparedSql.find((sql) =>
+      sql.includes('news_review:prefreeze_confirmed_manual')) || '';
+    expect(prefreezeOrderSql).toContain('verification.policy_version = ?');
+    expect(prefreezeOrderSql).toContain("audit.action = 'submit'");
+    expect(prefreezeOrderSql).toContain("$.candidate_authorization");
+    expect(prefreezeOrderSql).toContain("audit.action = 'confirm_candidate'");
   });
 
   test('atomically elects one winner for concurrent source-support leads with the same event', async () => {
