@@ -4,6 +4,8 @@ export default defineConfig({
   test: {
     include: ['src/**/*.test.ts'],
     environment: 'node',
+    // Shared CI runners can starve crypto-heavy upper-bound tests under default parallelism.
+    ...(process.env.CI ? { maxWorkers: 2 } : {}),
     // 历史遗留：以下 8 个测试文件用的是 Node 内置 runner（`import test from 'node:test'`），
     // 不是 vitest 风格。vitest 无法解析其 test() 注册，会误报 "No test suite found" 而使
     // `npm test` 变红。它们此前并未挂到任何 npm script（worker 之前没有 test 脚本），故排除
