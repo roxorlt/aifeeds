@@ -2259,6 +2259,22 @@ describe('manual news lead domain', () => {
     expect(prompt.user).toContain('evidence_ids');
   });
 
+  test('ends named product objects before appositive background in the initial prompt', () => {
+    const prompt = buildManualLeadAssessmentPrompt({
+      date: '2026-08-28', text: 'Anthropic MHS research preview', note: '',
+      evidence: [anthropicMhsPreviewEvidence], prior_events: [],
+    });
+
+    expect(prompt.system).toContain('命名产品或标准后的逗号同位语、定义性说明、用途说明和受众范围');
+    expect(prompt.system).toContain('atomic_fact.object 必须在必要产品名或版本名结束');
+    expect(prompt.system).toContain('不得为了填充另造事实');
+    expect(prompt.system).toContain(anthropicMhsPreviewExcerpt);
+    expect(prompt.system).toContain('subject="Anthropic"');
+    expect(prompt.system).toContain('predicate="is opening a research preview of"');
+    expect(prompt.system).toContain('object="Model Hardware Standard (MHS)"');
+    expect(prompt.system).toContain('不得进入 object');
+  });
+
   test('deduplicates prompt-only evidence without changing persisted evidence or dropping distinct claim anchors', () => {
     const repeatedEvidence: ManualNewsEvidence = {
       ...officialAnthropic,
@@ -3979,10 +3995,14 @@ describe('manual news lead domain', () => {
   });
 
   test('builds validation-guided regeneration from original context without echoing invalid raw output', () => {
-    const prompt = buildManualLeadAssessmentRegenerationPrompt({
-      date: '2026-08-11', text: 'TechCrunch称阿里巴巴将禁止员工使用Claude Code', note: '',
-      evidence: [officialAnthropic], prior_events: [],
-    }, 'non_atomic_source_object', 'source_facts[0].atomic_fact.object');
+    const promptInput = {
+      date: '2026-08-28', text: 'Anthropic MHS research preview', note: '',
+      evidence: [anthropicMhsPreviewEvidence], prior_events: [],
+    };
+    const original = buildManualLeadAssessmentPrompt(promptInput);
+    const prompt = buildManualLeadAssessmentRegenerationPrompt(
+      promptInput, 'non_atomic_source_object', 'source_facts[0].atomic_fact.object',
+    );
     const body = JSON.parse(prompt.user) as {
       allowed_evidence_ids: string[];
       regeneration: {
@@ -3991,13 +4011,15 @@ describe('manual news lead domain', () => {
       };
       untrusted_data: { evidence: ManualNewsEvidence[] };
     };
+    const { regeneration: _regeneration, ...regeneratedOriginalBody } = body;
 
-    expect(body.allowed_evidence_ids).toEqual(['ev-official']);
+    expect(JSON.stringify(regeneratedOriginalBody)).toBe(original.user);
+    expect(body.allowed_evidence_ids).toEqual(['ev-anthropic-mhs-preview']);
     expect(body.untrusted_data.evidence).toEqual([expect.objectContaining({
-      id: officialAnthropic.id,
-      title: officialAnthropic.title,
-      excerpt: officialAnthropic.excerpt,
-      claims_supported: officialAnthropic.claims_supported,
+      id: anthropicMhsPreviewEvidence.id,
+      title: anthropicMhsPreviewEvidence.title,
+      excerpt: anthropicMhsPreviewEvidence.excerpt,
+      claims_supported: [],
     })]);
     expect(body.untrusted_data.evidence[0]).not.toHaveProperty('url');
     expect(body.untrusted_data.evidence[0]).not.toHaveProperty('fetch_audit');
@@ -4010,8 +4032,25 @@ describe('manual news lead domain', () => {
     expect(body.regeneration.mechanical_instruction).toContain('逗号');
     expect(body.regeneration.mechanical_instruction).toContain('第二动作');
     expect(body.regeneration.mechanical_instruction).toContain('删除非核心背景');
+    expect(body.regeneration.mechanical_instruction).toContain('object 必须在必要产品名或版本名结束');
+    expect(body.regeneration.mechanical_instruction).toContain(anthropicMhsPreviewExcerpt);
+    expect(body.regeneration.mechanical_instruction).toContain('subject="Anthropic"');
+    expect(body.regeneration.mechanical_instruction).toContain('predicate="is opening a research preview of"');
+    expect(body.regeneration.mechanical_instruction).toContain('object="Model Hardware Standard (MHS)"');
     expect(prompt.user).not.toContain('ev-private-output');
     expect(prompt.system).toContain('不得回忆、修补或复用上一次原始输出');
+  });
+
+  test('keeps non-source-object regeneration guidance byte-stable', () => {
+    const prompt = buildManualLeadAssessmentRegenerationPrompt({
+      date: '2026-08-11', text: '线索', note: '', evidence: [officialAnthropic], prior_events: [],
+    }, 'non_atomic_editorial_object', 'editorial_projection.summary[0].atomic_fact.object');
+    const body = JSON.parse(prompt.user) as {
+      regeneration: { mechanical_instruction: string };
+    };
+    expect(body.regeneration.mechanical_instruction).toBe(
+      '只纠正同类 object 槽：对象若含逗号、同位语、并列、原因或第二动作，必须拆为必要且可核验的独立 fact，或删除非核心背景；不得把复合内容塞回一个 object。整份 schema 仍须从原证据重新生成。',
+    );
   });
 
   test('rejects an unsafe regeneration path instead of echoing it', () => {

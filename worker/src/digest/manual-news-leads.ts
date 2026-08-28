@@ -2898,6 +2898,8 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
       'source_facts 不接受自由文本 text。每条 source fact 必须机械地填写 atomic_fact 的主体角色、主体、单一谓词、对象四个槽位；程序会按槽位顺序生成可签名事实，不会修补或拆分 raw JSON。',
       '核心事件最小化：默认只输出 1 条 core source_fact，只保留足以决定本条线索推荐与去重的核心事件。仅当另一事实独立、必要且同样可由直接证据核验时才增加，总数最多 3 条 source_facts。禁止为了填充摘要加入原因、替代产品或背景信息。',
       'atomic_fact.subject 只能有一个完整主体；atomic_fact.predicate 只能有一个谓词，可包含紧邻该谓词的时态、否定、计划或“据报道”等限定；atomic_fact.object 只能有一个对象及其必要版本、地区和范围。',
+      '命名产品或标准后的逗号同位语、定义性说明、用途说明和受众范围不是该产品 identity/object 的组成。若核心事件只需命名对象，atomic_fact.object 必须在必要产品名或版本名结束；删除尾部说明作为非核心背景，不得塞入 object，也不得为了填充另造事实。',
+      '结构正例：证据 “Anthropic is opening a research preview of the Model Hardware Standard (MHS), a shared specification for AI agents to safely operate physical devices, to a first group of scientific research labs and advanced manufacturers.” 的核心事件必须写为 subject="Anthropic"、predicate="is opening a research preview of"、object="Model Hardware Standard (MHS)"；逗号后的 “a shared specification ...” 与 “to a first group ...” 均为非核心说明，不得进入 object。',
       'source_facts.atomic_fact 必须沿用直接证据的源语言、实体原文与谓词表达：英文证据写英文 source fact，中文证据写中文 source fact，禁止先翻译再绑定连续原文。',
       'editorial_projection 是独立的严肃中文编辑投影。title 与 summary 的每个中文原子句必须填写自己的四槽 atomic_fact，并通过 source_fact_refs 显式映射且只映射一个 source fact；不得新增、删除或改变主体、动作、对象、版本、时间、地区、否定、情态或完成状态。',
       '双语投影必须逐槽精确等价：来源归因、认识可能性、计划、时态、进行/完成体、义务、主动/被动语态及 polarity 是相互独立的正交信息；一句中出现多组时必须全部保留，不得用单一“弱情态”或优先级吞掉。英文助动链必须按完整结构表达：is/was to + action 是现在/过去计划，did + action 与 has/have/had + 过去分词是已完成，have/had to + action 是现在/过去义务而非完成，be + reportedly/allegedly + V-ing 是进行态，will be + 过去分词是未来被动；planned to 与 be planning to 均为计划。无法识别的助动词/修饰词组合必须 needs_review。',
@@ -3023,7 +3025,9 @@ export function buildManualLeadAssessmentRegenerationPrompt(
       ? '只纠正同类 subject 槽：每个 subject 只能是一个完整主体实体，不得包含并列主体、动作、原因或背景。整份 schema 仍须从原证据重新生成。'
     : slot === 'predicate'
       ? '只纠正同类 predicate 槽：每个 predicate 只能有一个动作及其紧邻时态、否定、情态标记；多个动作必须拆成必要且可核验的独立 fact，否则删除非核心背景。整份 schema 仍须从原证据重新生成。'
-      : slot === 'object'
+      : failureCode === 'non_atomic_source_object'
+        ? '只纠正同类 object 槽：命名产品或标准后的逗号同位语、定义性说明、用途说明和受众范围不是该产品 identity/object 的组成；若核心事件只需命名对象，object 必须在必要产品名或版本名结束，删除尾部说明作为非核心背景，不得塞入 object，也不得为了填充另造事实。结构正例：证据 “Anthropic is opening a research preview of the Model Hardware Standard (MHS), a shared specification for AI agents to safely operate physical devices, to a first group of scientific research labs and advanced manufacturers.” 的核心事件必须写为 subject="Anthropic"、predicate="is opening a research preview of"、object="Model Hardware Standard (MHS)"；逗号后的 “a shared specification ...” 与 “to a first group ...” 均不得进入 object。对象若仍含并列、原因或第二动作，必须拆为必要且可核验的独立 fact，或删除非核心背景。整份 schema 仍须从原证据重新生成。'
+        : slot === 'object'
         ? '只纠正同类 object 槽：对象若含逗号、同位语、并列、原因或第二动作，必须拆为必要且可核验的独立 fact，或删除非核心背景；不得把复合内容塞回一个 object。整份 schema 仍须从原证据重新生成。'
         : slot === 'assembled'
           ? '逐一检查 subject + predicate + object 连接后的完整句；若 assembled 句形成多个主体、动作或子句，拆为必要且可核验的独立 fact，或删除非核心背景。整份 schema 仍须从原证据重新生成。'
