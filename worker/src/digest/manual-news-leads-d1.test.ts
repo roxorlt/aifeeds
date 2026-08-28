@@ -2219,7 +2219,7 @@ describe('manual lead D1-backed dedupe', () => {
     };
 
     const sharedEventKey = 'shared-prior-event-2026-08-28';
-    await addVerifiedManualPrior('manual-prior-shared', '2026-08-28', sharedEventKey);
+    await addVerifiedManualPrior('manual-prior-shared', '2026-08-27', sharedEventKey);
     await addVerifiedManualPrior('manual-prior-unique', '2026-08-27', 'manual-prior-unique-2026-08-27');
     for (let index = 0; index < 36; index += 1) {
       const reviewDate = `2026-08-${String(28 - (index % 14)).padStart(2, '0')}`;
@@ -2250,6 +2250,7 @@ describe('manual lead D1-backed dedupe', () => {
       || left.lead_id.localeCompare(right.lead_id)));
     expect(priorEvents.find((event) => event.event_key === sharedEventKey)).toMatchObject({
       lead_id: 'manual-prior-shared',
+      review_date: '2026-08-27',
       verification_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
     expect(priorEvents.some((event) => event.lead_id === 'manual-prior-unique')).toBe(true);
@@ -2259,6 +2260,95 @@ describe('manual lead D1-backed dedupe', () => {
     const automaticSql = state.db.preparedSql.find((sql) => sql.includes('manual_assessment:recent_non_manual_items')) || '';
     expect(manualSql).toMatch(/ORDER BY l\.review_date DESC, a\.event_key ASC, l\.id ASC\s+LIMIT \?/i);
     expect(automaticSql).toMatch(/ORDER BY review_date DESC, event_key ASC, lead_id ASC\s+LIMIT \?/i);
+  });
+
+  test('injects an exact HMAC-verified event truncated after the 24th provider context into verification', async () => {
+    const state = fixture();
+    const targetEventKey = assessment().event_key;
+    const priorLeadId = 'manual-prior-exact-truncated';
+    state.db.sqlite.prepare(`INSERT INTO manual_news_leads (
+      id, review_date, input_type, input_text, input_url, note, status, version,
+      submit_idempotency_key, processing_owner, processing_attempt, created_at, updated_at
+    ) VALUES (?, '2026-07-29', 'url', '', 'https://support.claude.com/example', '', 'verifying', 4,
+      ?, ?, 1, 1, 1)`).run(priorLeadId, `submit-${priorLeadId}`, PROCESSING_OWNER);
+    state.db.sqlite.prepare(`INSERT INTO manual_news_evidence (
+      lead_id, evidence_id, response_key_id, url, source_type, publisher, published_at,
+      retrieved_at, title, excerpt, claims_supported_json, fetch_audit_json, reliable
+    ) SELECT ?, evidence_id, response_key_id, url, source_type, publisher, published_at,
+      retrieved_at, title, excerpt, claims_supported_json, fetch_audit_json, reliable
+      FROM manual_news_evidence WHERE lead_id = ?`).run(priorLeadId, state.leadId);
+    await saveFixtureAssessment(
+      new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1),
+      priorLeadId,
+      4,
+      { ...processedAssessment(), event_key: targetEventKey },
+    );
+    for (let index = 0; index < 24; index += 1) {
+      state.db.sqlite.prepare(`INSERT INTO items (
+        id, source_ref, extra, published_at, scraped_at, is_relevant, deleted_at
+      ) VALUES (?, 'rss', ?, '2026-08-11', '2026-08-11', 1, NULL)`).run(
+        `newer-automatic-prior-${String(index).padStart(2, '0')}`,
+        JSON.stringify({ event_fingerprint: `newer-automatic-event-${String(index).padStart(2, '0')}` }),
+      );
+    }
+
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    const bounded = await store.listRecentPriorEvents('2026-08-11', state.leadId);
+    expect(bounded).toHaveLength(24);
+    expect(bounded.some((event) => event.event_key === targetEventKey)).toBe(false);
+    await expect(store.findPriorEventsByEventKey(targetEventKey, state.leadId)).resolves.toEqual([
+      expect.objectContaining({
+        event_key: targetEventKey,
+        lead_id: priorLeadId,
+        verification_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    ]);
+
+    const adapters = verifyingAdapters();
+    const baseVerify = adapters.verify;
+    adapters.assess = async () => generatedAssessment({ material_update: true });
+    let verificationPriorEventKeys: string[] = [];
+    adapters.verify = async (prompt, context) => {
+      const body = JSON.parse(prompt.user) as {
+        facts: Array<{
+          fact_id: string;
+          untrusted_prior_events?: Array<{ event_key: string }>;
+        }>;
+      };
+      verificationPriorEventKeys = body.facts.find((fact) => fact.fact_id === 'field:material_update')
+        ?.untrusted_prior_events?.map((event) => event.event_key) || [];
+      const raw = await baseVerify(prompt, context) as {
+        fact_results: Array<Record<string, unknown>>;
+      };
+      return {
+        ...raw,
+        fact_results: raw.fact_results.map((fact) => fact.fact_id === 'field:material_update'
+          ? {
+            ...fact,
+            comparison_result: {
+              ...(fact.comparison_result as Record<string, unknown>),
+              value: true,
+              matched_event_key: targetEventKey,
+              prior_event_keys: [targetEventKey],
+              reason_code: 'material_change',
+            },
+          }
+          : fact),
+      };
+    };
+
+    const result = await processManualNewsLead(state.leadId, store, adapters);
+
+    expect(verificationPriorEventKeys).toHaveLength(24);
+    expect(verificationPriorEventKeys).toContain(targetEventKey);
+    expect(result).toMatchObject({
+      error_code: null,
+      assessment: {
+        material_update: true,
+        matched_event_key: targetEventKey,
+        matched_lead_id: priorLeadId,
+      },
+    });
   });
 
   test('dedupe history ignores legacy rows and includes only independently verified assessments', async () => {

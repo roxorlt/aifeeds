@@ -2237,23 +2237,53 @@ describe('manual news lead domain', () => {
       review_date: `2026-08-${String(28 - (index % 14)).padStart(2, '0')}`,
       lead_id: `automatic-prior-${String(index).padStart(2, '0')}-${'a'.repeat(180)}`,
     }));
-    const prompt = buildManualLeadAssessmentPrompt({
+    const worstCaseEvidence = Array.from({ length: 8 }, (_, index) => {
+      const excerpt = `evidence-${index}-${'X'.repeat(3_000)}`.slice(0, 3_000);
+      return {
+        ...officialAnthropic,
+        id: index === 0 ? officialAnthropic.id : `ev-worst-${index}`,
+        url: `https://support.claude.com/worst-${index}`,
+        title: `evidence-title-${index}-${'E'.repeat(220)}`.slice(0, 220),
+        excerpt,
+        claims_supported: [excerpt],
+      };
+    });
+    const promptInput = {
       date: '2026-08-28',
       text: 'T'.repeat(4_000),
       note: 'N'.repeat(1_000),
-      evidence: [{
-        ...officialAnthropic,
-        title: 'E'.repeat(220),
-        excerpt: 'X'.repeat(3_000),
-        claims_supported: ['Y'.repeat(3_000)],
-      }],
+      evidence: worstCaseEvidence,
       prior_events: [...automaticEvents, ...manualEvents].reverse(),
+    };
+    const prompt = buildManualLeadAssessmentPrompt(promptInput);
+    const regenerationPrompt = buildManualLeadAssessmentRegenerationPrompt(
+      promptInput, 'unknown_evidence_id', 'source_facts[0].evidence_ids[0]',
+    );
+    const verificationPrompt = buildManualLeadFactVerificationPrompt({
+      assessment: validateManualLeadAssessment(assessment(), promptInput.evidence),
+      evidence: promptInput.evidence,
+      prior_events: promptInput.prior_events,
     });
     const priorEvents = (JSON.parse(prompt.user) as {
       untrusted_data: { prior_events: Array<Record<string, unknown>> };
     }).untrusted_data.prior_events;
+    const regenerationPriorEvents = (JSON.parse(regenerationPrompt.user) as {
+      untrusted_data: { prior_events: Array<Record<string, unknown>> };
+    }).untrusted_data.prior_events;
+    const verificationPriorEvents = (JSON.parse(verificationPrompt.user) as {
+      facts: Array<{ fact_id: string; untrusted_prior_events?: Array<Record<string, unknown>> }>;
+    }).facts.find((fact) => fact.fact_id === 'field:material_update')?.untrusted_prior_events;
 
-    expect(Array.from(JSON.stringify(prompt)).length).toBeLessThan(64_000);
+    const serializedPromptLengths = {
+      assessment: Array.from(JSON.stringify(prompt)).length,
+      regeneration: Array.from(JSON.stringify(regenerationPrompt)).length,
+      verification: Array.from(JSON.stringify(verificationPrompt)).length,
+    };
+    expect(serializedPromptLengths.assessment).toBeLessThan(64_000);
+    expect(serializedPromptLengths.regeneration).toBeLessThan(64_000);
+    expect(serializedPromptLengths.verification).toBeLessThan(64_000);
+    expect(regenerationPriorEvents).toEqual(priorEvents);
+    expect(verificationPriorEvents).toEqual(priorEvents);
     expect(priorEvents).toHaveLength(24);
     expect(new Set(priorEvents.map((event) => event.event_key))).toHaveLength(24);
     expect(priorEvents).toEqual([...priorEvents].sort((left, right) =>
