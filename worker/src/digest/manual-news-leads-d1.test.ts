@@ -8,6 +8,8 @@ import {
   applyManualLeadEvidencePolicy,
   buildManualLeadFactVerificationPrompt,
   createManualLeadVerificationProof,
+  createManualNewsSourceSupportPayload,
+  createManualNewsSourceSupportProof,
   isCurrentManualLeadVerification,
   MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
   MANUAL_LEAD_EVIDENCE_DISPOSITION_CONTRACT,
@@ -17,6 +19,8 @@ import {
   validateManualLeadAssessment,
   validateManualLeadGeneratedAssessment,
   validateManualLeadFactVerification,
+  validateManualNewsSourceSupportSelection,
+  validateManualNewsSourceSupportVerification,
   type ManualLeadPriorEvent,
   type ManualNewsEvidence,
   type ManualNewsProcessedAssessment,
@@ -31,8 +35,13 @@ import {
   retryManualNewsLead,
   submitManualNewsLead,
 } from './manual-news-leads-store';
-import { loadManualNewsEvidence } from './manual-news-leads-verification';
+import {
+  loadManualNewsEvidence,
+  loadVerifiedManualCandidateProof,
+} from './manual-news-leads-verification';
 import { ManualNewsProviderError } from './manual-news-provider';
+import { authorizeFormalNewsSet } from './news-source-policy';
+import { newsReviewSelectionHash, sanitizeCurrentNewsReviewBatch } from './news-review';
 import {
   TEST_MANUAL_NEWS_RESPONSE_KEY_ID,
   proofForLegacyPolicy,
@@ -362,6 +371,177 @@ function fixtureEvidence(): ManualNewsEvidence[] {
     claims_supported: [fixtureFact],
     reliable: true,
   })];
+}
+
+const sourceSupportFact = 'Anthropic 开放 Model Hardware Standard（MHS）研究预览。';
+const sourceSupportExcerpt = 'Anthropic is opening a research preview of the Model Hardware Standard (MHS), '
+  + 'a shared specification for AI agents to safely operate physical devices, '
+  + 'to a first group of scientific research labs and advanced manufacturers.';
+
+async function sourceSupportFixture() {
+  const state = fixture('verifying', 4);
+  state.db.sqlite.prepare('DELETE FROM manual_news_leads').run();
+  state.db.sqlite.prepare('DELETE FROM manual_news_evidence').run();
+  const submitted = await submitManualNewsLead(state.env, {
+    date: '2026-08-28', text: sourceSupportFact,
+    url: 'https://www.anthropic.com/news/model-hardware-standard-research-preview', note: '',
+    candidate_authorization: 'source_support_v1',
+  }, 'submit-source-support-proof', 10);
+  state.db.sqlite.prepare(`UPDATE manual_news_leads SET status = 'verifying', version = 4,
+    processing_owner = ?, processing_attempt = 1 WHERE id = ?`).run(PROCESSING_OWNER, submitted.lead.id);
+  const evidence = withSignedArticleTextV2Audit({
+    id: 'ev-anthropic-mhs',
+    url: 'https://www.anthropic.com/news/model-hardware-standard-research-preview',
+    source_type: 'official_primary', publisher: 'Anthropic',
+    published_at: '2026-08-28T00:00:00.000Z', retrieved_at: 11,
+    title: 'Previewing the Model Hardware Standard \\ Anthropic',
+    excerpt: sourceSupportExcerpt, claims_supported: [sourceSupportExcerpt], reliable: true,
+  });
+  state.db.sqlite.prepare(`INSERT INTO manual_news_evidence (
+    lead_id, evidence_id, response_key_id, url, source_type, publisher, published_at, retrieved_at,
+    title, excerpt, claims_supported_json, fetch_audit_json, reliable
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`).run(
+    submitted.lead.id, evidence.id, evidence.response_key_id, evidence.url, evidence.source_type,
+    evidence.publisher, evidence.published_at, evidence.retrieved_at, evidence.title, evidence.excerpt,
+    JSON.stringify(evidence.claims_supported), JSON.stringify(evidence.fetch_audit),
+  );
+  const authorization = await new D1ManualLeadProcessingStore(state.env)
+    .getSourceSupportAuthorization(submitted.lead.id);
+  if (!authorization) throw new Error('source support authorization fixture missing');
+  const selection = validateManualNewsSourceSupportSelection(
+    { evidence_id: evidence.id, quote: sourceSupportExcerpt },
+    { fact: sourceSupportFact, evidence: [evidence] },
+  );
+  const verification = validateManualNewsSourceSupportVerification(
+    { supported: true, evidence_id: evidence.id }, selection,
+  );
+  const payload = await createManualNewsSourceSupportPayload({
+    lead: {
+      id: submitted.lead.id, review_date: '2026-08-28', input_type: 'text_url',
+      input_text: sourceSupportFact, input_url: evidence.url, note: '',
+    },
+    authorization, evidence: [evidence], selection, verification,
+  });
+  const assessmentVersion = 4_000_001;
+  const proof = await createManualNewsSourceSupportProof(
+    { lead_id: submitted.lead.id, assessment_version: assessmentVersion, payload },
+    testManualNewsVerificationKeyring(VERIFICATION_SECRET), testManualNewsResponseKeyring(),
+  );
+  return { ...state, leadId: submitted.lead.id, evidence, payload, proof, assessmentVersion };
+}
+
+async function addSourceSupportLead(
+  state: Awaited<ReturnType<typeof sourceSupportFixture>>,
+  input: {
+    idempotencyKey: string;
+    owner: string;
+    fact: string;
+    excerpt: string;
+    url: string;
+    evidenceId: string;
+    publisher: string;
+    now: number;
+  },
+) {
+  const submitted = await submitManualNewsLead(state.env, {
+    date: '2026-08-28', text: input.fact, url: input.url, note: '',
+    candidate_authorization: 'source_support_v1',
+  }, input.idempotencyKey, input.now);
+  state.db.sqlite.prepare(`UPDATE manual_news_leads SET status = 'verifying', version = 4,
+    processing_owner = ?, processing_attempt = 1 WHERE id = ?`).run(input.owner, submitted.lead.id);
+  const evidence = withSignedArticleTextV2Audit({
+    id: input.evidenceId, url: input.url, source_type: 'official_primary',
+    publisher: input.publisher, published_at: '2026-08-28T00:00:00.000Z',
+    retrieved_at: input.now + 1, title: input.fact, excerpt: input.excerpt,
+    claims_supported: [input.excerpt], reliable: true,
+  });
+  state.db.sqlite.prepare(`INSERT INTO manual_news_evidence (
+    lead_id, evidence_id, response_key_id, url, source_type, publisher, published_at, retrieved_at,
+    title, excerpt, claims_supported_json, fetch_audit_json, reliable
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`).run(
+    submitted.lead.id, evidence.id, evidence.response_key_id, evidence.url, evidence.source_type,
+    evidence.publisher, evidence.published_at, evidence.retrieved_at, evidence.title, evidence.excerpt,
+    JSON.stringify(evidence.claims_supported), JSON.stringify(evidence.fetch_audit),
+  );
+  const authorization = await new D1ManualLeadProcessingStore(state.env)
+    .getSourceSupportAuthorization(submitted.lead.id);
+  if (!authorization) throw new Error('source support authorization fixture missing');
+  const selection = validateManualNewsSourceSupportSelection(
+    { evidence_id: evidence.id, quote: input.excerpt },
+    { fact: input.fact, evidence: [evidence] },
+  );
+  const verification = validateManualNewsSourceSupportVerification(
+    { supported: true, evidence_id: evidence.id }, selection,
+  );
+  const payload = await createManualNewsSourceSupportPayload({
+    lead: {
+      id: submitted.lead.id, review_date: '2026-08-28', input_type: 'text_url',
+      input_text: input.fact, input_url: input.url, note: '',
+    },
+    authorization, evidence: [evidence], selection, verification,
+  });
+  return { leadId: submitted.lead.id, evidence, payload, owner: input.owner };
+}
+
+function installSourceSupportReviewSchema(
+  state: Awaited<ReturnType<typeof sourceSupportFixture>>,
+  candidates: Array<Record<string, unknown>> = Array.from({ length: 10 }, (_, index) => ({
+    item_id: `auto-${index + 1}`, title: `自动${index + 1}`, summary: '摘要', source: '来源',
+    score: 100 - index, event_key: `automatic-event-${index + 1}`,
+  })),
+): void {
+  state.db.sqlite.exec(`
+    ALTER TABLE items ADD COLUMN source_type TEXT;
+    ALTER TABLE items ADD COLUMN source_id TEXT;
+    ALTER TABLE items ADD COLUMN title TEXT;
+    ALTER TABLE items ADD COLUMN content TEXT;
+    ALTER TABLE items ADD COLUMN content_translated TEXT;
+    ALTER TABLE items ADD COLUMN author TEXT;
+    ALTER TABLE items ADD COLUMN url TEXT;
+    ALTER TABLE items ADD COLUMN matched_by TEXT;
+    ALTER TABLE items ADD COLUMN lang TEXT;
+    CREATE TABLE daily_news_review_batches (
+      review_date TEXT NOT NULL, batch_id TEXT NOT NULL,
+      candidate_ids TEXT NOT NULL, candidates_json TEXT NOT NULL,
+      default_selected_ids TEXT NOT NULL, applied_selected_ids TEXT,
+      selection_hash TEXT, edit_revision INTEGER NOT NULL DEFAULT 0,
+      publish_status TEXT NOT NULL DEFAULT 'not_requested', publish_error TEXT,
+      published_at INTEGER, notified_at INTEGER, notification_hash TEXT,
+      auto_repaired_from_batch TEXT, auto_repaired_invalid_ids TEXT,
+      superseded_by TEXT, human_reviewed INTEGER NOT NULL DEFAULT 0,
+      batch_revision INTEGER NOT NULL DEFAULT 1, supersedes_batch_id TEXT,
+      revision_origin TEXT NOT NULL DEFAULT 'scheduled_freeze',
+      lineage_id TEXT NOT NULL, is_current INTEGER NOT NULL DEFAULT 0,
+      candidate_generation INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+      PRIMARY KEY (review_date, batch_id)
+    );
+    CREATE UNIQUE INDEX idx_daily_news_review_one_current
+      ON daily_news_review_batches(review_date, lineage_id) WHERE is_current = 1;
+    CREATE TABLE daily_news_review_candidate_generations (
+      review_date TEXT NOT NULL, lineage_id TEXT NOT NULL,
+      generation INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+      PRIMARY KEY (review_date, lineage_id)
+    );
+    CREATE TABLE sources (
+      id TEXT PRIMARY KEY, source_type TEXT NOT NULL, source_ref TEXT, name TEXT, config TEXT
+    );
+  `);
+  const candidateIds = candidates.map((candidate) => candidate.item_id);
+  state.db.sqlite.prepare(`INSERT INTO daily_news_review_batches (
+    review_date, batch_id, candidate_ids, candidates_json, default_selected_ids,
+    applied_selected_ids, selection_hash, edit_revision, publish_status, publish_error,
+    published_at, notified_at, notification_hash, auto_repaired_from_batch,
+    auto_repaired_invalid_ids, superseded_by, human_reviewed, batch_revision,
+    supersedes_batch_id, revision_origin, lineage_id, is_current, candidate_generation,
+    created_at, expires_at
+  ) VALUES ('2026-08-28', 'batch-r1', ?, ?, ?, NULL, NULL, 0, 'not_requested', NULL,
+    NULL, NULL, NULL, NULL, '[]', NULL, 0, 1, NULL, 'scheduled_freeze',
+    '2026-08-28', 1, 0, 1, 9999999999999)`).run(
+    JSON.stringify(candidateIds), JSON.stringify(candidates), JSON.stringify(candidateIds.slice(0, 5)),
+  );
+  state.db.sqlite.prepare(`INSERT INTO daily_news_review_candidate_generations
+    (review_date, lineage_id, generation, updated_at) VALUES ('2026-08-28', '2026-08-28', 0, 1)`).run();
 }
 
 function replacementEvidence(count: number): ManualNewsEvidence[] {
@@ -858,6 +1038,503 @@ describe('manual lead D1-backed dedupe', () => {
       `SELECT COUNT(*) AS count FROM manual_news_lead_audit
        WHERE lead_id = ? AND action = 'submit' AND resulting_version = 1`,
     ).get(first.lead.id)).toMatchObject({ count: 1 });
+  });
+
+  test('loads source-support authority only from the exact immutable submit audit', async () => {
+    const state = fixture();
+    state.db.sqlite.prepare('DELETE FROM manual_news_leads').run();
+    state.db.sqlite.prepare('DELETE FROM manual_news_evidence').run();
+    const submitted = await submitManualNewsLead(state.env, {
+      date: '2026-08-28',
+      text: 'Anthropic 开放 Model Hardware Standard（MHS）研究预览。',
+      url: 'https://www.anthropic.com/news/model-hardware-standard-research-preview',
+      note: '',
+      candidate_authorization: 'source_support_v1',
+    }, 'submit-source-support-authority', 21);
+    const store = new D1ManualLeadProcessingStore(state.env);
+
+    await expect(store.getSourceSupportAuthorization(submitted.lead.id)).resolves.toMatchObject({
+      audit_id: expect.any(Number),
+      candidate_authorization: 'source_support_v1',
+      submit_identity_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      idempotency_key: 'submit-source-support-authority',
+    });
+
+    state.db.sqlite.prepare(`UPDATE manual_news_lead_audit
+      SET metadata_json = json_set(metadata_json, '$.submit_identity_digest', ?)
+      WHERE lead_id = ? AND action = 'submit'`).run('0'.repeat(64), submitted.lead.id);
+    await expect(store.getSourceSupportAuthorization(submitted.lead.id)).resolves.toBeNull();
+  });
+
+  test('loads a source-support proof without an assessment row and revalidates its HMAC snapshot', async () => {
+    const state = await sourceSupportFixture();
+    state.db.sqlite.prepare(`INSERT INTO manual_news_assessment_verifications (
+      verification_id, lead_id, assessment_version, policy_version, verification_key_id,
+      canonical_digest, hmac_sha256, verification_json, processing_owner, processing_attempt,
+      creation_nonce, status, reason, created_at, invalidated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'active', NULL, 12, NULL)`).run(
+      `mav:${state.leadId}:source-support`, state.leadId, state.assessmentVersion,
+      state.proof.policy_version, state.proof.verification_key_id,
+      state.proof.canonical_digest, state.proof.hmac_sha256, JSON.stringify(state.payload),
+      PROCESSING_OWNER, 'source-support-proof-create',
+    );
+
+    await expect(loadVerifiedManualCandidateProof(state.env, state.leadId)).resolves.toMatchObject({
+      policy_version: 'source_support_v1',
+      candidate: {
+        item_id: `blog:manual:${state.leadId}`,
+        title: sourceSupportFact,
+        summary: sourceSupportFact,
+        score: null,
+        event_key: state.payload.event_identity.event_key,
+      },
+      record: { policy_version: 'source_support_v1' },
+    });
+    expect(state.db.sqlite.prepare(
+      'SELECT COUNT(*) AS count FROM manual_news_event_assessments WHERE lead_id = ?',
+    ).get(state.leadId)).toEqual({ count: 0 });
+    expect(state.db.preparedSql.some((sql) => sql.includes('manual_verification:source_support')
+      && /manual_news_event_assessments/i.test(sql))).toBe(false);
+  });
+
+  test('fails hidden on an unknown verification policy before any evidence load or quarantine write', async () => {
+    const state = await sourceSupportFixture();
+    state.db.sqlite.prepare(`INSERT INTO manual_news_assessment_verifications (
+      verification_id, lead_id, assessment_version, policy_version, verification_key_id,
+      canonical_digest, hmac_sha256, verification_json, processing_owner, processing_attempt,
+      creation_nonce, status, reason, created_at, invalidated_at
+    ) VALUES (?, ?, ?, 'future-policy-v99', ?, ?, ?, ?, ?, 1, ?, 'active', NULL, 12, NULL)`).run(
+      `mav:${state.leadId}:unknown`, state.leadId, state.assessmentVersion,
+      state.proof.verification_key_id, state.proof.canonical_digest, state.proof.hmac_sha256,
+      JSON.stringify(state.payload), PROCESSING_OWNER, 'unknown-proof-create',
+    );
+    const sqlStart = state.db.preparedSql.length;
+    state.db.rejectEvidenceBlobMaterialization = true;
+
+    await expect(loadVerifiedManualCandidateProof(state.env, state.leadId)).resolves.toBeNull();
+
+    const sql = state.db.preparedSql.slice(sqlStart).join('\n');
+    expect(sql).not.toContain('manual_evidence:');
+    expect(sql).not.toContain('manual_verification:quarantine');
+    expect(state.db.sqlite.prepare(`SELECT status, reason FROM manual_news_assessment_verifications
+      WHERE lead_id = ?`).get(state.leadId)).toEqual({ status: 'active', reason: null });
+  });
+
+  test('derives bounded 14-day prior-event identities only from real automatic fingerprints', async () => {
+    const state = await sourceSupportFixture();
+    const fingerprint = {
+      event_type: 'research_result', primary_actor: 'Anthropic',
+      primary_object: 'Model Hardware Standard (MHS)', object_family: '', object_variant: '',
+      object_version: '', action: 'preview', canonical_event: 'Anthropic MHS research preview',
+      confidence: 0.98,
+    };
+    state.db.sqlite.prepare(`INSERT INTO items (
+      id, source_ref, extra, published_at, scraped_at, is_relevant, deleted_at
+    ) VALUES (?, 'rss', ?, '2026-08-20', '2026-08-20', 1, NULL)`).run(
+      'automatic-mhs-prior', JSON.stringify({ event_fingerprint: fingerprint }),
+    );
+    state.db.sqlite.prepare(`INSERT INTO items (
+      id, source_ref, extra, published_at, scraped_at, is_relevant, deleted_at
+    ) VALUES (?, 'rss', ?, '2026-08-01', '2026-08-01', 1, NULL)`).run(
+      'automatic-mhs-too-old', JSON.stringify({ event_fingerprint: fingerprint }),
+    );
+    state.db.sqlite.prepare(`INSERT INTO items (
+      id, source_ref, extra, published_at, scraped_at, is_relevant, deleted_at
+    ) VALUES (?, 'rss', ?, '2026-08-21', '2026-08-21', 1, NULL)`).run(
+      'automatic-unstructured', JSON.stringify({ title: sourceSupportFact }),
+    );
+
+    await expect(new D1ManualLeadProcessingStore(state.env)
+      .listSourceSupportPriorEvents('2026-08-28', state.leadId)).resolves.toEqual([{
+      event_key: state.payload.event_identity.event_key,
+      review_date: '2026-08-20',
+      origin: 'automatic',
+      item_id: 'automatic-mhs-prior',
+    }]);
+  });
+
+  test('atomically writes source proof, item, revision, lead confirmation, and final audit', async () => {
+    const state = await sourceSupportFixture();
+    installSourceSupportReviewSchema(state);
+    const result = await new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1)
+      .saveSourceSupportedCandidate(state.leadId, 4, state.payload);
+
+    expect(result).toMatchObject({
+      status: 'recommended', version: 5, confirmed_at: expect.any(Number),
+      confirmed_batch_id: expect.stringMatching(/^nr-/), processing_owner: null,
+    });
+    expect(state.db.sqlite.prepare(`SELECT policy_version, verification_json, status
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId))
+      .toMatchObject({ policy_version: 'source_support_v1', status: 'active' });
+    expect(state.db.sqlite.prepare(
+      'SELECT COUNT(*) AS count FROM manual_news_event_assessments WHERE lead_id = ?',
+    ).get(state.leadId)).toEqual({ count: 0 });
+    expect(state.db.sqlite.prepare(`SELECT id, source_id, source_ref, title, content, extra
+      FROM items WHERE id = ?`).get(`blog:manual:${state.leadId}`)).toMatchObject({
+      id: `blog:manual:${state.leadId}`,
+      source_id: `manual:${state.leadId}`,
+      source_ref: 'manual_lead',
+      title: sourceSupportFact,
+      content: sourceSupportFact,
+    });
+    const active = state.db.sqlite.prepare(`SELECT candidates_json, default_selected_ids,
+      batch_revision, revision_origin, is_current FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28' AND is_current = 1`).get() as {
+      candidates_json: string; default_selected_ids: string;
+      batch_revision: number; revision_origin: string; is_current: number;
+    };
+    const candidates = JSON.parse(active.candidates_json) as Array<{ item_id: string }>;
+    expect(candidates).toHaveLength(11);
+    expect(candidates.slice(0, 10).map((candidate) => candidate.item_id))
+      .toEqual(Array.from({ length: 10 }, (_, index) => `auto-${index + 1}`));
+    expect(candidates[10].item_id).toBe(`blog:manual:${state.leadId}`);
+    expect(active).toMatchObject({ batch_revision: 2, revision_origin: 'manual_lead', is_current: 1 });
+    expect(state.db.sqlite.prepare(`SELECT action, from_status, to_status, metadata_json
+      FROM manual_news_lead_audit WHERE lead_id = ? AND action = 'confirm_candidate'`)
+      .get(state.leadId)).toMatchObject({
+      action: 'confirm_candidate', from_status: 'verifying', to_status: 'recommended',
+    });
+  });
+
+  test('uses the final NOT NULL audit gate to roll back every earlier write on stale evidence', async () => {
+    const state = await sourceSupportFixture();
+    installSourceSupportReviewSchema(state);
+    const gate = state.db.pauseNextBatch();
+    const saving = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1)
+      .saveSourceSupportedCandidate(state.leadId, 4, state.payload);
+    await gate.entered;
+    state.db.sqlite.prepare(`UPDATE manual_news_evidence SET excerpt = 'tampered'
+      WHERE lead_id = ?`).run(state.leadId);
+    gate.release();
+
+    await expect(saving).rejects.toThrow(/(?:NOT NULL|constraint)/i);
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId))
+      .toEqual({ count: 0 });
+    expect(state.db.sqlite.prepare(
+      'SELECT COUNT(*) AS count FROM items WHERE id = ?',
+    ).get(`blog:manual:${state.leadId}`)).toEqual({ count: 0 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28' AND batch_revision = 2`).get()).toEqual({ count: 0 });
+    expect(state.db.sqlite.prepare(`SELECT status, version, confirmed_at
+      FROM manual_news_leads WHERE id = ?`).get(state.leadId)).toEqual({
+      status: 'verifying', version: 4, confirmed_at: null,
+    });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'confirm_candidate'`).get(state.leadId)).toEqual({ count: 0 });
+  });
+
+  test('authorizes a persisted source-support item without loading a v10 assessment row', async () => {
+    const state = await sourceSupportFixture();
+    installSourceSupportReviewSchema(state);
+    await new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1)
+      .saveSourceSupportedCandidate(state.leadId, 4, state.payload);
+    const sqlStart = state.db.preparedSql.length;
+
+    await expect(authorizeFormalNewsSet(
+      state.env, '2026-08-28', [`blog:manual:${state.leadId}`], 'source-support-test',
+    )).resolves.toMatchObject({
+      allowed_ids: [`blog:manual:${state.leadId}`],
+      decisions: [{ allowed: true, code: 'ALLOW_VERIFIED_MANUAL' }],
+    });
+    const sourceSupportSql = state.db.preparedSql.slice(sqlStart)
+      .filter((sql) => sql.includes('manual_verification:source_support'));
+    expect(sourceSupportSql.some((sql) => /manual_news_event_assessments/i.test(sql))).toBe(false);
+  });
+
+  test('fails the final guard when a source-support item projection drifts from its signed proof', async () => {
+    const state = await sourceSupportFixture();
+    installSourceSupportReviewSchema(state);
+    await new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1)
+      .saveSourceSupportedCandidate(state.leadId, 4, state.payload);
+    state.db.sqlite.prepare('UPDATE items SET title = ? WHERE id = ?')
+      .run('tampered projection', `blog:manual:${state.leadId}`);
+
+    await expect(authorizeFormalNewsSet(
+      state.env, '2026-08-28', [`blog:manual:${state.leadId}`], 'projection-drift-test',
+    )).resolves.toMatchObject({
+      allowed_ids: [],
+      decisions: [{ allowed: false, code: 'DENY_AUTHORIZATION_STALE' }],
+    });
+  });
+
+  test('keeps a source-support candidate through the review sanitizer and proof snapshot guard', async () => {
+    const state = await sourceSupportFixture();
+    installSourceSupportReviewSchema(state);
+    await new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1)
+      .saveSourceSupportedCandidate(state.leadId, 4, state.payload);
+
+    const sanitized = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 100);
+
+    expect(sanitized.batch.candidates).toEqual([
+      expect.objectContaining({
+        item_id: `blog:manual:${state.leadId}`,
+        title: sourceSupportFact,
+        summary: sourceSupportFact,
+        score: null,
+      }),
+    ]);
+    expect(sanitized.manual_verifications).toEqual([
+      expect.objectContaining({
+        lead_id: state.leadId,
+        verification: expect.objectContaining({ policy_version: 'source_support_v1' }),
+      }),
+    ]);
+  });
+
+  test('fails hidden and quarantines a tampered source-support proof before final authorization', async () => {
+    const state = await sourceSupportFixture();
+    installSourceSupportReviewSchema(state);
+    await new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1)
+      .saveSourceSupportedCandidate(state.leadId, 4, state.payload);
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications
+      SET verification_json = json_set(verification_json, '$.selection.quote', 'forged quote')
+      WHERE lead_id = ? AND status = 'active'`).run(state.leadId);
+
+    await expect(authorizeFormalNewsSet(
+      state.env, '2026-08-28', [`blog:manual:${state.leadId}`], 'tamper-test',
+    )).resolves.toMatchObject({
+      allowed_ids: [],
+      decisions: [{ allowed: false, code: 'DENY_UNVERIFIED_MANUAL' }],
+    });
+    expect(state.db.sqlite.prepare(`SELECT status, reason
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId)).toEqual({
+      status: 'invalidated', reason: 'verification_integrity_invalid',
+    });
+    expect(state.db.sqlite.prepare(`SELECT deleted_at FROM items WHERE id = ?`)
+      .get(`blog:manual:${state.leadId}`)).toEqual({ deleted_at: expect.any(String) });
+  });
+
+  test('atomically authorizes a source-support candidate before the initial review freeze', async () => {
+    const state = await sourceSupportFixture();
+    installSourceSupportReviewSchema(state);
+    state.db.sqlite.prepare(`DELETE FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28'`).run();
+    state.db.sqlite.prepare(`DELETE FROM daily_news_review_candidate_generations
+      WHERE review_date = '2026-08-28'`).run();
+
+    await expect(new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1)
+      .saveSourceSupportedCandidate(state.leadId, 4, state.payload)).resolves.toMatchObject({
+      status: 'recommended', version: 5, confirmed_batch_id: null,
+      confirmed_at: expect.any(Number), processing_owner: null,
+    });
+    expect(state.db.sqlite.prepare(`SELECT generation FROM daily_news_review_candidate_generations
+      WHERE review_date = '2026-08-28' AND lineage_id = '2026-08-28'`).get())
+      .toEqual({ generation: 1 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM items WHERE id = ?`)
+      .get(`blog:manual:${state.leadId}`)).toEqual({ count: 1 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_assessment_verifications
+      WHERE lead_id = ? AND policy_version = 'source_support_v1' AND status = 'active'`)
+      .get(state.leadId)).toEqual({ count: 1 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28'`).get()).toEqual({ count: 0 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'confirm_candidate'`).get(state.leadId)).toEqual({ count: 1 });
+  });
+
+  test('rolls back prefreeze generation initialization with every source-support write', async () => {
+    const state = await sourceSupportFixture();
+    installSourceSupportReviewSchema(state);
+    state.db.sqlite.prepare(`DELETE FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28'`).run();
+    state.db.sqlite.prepare(`DELETE FROM daily_news_review_candidate_generations
+      WHERE review_date = '2026-08-28'`).run();
+    const gate = state.db.pauseNextBatch();
+    const saving = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1)
+      .saveSourceSupportedCandidate(state.leadId, 4, state.payload);
+    await gate.entered;
+    state.db.sqlite.prepare(`UPDATE manual_news_evidence SET excerpt = 'tampered'
+      WHERE lead_id = ?`).run(state.leadId);
+    gate.release();
+
+    await expect(saving).rejects.toThrow(/(?:NOT NULL|constraint)/i);
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
+      FROM daily_news_review_candidate_generations WHERE review_date = '2026-08-28'`).get())
+      .toEqual({ count: 0 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId))
+      .toEqual({ count: 0 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM items WHERE id = ?`)
+      .get(`blog:manual:${state.leadId}`)).toEqual({ count: 0 });
+  });
+
+  test.each(['active', 'prefreeze'] as const)(
+    'fails with the dedicated manual cap error without writing a source-support proof (%s)',
+    async (mode) => {
+    const state = await sourceSupportFixture();
+    installSourceSupportReviewSchema(state);
+    if (mode === 'prefreeze') {
+      state.db.sqlite.prepare(`DELETE FROM daily_news_review_batches
+        WHERE review_date = '2026-08-28'`).run();
+    }
+    for (let index = 0; index < 50; index += 1) {
+      const leadId = `ml-20260828-cap-${String(index).padStart(2, '0')}`;
+      state.db.sqlite.prepare(`INSERT INTO manual_news_leads (
+        id, review_date, input_type, input_text, input_url, note, status, version,
+        submit_idempotency_key, processing_attempt, confirmed_at, created_at, updated_at
+      ) VALUES (?, '2026-08-28', 'text', 'cap fixture', '', '', 'recommended', 1,
+        ?, 0, 1, ?, ?)` ).run(leadId, `cap-${index}`, index + 20, index + 20);
+    }
+
+    await expect(new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1)
+      .saveSourceSupportedCandidate(state.leadId, 4, state.payload))
+      .rejects.toThrow('manual_candidate_limit_exceeded');
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId))
+      .toEqual({ count: 0 });
+    expect(state.db.sqlite.prepare(`SELECT status, version, confirmed_at
+      FROM manual_news_leads WHERE id = ?`).get(state.leadId)).toEqual({
+      status: 'verifying', version: 4, confirmed_at: null,
+    });
+    },
+  );
+
+  test('orders the manual suffix by first authorization even when B verifies before A', async () => {
+    const state = await sourceSupportFixture();
+    installSourceSupportReviewSchema(state);
+    const second = await addSourceSupportLead(state, {
+      idempotencyKey: 'submit-source-support-b', owner: 'source-support-owner-b',
+      fact: 'OpenAI 发布 GPT-5。', excerpt: 'OpenAI released GPT-5.',
+      url: 'https://openai.com/index/gpt-5/', evidenceId: 'ev-openai-gpt-5',
+      publisher: 'OpenAI', now: 10,
+    });
+
+    await new D1ManualLeadProcessingStore(state.env, second.owner, 1)
+      .saveSourceSupportedCandidate(second.leadId, 4, second.payload);
+    await new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1)
+      .saveSourceSupportedCandidate(state.leadId, 4, state.payload);
+
+    const active = state.db.sqlite.prepare(`SELECT candidates_json
+      FROM daily_news_review_batches WHERE review_date = '2026-08-28' AND is_current = 1`)
+      .get() as { candidates_json: string };
+    const candidates = JSON.parse(active.candidates_json) as Array<{ item_id: string }>;
+    expect(candidates.slice(0, 10).map((candidate) => candidate.item_id))
+      .toEqual(Array.from({ length: 10 }, (_, index) => `auto-${index + 1}`));
+    expect(candidates.slice(10).map((candidate) => candidate.item_id)).toEqual([
+      `blog:manual:${state.leadId}`,
+      `blog:manual:${second.leadId}`,
+    ]);
+  });
+
+  test('replaces a same-event automatic item in place and inherits human selections without rerender', async () => {
+    const state = await sourceSupportFixture();
+    const selected = Array.from({ length: 5 }, (_, index) => `auto-${index + 1}`);
+    const candidates = Array.from({ length: 10 }, (_, index) => ({
+      item_id: `auto-${index + 1}`, title: `自动${index + 1}`, summary: '摘要', source: '来源',
+      score: 100 - index,
+      event_key: index === 3 ? state.payload.event_identity.event_key : `automatic-event-${index + 1}`,
+    }));
+    installSourceSupportReviewSchema(state, candidates);
+    state.db.sqlite.prepare(`UPDATE daily_news_review_batches
+      SET applied_selected_ids = ?, selection_hash = ?, edit_revision = 2,
+        publish_status = 'published', human_reviewed = 1
+      WHERE review_date = '2026-08-28' AND is_current = 1`).run(
+      JSON.stringify(selected), await newsReviewSelectionHash(selected),
+    );
+
+    await new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1)
+      .saveSourceSupportedCandidate(state.leadId, 4, state.payload);
+
+    const active = state.db.sqlite.prepare(`SELECT candidates_json, default_selected_ids,
+      applied_selected_ids, publish_status FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28' AND is_current = 1`).get() as {
+      candidates_json: string; default_selected_ids: string;
+      applied_selected_ids: string; publish_status: string;
+    };
+    const ids = (JSON.parse(active.candidates_json) as Array<{ item_id: string }>)
+      .map((candidate) => candidate.item_id);
+    expect(ids).toHaveLength(10);
+    expect(ids[3]).toBe(`blog:manual:${state.leadId}`);
+    const inherited = ['auto-1', 'auto-2', 'auto-3', `blog:manual:${state.leadId}`, 'auto-5'];
+    expect(JSON.parse(active.default_selected_ids)).toEqual(inherited);
+    expect(JSON.parse(active.applied_selected_ids)).toEqual(inherited);
+    expect(active.publish_status).toBe('published');
+    const audit = state.db.sqlite.prepare(`SELECT metadata_json FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'confirm_candidate'`).get(state.leadId) as { metadata_json: string };
+    expect(JSON.parse(audit.metadata_json)).toMatchObject({
+      event_aliases: { 'auto-4': `blog:manual:${state.leadId}` },
+      rerender_enqueued: false,
+    });
+  });
+
+  test('atomically elects one winner for concurrent source-support leads with the same event', async () => {
+    const state = await sourceSupportFixture();
+    installSourceSupportReviewSchema(state);
+    const second = await addSourceSupportLead(state, {
+      idempotencyKey: 'submit-source-support-same-event', owner: 'source-support-owner-same',
+      fact: sourceSupportFact, excerpt: sourceSupportExcerpt,
+      url: 'https://www.anthropic.com/news/model-hardware-standard-research-preview',
+      evidenceId: 'ev-anthropic-mhs-second', publisher: 'Anthropic', now: 30,
+    });
+    const barrier = state.db.pauseNextFirstCalls('manual_source_support:manual_cap_preflight', 2);
+    const firstSave = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1)
+      .saveSourceSupportedCandidate(state.leadId, 4, state.payload);
+    const secondSave = new D1ManualLeadProcessingStore(state.env, second.owner, 1)
+      .saveSourceSupportedCandidate(second.leadId, 4, second.payload);
+    await barrier.entered;
+    barrier.release();
+
+    const settled = await Promise.allSettled([firstSave, secondSave]);
+    expect(settled.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    const rejected = settled.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toEqual(expect.objectContaining({
+      message: 'manual_candidate_event_conflict',
+    }));
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
+      FROM manual_news_assessment_verifications WHERE policy_version = 'source_support_v1'
+        AND status = 'active'`).get()).toEqual({ count: 1 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE action = 'confirm_candidate'`).get()).toEqual({ count: 1 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_leads
+      WHERE status = 'recommended' AND confirmed_at IS NOT NULL`).get()).toEqual({ count: 1 });
+  });
+
+  test.each([
+    ['lead CAS', `UPDATE manual_news_leads SET version = version + 1 WHERE id = ?`],
+    ['authorization audit', `UPDATE manual_news_lead_audit SET metadata_json = '{}'
+      WHERE lead_id = ? AND action = 'submit'`],
+    ['active batch snapshot', `UPDATE daily_news_review_batches SET candidate_generation = 1
+      WHERE review_date = '2026-08-28' AND is_current = 1`],
+  ])('leaves no partial source-support writes when the %s changes after preflight', async (_label, sql) => {
+    const state = await sourceSupportFixture();
+    installSourceSupportReviewSchema(state);
+    const gate = state.db.pauseNextBatch();
+    const saving = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1)
+      .saveSourceSupportedCandidate(state.leadId, 4, state.payload);
+    await gate.entered;
+    const concurrentMutation = state.db.sqlite.prepare(sql);
+    if (sql.includes('?')) concurrentMutation.run(state.leadId);
+    else concurrentMutation.run();
+    gate.release();
+
+    await expect(saving).rejects.toThrow(/(?:NOT NULL|constraint)/i);
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId))
+      .toEqual({ count: 0 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM items WHERE id = ?`)
+      .get(`blog:manual:${state.leadId}`)).toEqual({ count: 0 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28' AND batch_revision = 2`).get()).toEqual({ count: 0 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'confirm_candidate'`).get(state.leadId)).toEqual({ count: 0 });
+  });
+
+  test('replays the exact completed source-support state after a lost response without another write', async () => {
+    const state = await sourceSupportFixture();
+    installSourceSupportReviewSchema(state);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    const first = await store.saveSourceSupportedCandidate(state.leadId, 4, state.payload);
+    const replay = await store.saveSourceSupportedCandidate(state.leadId, 4, state.payload);
+
+    expect(replay).toEqual(first);
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId))
+      .toEqual({ count: 1 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'confirm_candidate'`).get(state.leadId)).toEqual({ count: 1 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28'`).get()).toEqual({ count: 2 });
   });
 
   test('persists the signed bounded proof-excerpt audit with evidence', async () => {

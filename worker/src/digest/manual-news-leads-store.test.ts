@@ -6,7 +6,14 @@ type LeadRow = Record<string, unknown>;
 
 function fakeEnv() {
   const leads = new Map<string, LeadRow>();
-  const audits: Array<{ lead_id: string; action: string; idempotency_key: string | null; resulting_version: number }> = [];
+  const audits: Array<{
+    id: number;
+    lead_id: string;
+    action: string;
+    idempotency_key: string | null;
+    resulting_version: number;
+    metadata_json: string;
+  }> = [];
   const statements: Array<{ sql: string; binds: unknown[] }> = [];
   const db = {
     prepare(sql: string) {
@@ -17,6 +24,10 @@ function fakeEnv() {
           if (sql.includes('manual_audit:retry_idempotency')) {
             return audits.find((audit) => audit.lead_id === binds[0]
               && audit.action === 'retry' && audit.idempotency_key === binds[1]) as T | undefined;
+          }
+          if (sql.includes('manual_audit:submit_authorization')) {
+            return audits.find((audit) => audit.lead_id === binds[0]
+              && audit.action === 'submit' && audit.resulting_version === 1) as T | undefined;
           }
           if (sql.includes('manual_lead:by_submit_key')) {
             return [...leads.values()].find((row) => row.review_date === binds[0] && row.submit_idempotency_key === binds[1]) as T | undefined;
@@ -72,10 +83,12 @@ function fakeEnv() {
               && row.last_mutation_nonce === binds[13];
             if (!matchesMutation) return { success: true, meta: { changes: 0 } };
             audits.push({
+              id: audits.length + 1,
               lead_id: String(binds[0]),
               action: String(binds[1]),
               idempotency_key: binds[4] === null ? null : String(binds[4]),
               resulting_version: Number(binds[9]),
+              metadata_json: String(binds[6]),
             });
             return { success: true, meta: { changes: 1 } };
           }
@@ -114,6 +127,43 @@ describe('manual lead D1 store', () => {
       date: '2026-08-11', text: 'different retry body', note: '核验范围',
     }, 'submit-key-1', 300)).rejects.toThrow(/idempotency_key_reused_with_different_payload/);
     expect(memory.statements.filter((entry) => entry.sql.includes('manual_lead:insert'))).toHaveLength(1);
+  });
+
+  test('binds source-support authorization to the first submit audit and never upgrades a legacy replay', async () => {
+    const memory = fakeEnv();
+    const first = await submitManualNewsLead(memory.env, {
+      date: '2026-08-11',
+      text: 'Anthropic 开放研究预览 MHS',
+      note: '官方证据',
+      candidate_authorization: 'source_support_v1',
+    }, 'submit-source-support', 100);
+    const replay = await submitManualNewsLead(memory.env, {
+      date: '2026-08-11',
+      text: ' Anthropic  开放研究预览 MHS ',
+      note: ' 官方证据 ',
+      candidate_authorization: 'source_support_v1',
+    }, 'submit-source-support', 200);
+
+    expect(replay).toMatchObject({ created: false, lead: { id: first.lead.id } });
+    const submitAudits = memory.audits.filter((audit) => audit.action === 'submit');
+    expect(submitAudits).toHaveLength(1);
+    expect(JSON.parse(submitAudits[0].metadata_json)).toMatchObject({
+      candidate_authorization: 'source_support_v1',
+      submit_identity_contract: 'manual_news_submit_identity_v1',
+      submit_identity_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+
+    const legacy = await submitManualNewsLead(memory.env, {
+      date: '2026-08-11', text: '旧线索',
+    }, 'submit-legacy-no-upgrade', 300);
+    await expect(submitManualNewsLead(memory.env, {
+      date: '2026-08-11', text: '旧线索', candidate_authorization: 'source_support_v1',
+    }, 'submit-legacy-no-upgrade', 400)).rejects.toThrow(
+      'idempotency_key_reused_with_different_payload',
+    );
+    expect(memory.leads.get(legacy.lead.id)).toMatchObject({ status: 'submitted', version: 1 });
+    expect(memory.audits.filter((audit) => audit.lead_id === legacy.lead.id && audit.action === 'submit'))
+      .toHaveLength(1);
   });
 
   test('retry is idempotent and fails optimistic version conflicts without mutation', async () => {

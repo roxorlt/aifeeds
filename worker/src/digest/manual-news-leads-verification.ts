@@ -6,13 +6,18 @@ import {
 } from '../security/manual-news-keyring';
 import {
   assertManualNewsEvidenceSet,
+  createManualEvidenceDigest,
+  isCurrentManualNewsSourceSupportProof,
   isCurrentManualLeadVerification,
+  MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+  MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
   validateManualLeadFactVerification,
   validateManualNewsProcessedAssessment,
   type ManualLeadFactVerification,
   type ManualLeadPriorEvent,
   type ManualNewsEvidence,
   type ManualNewsProcessedAssessment,
+  type ManualNewsSourceSupportPayload,
 } from './manual-news-leads';
 
 interface ManualEvidenceRow {
@@ -59,6 +64,24 @@ export interface VerifiedPersistedManualAssessment {
   verification: ManualLeadFactVerification;
   record: PersistedManualVerificationRow;
   evidence: ManualNewsEvidence[];
+}
+
+export interface VerifiedPersistedManualCandidateProof {
+  policy_version: typeof MANUAL_LEAD_VERIFICATION_POLICY_VERSION | typeof MANUAL_NEWS_SOURCE_SUPPORT_POLICY;
+  candidate: {
+    item_id: string;
+    title: string;
+    summary: string;
+    source: string;
+    score: number | null;
+    url: string;
+    published_at: string | null;
+    event_key: string;
+  };
+  record: PersistedManualVerificationRow;
+  evidence: ManualNewsEvidence[];
+  assessment?: ManualNewsProcessedAssessment;
+  source_support?: ManualNewsSourceSupportPayload;
 }
 
 type PersistedVerificationOutcome =
@@ -384,6 +407,140 @@ async function verifyPersistedManualAssessmentOutcome(
   } catch {
     return { status: 'tamper', value: null };
   }
+}
+
+interface ManualCandidateProofDispatchRow extends PersistedManualVerificationRow {
+  review_date: string;
+  input_type: 'text' | 'url' | 'text_url';
+  input_text: string;
+  input_url: string;
+  note: string;
+  submit_idempotency_key: string;
+  lead_status: string;
+  lead_confirmed_at: number | null;
+  lead_version: number;
+}
+
+async function activeManualCandidateProofRow(
+  env: Env,
+  leadId: string,
+): Promise<ManualCandidateProofDispatchRow | null> {
+  return env.DB.prepare(
+    `/* manual_verification:policy_dispatch */ SELECT
+       v.verification_id, v.lead_id, v.assessment_version, v.policy_version,
+       v.verification_key_id, v.canonical_digest, v.hmac_sha256, v.verification_json,
+       v.processing_owner, v.processing_attempt, v.creation_nonce, v.status, v.reason,
+       v.created_at, v.invalidation_nonce, v.invalidated_at,
+       l.review_date, l.input_type, l.input_text, l.input_url, l.note,
+       l.submit_idempotency_key, l.status AS lead_status,
+       l.confirmed_at AS lead_confirmed_at, l.version AS lead_version
+     FROM manual_news_assessment_verifications v
+     JOIN manual_news_leads l ON l.id = v.lead_id
+     WHERE v.lead_id = ? AND v.status = 'active'
+     ORDER BY v.created_at DESC LIMIT 1`,
+  ).bind(leadId).first<ManualCandidateProofDispatchRow>();
+}
+
+async function sourceSupportAuthorizationMatches(
+  env: Env,
+  row: ManualCandidateProofDispatchRow,
+  payload: ManualNewsSourceSupportPayload,
+): Promise<boolean> {
+  if (payload.input.review_date !== row.review_date
+    || payload.input.input_type !== row.input_type
+    || payload.input.input_text !== row.input_text
+    || payload.input.input_url !== row.input_url
+    || payload.input.note !== row.note
+    || payload.authorization.idempotency_key !== row.submit_idempotency_key) return false;
+  const audit = await env.DB.prepare(
+    `/* manual_verification:source_support_authorization */ SELECT
+       id, idempotency_key, metadata_json
+     FROM manual_news_lead_audit
+     WHERE lead_id = ? AND action = 'submit' AND resulting_version = 1
+       AND from_status IS NULL AND to_status = 'submitted'
+     ORDER BY id ASC LIMIT 1`,
+  ).bind(row.lead_id).first<{ id: number; idempotency_key: string; metadata_json: string }>();
+  if (!audit || Number(audit.id) !== payload.authorization.audit_id
+    || audit.idempotency_key !== payload.authorization.idempotency_key) return false;
+  const metadata = parseJson<Record<string, unknown>>(audit.metadata_json, {});
+  const expectedKeys = [
+    'input_type', 'candidate_authorization', 'submit_identity_contract', 'submit_identity_digest',
+  ];
+  return Object.keys(metadata).length === expectedKeys.length
+    && Object.keys(metadata).every((key) => expectedKeys.includes(key))
+    && metadata.input_type === row.input_type
+    && metadata.candidate_authorization === MANUAL_NEWS_SOURCE_SUPPORT_POLICY
+    && metadata.submit_identity_contract === 'manual_news_submit_identity_v1'
+    && metadata.submit_identity_digest === payload.authorization.submit_identity_digest;
+}
+
+export async function loadVerifiedManualCandidateProof(
+  env: Env,
+  leadId: string,
+): Promise<VerifiedPersistedManualCandidateProof | null> {
+  const row = await activeManualCandidateProofRow(env, leadId);
+  if (!row) return null;
+  if (row.policy_version !== MANUAL_LEAD_VERIFICATION_POLICY_VERSION
+    && row.policy_version !== MANUAL_NEWS_SOURCE_SUPPORT_POLICY) return null;
+  if (row.policy_version === MANUAL_LEAD_VERIFICATION_POLICY_VERSION) {
+    const legacy = await loadVerifiedManualAssessment(env, leadId);
+    if (!legacy) return null;
+    const primaryEvidence = legacy.evidence.find((item) => item.reliable) || legacy.evidence[0];
+    return {
+      policy_version: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+      candidate: {
+        item_id: `blog:manual:${leadId}`,
+        title: legacy.assessment.title,
+        summary: legacy.assessment.summary,
+        source: primaryEvidence?.publisher || '手工补录',
+        score: legacy.assessment.score,
+        url: primaryEvidence?.url || row.input_url,
+        published_at: primaryEvidence?.published_at || null,
+        event_key: legacy.assessment.event_key,
+      },
+      record: legacy.record,
+      evidence: legacy.evidence,
+      assessment: legacy.assessment,
+    };
+  }
+  const keyrings = configuredKeyrings(env);
+  if (!keyrings
+    || !keyrings.verificationKeys.keys.has(row.verification_key_id)
+    || !await persistedKeyLineageAvailable(env, leadId, keyrings)) return null;
+  const payload = parseJson<ManualNewsSourceSupportPayload | null>(row.verification_json, null);
+  const evidence = await loadManualNewsEvidence(env, leadId);
+  let valid = false;
+  if (payload && await sourceSupportAuthorizationMatches(env, row, payload)) {
+    try {
+      valid = await createManualEvidenceDigest(evidence) === await createManualEvidenceDigest(payload.evidence)
+        && await isCurrentManualNewsSourceSupportProof({
+          lead_id: leadId,
+          assessment_version: Number(row.assessment_version),
+          payload,
+        }, {
+          policy_version: row.policy_version,
+          verification_key_id: row.verification_key_id,
+          canonical_digest: row.canonical_digest,
+          hmac_sha256: row.hmac_sha256,
+        }, keyrings.verificationKeys, keyrings.responseKeys);
+    } catch {
+      valid = false;
+    }
+  }
+  if (!valid || !payload) {
+    await quarantineInvalidManualAssessment(env, row, 'verification_integrity_invalid');
+    return null;
+  }
+  return {
+    policy_version: MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+    candidate: {
+      ...payload.item_projection,
+      event_key: payload.event_identity.event_key,
+    },
+    record: row,
+    evidence,
+    source_support: payload,
+  };
 }
 
 export async function loadVerifiedManualAssessment(

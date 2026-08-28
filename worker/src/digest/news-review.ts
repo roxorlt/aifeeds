@@ -3,6 +3,7 @@ import { pushDeerMessage } from '../notifier';
 import {
   AUTOMATIC_NEWS_REVIEW_CANDIDATE_LIMIT,
   MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT,
+  MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
   mergeManualLeadCandidate,
   TOTAL_NEWS_REVIEW_CANDIDATE_LIMIT,
 } from './manual-news-leads';
@@ -13,7 +14,7 @@ import {
   type FormalNewsAuthorizationResult,
 } from './news-source-policy';
 import {
-  loadVerifiedManualAssessment,
+  loadVerifiedManualCandidateProof,
   MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL,
   manualVerificationSnapshotGuardBindings,
   type PersistedManualVerificationRow,
@@ -878,10 +879,22 @@ async function verifiedManualCandidateSnapshot(
   env: Env,
   row: ConfirmedManualCandidateRow,
 ): Promise<VerifiedManualCandidateSnapshot | null> {
-  const verified = await loadVerifiedManualAssessment(env, row.id);
+  const verified = await loadVerifiedManualCandidateProof(env, row.id);
   if (!verified) return null;
+  if (verified.policy_version === MANUAL_NEWS_SOURCE_SUPPORT_POLICY) {
+    return {
+      lead_id: row.id,
+      verification: verified.record,
+      candidate: {
+        ...verified.candidate,
+        origin: 'manual_lead',
+        lead_id: row.id,
+      },
+    };
+  }
+  if (!verified.assessment) return null;
   const primaryEvidence = verified.evidence.find((item) => item.reliable) || verified.evidence[0];
-  const { assessment } = verified;
+  const assessment = verified.assessment;
   return {
     lead_id: row.id,
     verification: verified.record,
@@ -1162,9 +1175,24 @@ async function durableConfirmedManualCandidates(env: Env, date: string): Promise
        AND l.status IN ('recommended', 'needs_review')
      ORDER BY COALESCE((
        SELECT MIN(audit.id) FROM manual_news_lead_audit audit
-       WHERE audit.lead_id = l.id AND audit.action = 'confirm_candidate'
+       WHERE audit.lead_id = l.id AND (
+         (EXISTS (SELECT 1 FROM manual_news_assessment_verifications verification
+           WHERE verification.lead_id = l.id AND verification.status = 'active'
+             AND verification.policy_version = ?)
+          AND audit.action = 'submit'
+          AND json_extract(audit.metadata_json, '$.candidate_authorization') = ?)
+         OR
+         (NOT EXISTS (SELECT 1 FROM manual_news_assessment_verifications verification
+           WHERE verification.lead_id = l.id AND verification.status = 'active'
+             AND verification.policy_version = ?)
+          AND audit.action = 'confirm_candidate')
+       )
      ), 9223372036854775807) ASC, l.confirmed_at ASC, l.id ASC`,
-  ).bind(date).all<ConfirmedManualCandidateRow>();
+  ).bind(
+    date,
+    MANUAL_NEWS_SOURCE_SUPPORT_POLICY, MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+    MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+  ).all<ConfirmedManualCandidateRow>();
   const candidates: NewsReviewCandidate[] = [];
   for (const row of confirmed.results || []) {
     const candidate = await verifiedManualCandidate(env, row);

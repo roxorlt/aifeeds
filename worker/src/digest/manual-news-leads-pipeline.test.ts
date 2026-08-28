@@ -181,6 +181,23 @@ const officialEvidence: ManualNewsEvidence = {
   reliable: true,
 };
 
+const sourceSupportFact = 'Anthropic 开放 Model Hardware Standard（MHS）研究预览。';
+const sourceSupportExcerpt = 'Anthropic is opening a research preview of the Model Hardware Standard (MHS), '
+  + 'a shared specification for AI agents to safely operate physical devices, '
+  + 'to a first group of scientific research labs and advanced manufacturers.';
+const sourceSupportEvidence: ManualNewsEvidence = {
+  id: 'ev-anthropic-mhs',
+  url: 'https://www.anthropic.com/news/model-hardware-standard-research-preview',
+  source_type: 'official_primary',
+  publisher: 'Anthropic',
+  published_at: '2026-08-28T00:00:00.000Z',
+  retrieved_at: 1,
+  title: 'Previewing the Model Hardware Standard \\ Anthropic',
+  excerpt: sourceSupportExcerpt,
+  claims_supported: [sourceSupportExcerpt],
+  reliable: true,
+};
+
 const supportedAssessmentFact = officialEvidence.claims_supported[0];
 
 const techCrunchAlibabaEvidence: ManualNewsEvidence = {
@@ -1940,5 +1957,88 @@ describe('manual lead processing pipeline', () => {
       status: 'needs_review', assessment: null,
       error_code: 'assessment_validation_failed', error_message: 'unknown_evidence_id',
     });
+  });
+
+  test('routes an authorized source-support lead through selector and verifier directly into atomic append', async () => {
+    const memory = memoryStore(lead({
+      review_date: '2026-08-28', input_type: 'text_url', input_text: sourceSupportFact,
+      input_url: sourceSupportEvidence.url, status: 'verifying', version: 4,
+      processing_owner: 'source-support-owner', processing_attempt: 1,
+      evidence: [sourceSupportEvidence],
+    }));
+    const saveSourceSupportedCandidate = vi.fn(async (_id, _version, payload) => ({
+      ...memory.current(),
+      status: 'recommended' as const,
+      version: 5,
+      processing_owner: null,
+      processing_lease_until: null,
+      confirmed_batch_id: 'source-support-batch',
+      confirmed_at: 100,
+      source_support_payload: payload,
+    }));
+    Object.assign(memory.store, {
+      getSourceSupportAuthorization: async () => ({
+        audit_id: 41,
+        candidate_authorization: 'source_support_v1',
+        submit_identity_digest: '1'.repeat(64),
+        idempotency_key: 'submit-source-support',
+      }),
+      listSourceSupportPriorEvents: async () => [],
+      saveSourceSupportedCandidate,
+    });
+    const assess = vi.fn(async (prompt: { user: string }) => {
+      expect(JSON.parse(prompt.user)).toEqual({
+        fact: sourceSupportFact,
+        untrusted_evidence: [{ evidence_id: sourceSupportEvidence.id, excerpt: sourceSupportExcerpt }],
+      });
+      return { evidence_id: sourceSupportEvidence.id, quote: sourceSupportExcerpt };
+    });
+    const verify = vi.fn(async (prompt: { user: string }) => {
+      expect(JSON.parse(prompt.user)).toMatchObject({
+        fact: sourceSupportFact,
+        selected_evidence: { evidence_id: sourceSupportEvidence.id, quote: sourceSupportExcerpt },
+      });
+      return { supported: true, evidence_id: sourceSupportEvidence.id };
+    });
+
+    const result = await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => { throw new Error('unexpected_search'); },
+      fetch: async () => { throw new Error('unexpected_fetch'); },
+      extract: async () => { throw new Error('unexpected_extract'); },
+      assess,
+      verify,
+    });
+
+    expect(assess).toHaveBeenCalledTimes(1);
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(saveSourceSupportedCandidate).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ status: 'recommended', confirmed_at: 100 });
+  });
+
+  test('classifies a concurrent source-support event loser as duplicate instead of failed', async () => {
+    const memory = memoryStore(lead({
+      review_date: '2026-08-28', input_type: 'text_url', input_text: sourceSupportFact,
+      input_url: sourceSupportEvidence.url, status: 'verifying', version: 4,
+      processing_owner: 'source-support-owner', processing_attempt: 1,
+      evidence: [sourceSupportEvidence],
+    }));
+    Object.assign(memory.store, {
+      getSourceSupportAuthorization: async () => ({
+        audit_id: 41, candidate_authorization: 'source_support_v1',
+        submit_identity_digest: '1'.repeat(64), idempotency_key: 'submit-source-support',
+      }),
+      listSourceSupportPriorEvents: async () => [],
+      saveSourceSupportedCandidate: async () => { throw new Error('manual_candidate_event_conflict'); },
+    });
+
+    const result = await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => { throw new Error('unexpected_search'); },
+      fetch: async () => { throw new Error('unexpected_fetch'); },
+      extract: async () => { throw new Error('unexpected_extract'); },
+      assess: async () => ({ evidence_id: sourceSupportEvidence.id, quote: sourceSupportExcerpt }),
+      verify: async () => ({ supported: true, evidence_id: sourceSupportEvidence.id }),
+    });
+
+    expect(result).toMatchObject({ status: 'duplicate', error_code: null, error_message: null });
   });
 });

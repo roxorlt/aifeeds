@@ -2,9 +2,13 @@ import type { Env } from '../index';
 import { FEED_REGISTRY } from '../feeds/registry';
 import type { EditorialType, FeedDef } from '../feeds/types';
 import {
-  loadVerifiedManualAssessment,
+  loadVerifiedManualCandidateProof,
   type PersistedManualVerificationRow,
 } from './manual-news-leads-verification';
+import {
+  MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+  MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+} from './manual-news-leads';
 
 const LEGACY_RADAR_KEY = 'weibo-hot-tech';
 const LEGACY_RADAR_FEED_ID = `blog:${LEGACY_RADAR_KEY}`;
@@ -381,7 +385,7 @@ async function authorizeManualItem(
     || lead.confirmed_at === null) {
     return deny(row.requested_id, 'DENY_UNVERIFIED_MANUAL');
   }
-  const verified = await loadVerifiedManualAssessment(env, leadId);
+  const verified = await loadVerifiedManualCandidateProof(env, leadId);
   if (!verified || verified.record.status !== 'active' || verified.record.lead_id !== leadId) {
     return deny(row.requested_id, 'DENY_UNVERIFIED_MANUAL');
   }
@@ -520,8 +524,32 @@ function formalNewsFinalGuardCtes(
     AND v.invalidation_nonce IS ${expected('verification.invalidation_nonce')}
     AND v.invalidated_at IS ${expected('verification.invalidated_at')}
     AND v.invalidation_nonce IS NULL AND v.invalidated_at IS NULL
-    AND a.lead_id=v.lead_id AND a.assessment_version=v.assessment_version
-    AND a.assessment_json IS ${expected('verification.assessment_json')}
+    AND (
+      (v.policy_version='${MANUAL_NEWS_SOURCE_SUPPORT_POLICY}'
+        AND ${expected('verification.assessment_json')} IS NULL
+        AND json_valid(v.verification_json)=1
+        AND json_extract(v.verification_json,'$.contract')='manual-news-source-support-proof-v1'
+        AND i.id IS json_extract(v.verification_json,'$.item_projection.item_id')
+        AND i.source_id IS json_extract(v.verification_json,'$.item_projection.source_id')
+        AND i.title IS json_extract(v.verification_json,'$.item_projection.title')
+        AND i.content IS json_extract(v.verification_json,'$.item_projection.summary')
+        AND i.content_translated IS json_extract(v.verification_json,'$.item_projection.summary')
+        AND i.author IS json_extract(v.verification_json,'$.item_projection.source')
+        AND i.url IS json_extract(v.verification_json,'$.item_projection.url')
+        AND i.published_at IS json_extract(v.verification_json,'$.item_projection.published_at')
+        AND json_extract(i.extra,'$.manual_source_support.policy_version')=v.policy_version
+        AND json_extract(i.extra,'$.manual_source_support.verification_id')=v.verification_id
+        AND json_extract(i.extra,'$.manual_source_support.canonical_digest')=v.canonical_digest
+        AND NOT EXISTS (SELECT 1 FROM manual_news_event_assessments source_assessment
+          WHERE source_assessment.lead_id=v.lead_id
+            AND source_assessment.assessment_version=v.assessment_version))
+      OR
+      (v.policy_version='${MANUAL_LEAD_VERIFICATION_POLICY_VERSION}'
+        AND EXISTS (SELECT 1 FROM manual_news_event_assessments legacy_assessment
+          WHERE legacy_assessment.lead_id=v.lead_id
+            AND legacy_assessment.assessment_version=v.assessment_version
+            AND legacy_assessment.assessment_json IS ${expected('verification.assessment_json')}))
+    )
   )`;
   return `${formalNewsRegistryCte(registryJsonExpression)},
   formal_expected AS (
@@ -548,9 +576,6 @@ function formalNewsFinalGuardCtes(
         ON ${expected('kind')}='manual' AND l.id=${expected('lead.id')}
       LEFT JOIN manual_news_assessment_verifications v
         ON ${expected('kind')}='manual' AND v.verification_id=${expected('verification.verification_id')}
-      LEFT JOIN manual_news_event_assessments a
-        ON ${expected('kind')}='manual' AND a.lead_id=v.lead_id
-       AND a.assessment_version=v.assessment_version
   )`;
 }
 
@@ -823,7 +848,7 @@ export async function authorizeFormalNewsSet(
     }
     if (snapshot.kind === 'manual') {
       const refreshed = snapshot.lead
-        ? await loadVerifiedManualAssessment(env, snapshot.lead.id)
+        ? await loadVerifiedManualCandidateProof(env, snapshot.lead.id)
         : null;
       if (!refreshed?.record || !snapshot.verification
         || !sameManualProof(snapshot.verification, refreshed.record)) {

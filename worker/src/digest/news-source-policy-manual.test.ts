@@ -12,7 +12,7 @@ function verifiedAssessment(leadId: string, verificationId = `verification:${lea
       lead_id: leadId,
       creation_nonce: `nonce:${leadId}`,
       assessment_version: 1,
-      policy_version: 'policy-v1',
+      policy_version: 'fact-evidence-projection-hmac-v10',
       verification_key_id: 'verification-key-v1',
       canonical_digest: 'a'.repeat(64),
       hmac_sha256: 'b'.repeat(64),
@@ -35,6 +35,7 @@ function verifiedAssessment(leadId: string, verificationId = `verification:${lea
 
 vi.mock('./manual-news-leads-verification', () => ({
   loadVerifiedManualAssessment: loadVerifiedManualAssessmentMock,
+  loadVerifiedManualCandidateProof: loadVerifiedManualAssessmentMock,
 }));
 
 import type { Env } from '../index';
@@ -48,7 +49,8 @@ class ManualD1 {
     this.sqlite.exec(`
       CREATE TABLE items (
         id TEXT PRIMARY KEY, source_type TEXT, source_id TEXT, source_ref TEXT,
-        extra TEXT, deleted_at TEXT
+        title TEXT, content TEXT, content_translated TEXT, author TEXT,
+        url TEXT, published_at TEXT, extra TEXT, deleted_at TEXT
       );
       CREATE TABLE sources (
         id TEXT PRIMARY KEY, source_type TEXT, source_ref TEXT, config TEXT
@@ -135,7 +137,7 @@ function insertManual(
        verification_id,lead_id,assessment_version,policy_version,verification_key_id,
        canonical_digest,hmac_sha256,verification_json,processing_owner,processing_attempt,
        creation_nonce,invalidation_nonce,status,reason,created_at,invalidated_at
-     ) VALUES (?,?,1,'policy-v1','verification-key-v1',?,?,'{}','owner-v1',1,?,NULL,'active',NULL,1,NULL)`,
+     ) VALUES (?,?,1,'fact-evidence-projection-hmac-v10','verification-key-v1',?,?,'{}','owner-v1',1,?,NULL,'active',NULL,1,NULL)`,
   ).run(
     `verification:${leadId}`, leadId, 'a'.repeat(64), 'b'.repeat(64), `nonce:${leadId}`,
   );
