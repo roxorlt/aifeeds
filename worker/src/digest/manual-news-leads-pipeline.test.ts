@@ -182,14 +182,14 @@ const officialEvidence: ManualNewsEvidence = {
 };
 
 const sourceSupportFact = 'Anthropic 开放 Model Hardware Standard（MHS）研究预览。';
-const sourceSupportExcerpt = 'Anthropic is opening a research preview of the Model Hardware Standard (MHS), '
+const sourceSupportExcerpt = 'We’re opening a research preview of the Model Hardware Standard (MHS), '
   + 'a shared specification for AI agents to safely operate physical devices, '
   + 'to a first group of scientific research labs and advanced manufacturers.';
 const sourceSupportEvidence: ManualNewsEvidence = {
   id: 'ev-anthropic-mhs',
   url: 'https://www.anthropic.com/news/model-hardware-standard-research-preview',
   source_type: 'official_primary',
-  publisher: 'Anthropic',
+  publisher: 'anthropic.com',
   published_at: '2026-08-28T00:00:00.000Z',
   retrieved_at: 1,
   title: 'Previewing the Model Hardware Standard \\ Anthropic',
@@ -1994,9 +1994,17 @@ describe('manual lead processing pipeline', () => {
       return { evidence_id: sourceSupportEvidence.id, quote: sourceSupportExcerpt };
     });
     const verify = vi.fn(async (prompt: { user: string }) => {
-      expect(JSON.parse(prompt.user)).toMatchObject({
+      expect(JSON.parse(prompt.user)).toEqual({
         fact: sourceSupportFact,
-        selected_evidence: { evidence_id: sourceSupportEvidence.id, quote: sourceSupportExcerpt },
+        selected_evidence: {
+          evidence_id: sourceSupportEvidence.id,
+          excerpt: sourceSupportExcerpt,
+          quote: sourceSupportExcerpt,
+          verification_quote: sourceSupportExcerpt.replace(
+            'We’re opening', 'Anthropic is opening',
+          ),
+          binding_contract: 'official_primary_first_person_actor_v1',
+        },
       });
       return { supported: true, evidence_id: sourceSupportEvidence.id };
     });
@@ -2013,6 +2021,42 @@ describe('manual lead processing pipeline', () => {
     expect(verify).toHaveBeenCalledTimes(1);
     expect(saveSourceSupportedCandidate).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({ status: 'recommended', confirmed_at: 100 });
+  });
+
+  test('keeps an official first-person lead blocked when the verifier returns false', async () => {
+    const memory = memoryStore(lead({
+      review_date: '2026-08-28', input_type: 'text_url', input_text: sourceSupportFact,
+      input_url: sourceSupportEvidence.url, status: 'verifying', version: 4,
+      processing_owner: 'source-support-owner', processing_attempt: 1,
+      evidence: [sourceSupportEvidence],
+    }));
+    const saveSourceSupportedCandidate = vi.fn();
+    Object.assign(memory.store, {
+      getSourceSupportAuthorization: async () => ({
+        audit_id: 41, candidate_authorization: 'source_support_v1',
+        submit_identity_digest: '1'.repeat(64), idempotency_key: 'submit-source-support',
+      }),
+      listSourceSupportPriorEvents: async () => [],
+      saveSourceSupportedCandidate,
+    });
+    const verify = vi.fn(async () => ({
+      supported: false, evidence_id: sourceSupportEvidence.id,
+    }));
+
+    const result = await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => { throw new Error('unexpected_search'); },
+      fetch: async () => { throw new Error('unexpected_fetch'); },
+      extract: async () => { throw new Error('unexpected_extract'); },
+      assess: async () => ({ evidence_id: sourceSupportEvidence.id, quote: sourceSupportExcerpt }),
+      verify,
+    });
+
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(saveSourceSupportedCandidate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      status: 'needs_review', error_code: 'source_support_verification_failed',
+      error_message: 'source_support_not_supported',
+    });
   });
 
   test('classifies a concurrent source-support event loser as duplicate instead of failed', async () => {

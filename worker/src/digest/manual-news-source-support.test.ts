@@ -116,6 +116,8 @@ describe('manual news source_support_v1', () => {
     expect(selection).toEqual({ evidence_id: signedEvidence.id, quote: firstPersonExcerpt });
 
     const curlyPayload = await firstPersonPayload();
+    expect(JSON.stringify(curlyPayload)).not.toContain('official_primary_first_person_actor_v1');
+    expect(JSON.stringify(curlyPayload)).not.toContain('verification_quote');
     const curlyProof = await createManualNewsSourceSupportProof(
       { lead_id: 'ml-20260828-mhs-first-person', assessment_version: 7, payload: curlyPayload },
       testManualNewsVerificationKeyring(verificationSecret), testManualNewsResponseKeyring(),
@@ -149,10 +151,47 @@ describe('manual news source_support_v1', () => {
     firstPersonExcerpt.replace('We’re', 'We are'),
   ])('accepts only an enumerated first-person opening prefix: %s', (rawExcerpt) => {
     const signedEvidence = firstPersonEvidence({ excerpt: ` \t\r\n${rawExcerpt}` });
-    expect(validateManualNewsSourceSupportSelection(
+    const selection = validateManualNewsSourceSupportSelection(
       { evidence_id: signedEvidence.id, quote: rawExcerpt },
       { fact, evidence: [signedEvidence] },
-    )).toEqual({ evidence_id: signedEvidence.id, quote: rawExcerpt });
+    );
+    expect(selection).toEqual({ evidence_id: signedEvidence.id, quote: rawExcerpt });
+    const prompt = buildManualNewsSourceSupportVerificationPrompt({
+      fact, evidence: [signedEvidence], selection,
+    });
+    expect(JSON.parse(prompt.user).selected_evidence).toMatchObject({
+      excerpt: ` \t\r\n${rawExcerpt}`,
+      quote: rawExcerpt,
+      verification_quote: rawExcerpt.replace(
+        /^(?:We’re|We're|We are) opening a research preview of /u,
+        'Anthropic is opening a research preview of ',
+      ),
+      binding_contract: 'official_primary_first_person_actor_v1',
+    });
+  });
+
+  test('gives the second verifier raw production evidence plus the indivisible actor-binding view', () => {
+    const signedEvidence = firstPersonEvidence();
+    const selection = validateManualNewsSourceSupportSelection(
+      { evidence_id: signedEvidence.id, quote: firstPersonExcerpt },
+      { fact, evidence: [signedEvidence] },
+    );
+    const prompt = buildManualNewsSourceSupportVerificationPrompt({
+      fact, evidence: [signedEvidence], selection,
+    });
+    expect(prompt.system).toContain('official_primary_first_person_actor_v1');
+    expect(prompt.system).toContain('不得因该绑定自动判 true');
+    expect(prompt.system).toContain('第二动作');
+    expect(JSON.parse(prompt.user)).toEqual({
+      fact,
+      selected_evidence: {
+        evidence_id: signedEvidence.id,
+        excerpt: firstPersonExcerpt,
+        quote: firstPersonExcerpt,
+        verification_quote: excerpt,
+        binding_contract: 'official_primary_first_person_actor_v1',
+      },
+    });
   });
 
   test.each([
@@ -196,6 +235,11 @@ describe('manual news source_support_v1', () => {
       { evidence_id: signedEvidence.id, quote: firstPersonExcerpt },
       { fact, evidence: [signedEvidence] },
     )).toThrow();
+    expect(() => buildManualNewsSourceSupportVerificationPrompt({
+      fact,
+      evidence: [signedEvidence],
+      selection: { evidence_id: signedEvidence.id, quote: firstPersonExcerpt },
+    })).toThrow();
   });
 
   test.each([
@@ -210,6 +254,11 @@ describe('manual news source_support_v1', () => {
       { evidence_id: signedEvidence.id, quote: firstPersonExcerpt },
       { fact, evidence: [signedEvidence] },
     )).toThrow();
+    expect(() => buildManualNewsSourceSupportVerificationPrompt({
+      fact,
+      evidence: [signedEvidence],
+      selection: { evidence_id: signedEvidence.id, quote: firstPersonExcerpt },
+    })).toThrow();
   });
 
   test.each([
@@ -226,6 +275,11 @@ describe('manual news source_support_v1', () => {
       { evidence_id: signedEvidence.id, quote: rawExcerpt },
       { fact, evidence: [signedEvidence] },
     )).toThrow();
+    expect(() => buildManualNewsSourceSupportVerificationPrompt({
+      fact,
+      evidence: [signedEvidence],
+      selection: { evidence_id: signedEvidence.id, quote: rawExcerpt },
+    })).toThrow();
   });
 
   test('keeps actor, object, atomicity, bidi, and zero-width gates after first-person binding', () => {
@@ -238,6 +292,11 @@ describe('manual news source_support_v1', () => {
         { evidence_id: signedEvidence.id, quote: firstPersonExcerpt },
         { fact: unsupportedFact, evidence: [signedEvidence] },
       )).toThrow();
+      expect(() => buildManualNewsSourceSupportVerificationPrompt({
+        fact: unsupportedFact,
+        evidence: [signedEvidence],
+        selection: { evidence_id: signedEvidence.id, quote: firstPersonExcerpt },
+      })).toThrow();
     }
     for (const rawExcerpt of [
       `${firstPersonExcerpt.slice(0, -1)}, and we also release Claude.`,
@@ -249,6 +308,11 @@ describe('manual news source_support_v1', () => {
         { evidence_id: unsafeEvidence.id, quote: rawExcerpt },
         { fact, evidence: [unsafeEvidence] },
       )).toThrow();
+      expect(() => buildManualNewsSourceSupportVerificationPrompt({
+        fact,
+        evidence: [unsafeEvidence],
+        selection: { evidence_id: unsafeEvidence.id, quote: rawExcerpt },
+      })).toThrow();
     }
   });
 
@@ -411,9 +475,12 @@ describe('manual news source_support_v1', () => {
       evidence: [evidence()],
       selection: { evidence_id: 'ev-anthropic-mhs', quote: excerpt },
     });
-    expect(JSON.parse(verification.user)).toEqual({
-      fact,
-      selected_evidence: { evidence_id: 'ev-anthropic-mhs', excerpt, quote: excerpt },
+    expect(verification).toEqual({
+      system: '独立判断 selected_evidence.quote 是否在同一原子关系、主体、动作、对象、极性、模态和时间上支持 fact。只输出且必须输出精确 JSON {"supported":true|false,"evidence_id":"..."}；evidence_id 必须保持不变。',
+      user: JSON.stringify({
+        fact,
+        selected_evidence: { evidence_id: 'ev-anthropic-mhs', excerpt, quote: excerpt },
+      }),
     });
   });
 
