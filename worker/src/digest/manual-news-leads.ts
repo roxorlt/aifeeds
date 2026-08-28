@@ -6407,6 +6407,51 @@ function sourceSupportEvidence(input: {
   return selected;
 }
 
+const ANTHROPIC_MHS_RESEARCH_PREVIEW_URL =
+  'https://www.anthropic.com/news/model-hardware-standard-research-preview';
+const ANTHROPIC_FIRST_PERSON_PREVIEW_PREFIXES = [
+  'We’re opening a research preview of ',
+  "We're opening a research preview of ",
+  'We are opening a research preview of ',
+] as const;
+
+function anthropicFirstPersonSourceSupportView(
+  selected: ManualNewsEvidence,
+  rawQuote: string,
+  parsedFact: ReturnType<typeof parsedManualNewsSourceSupportFact>,
+): string | null {
+  if (!selected.reliable || selected.source_type !== 'official_primary'
+    || MANUAL_NEWS_SOURCE_SUPPORT_UNSAFE_UNICODE.test(selected.publisher)) return null;
+  const publisher = selected.publisher
+    .replace(/^[\u0009\u000a\u000d\u0020]+|[\u0009\u000a\u000d\u0020]+$/gu, '');
+  if (!/^[\x00-\x7f]+$/u.test(publisher) || publisher.toLowerCase() !== 'anthropic.com'
+    || selected.url !== ANTHROPIC_MHS_RESEARCH_PREVIEW_URL) return null;
+  let url: URL;
+  try {
+    url = new URL(selected.url);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' || url.username || url.password || url.port
+    || url.hostname !== 'www.anthropic.com' || url.host !== 'www.anthropic.com'
+    || url.pathname !== '/news/model-hardware-standard-research-preview'
+    || url.search || url.hash) return null;
+  const factActions = factActionOccurrences(parsedFact.verification_fact);
+  const factSubject = factActions.length === 1
+    ? leadingFactUnitSubject(parsedFact.verification_fact, factActions[0])
+    : null;
+  if (parsedFact.slots.actor !== 'anthropic' || factSubject !== 'Anthropic') return null;
+  let excerptStart = 0;
+  while (excerptStart < selected.excerpt.length
+    && /[\u0009\u000a\u000d\u0020]/u.test(selected.excerpt[excerptStart])) excerptStart += 1;
+  if (selected.excerpt.indexOf(rawQuote) !== excerptStart) return null;
+  const prefix = ANTHROPIC_FIRST_PERSON_PREVIEW_PREFIXES.find((value) => rawQuote.startsWith(value));
+  if (!prefix) return null;
+  return normalizeManualNewsSourceSupportText(
+    `Anthropic is opening a research preview of ${rawQuote.slice(prefix.length)}`,
+  );
+}
+
 export function validateManualNewsSourceSupportSelection(
   raw: unknown,
   input: { fact: string; evidence: readonly ManualNewsEvidence[] },
@@ -6415,18 +6460,23 @@ export function validateManualNewsSourceSupportSelection(
     || typeof raw.evidence_id !== 'string' || typeof raw.quote !== 'string') {
     throw new Error('source_support_quote_invalid');
   }
-  const parsedFact = parsedManualNewsSourceSupportFact(input.fact);
   const selected = sourceSupportEvidence({ evidence: input.evidence, evidenceId: raw.evidence_id });
   if (MANUAL_NEWS_SOURCE_SUPPORT_UNSAFE_UNICODE.test(selected.excerpt)
     || MANUAL_NEWS_SOURCE_SUPPORT_UNSAFE_UNICODE.test(raw.quote)) {
     throw new Error('source_support_quote_invalid');
   }
-  const excerpt = normalizeManualNewsSourceSupportText(selected.excerpt);
-  const quote = normalizeManualNewsSourceSupportText(raw.quote);
-  if (!excerpt.includes(quote)) throw new Error('source_support_quote_invalid');
-  const relationError = structuredFactUnitVerificationError(parsedFact.verification_fact, quote);
+  if (!raw.quote || !selected.excerpt.includes(raw.quote)) throw new Error('source_support_quote_invalid');
+  const parsedFact = parsedManualNewsSourceSupportFact(input.fact);
+  const firstPersonView = anthropicFirstPersonSourceSupportView(selected, raw.quote, parsedFact);
+  if (firstPersonView && factActionOccurrences(firstPersonView).length !== 1) {
+    throw new Error('source_support_fact_invalid:fact_verification_action_mismatch');
+  }
+  const verificationQuote = firstPersonView || normalizeManualNewsSourceSupportText(raw.quote);
+  const relationError = structuredFactUnitVerificationError(
+    parsedFact.verification_fact, verificationQuote,
+  );
   if (relationError !== null) throw new Error(`source_support_fact_invalid:${relationError}`);
-  return { evidence_id: selected.id, quote };
+  return { evidence_id: selected.id, quote: raw.quote };
 }
 
 export function validateManualNewsSourceSupportVerification(
