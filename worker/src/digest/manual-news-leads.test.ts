@@ -23,6 +23,7 @@ import {
   validateManualLeadFactVerification,
   validateManualNewsLeadInput,
   type ManualNewsEvidence,
+  type ManualNewsLeadAssessment,
   type ManualNewsProcessedAssessment,
 } from './manual-news-leads';
 import {
@@ -123,6 +124,21 @@ const googleSheetsCanvasEvidence: ManualNewsEvidence = {
   title: 'Build mini-apps with Gemini in Google Sheets',
   excerpt: 'Google releases Sheets canvas feature in Google Sheets.',
   claims_supported: ['Google releases Sheets canvas feature in Google Sheets.'],
+  reliable: true,
+};
+
+const anthropicMhsPreviewExcerpt = 'Anthropic is opening a research preview of the Model Hardware Standard (MHS), a shared specification for AI agents to safely operate physical devices, to a first group of scientific research labs and advanced manufacturers.';
+const anthropicMhsPreviewAtomicQuote = 'Anthropic is opening a research preview of the Model Hardware Standard (MHS)';
+const anthropicMhsPreviewEvidence: ManualNewsEvidence = {
+  id: 'ev-anthropic-mhs-preview',
+  url: 'https://www.anthropic.com/news/model-hardware-standard-research-preview',
+  source_type: 'official_primary',
+  publisher: 'Anthropic',
+  published_at: null,
+  retrieved_at: 1,
+  title: 'Previewing the Model Hardware Standard \\ Anthropic',
+  excerpt: anthropicMhsPreviewExcerpt,
+  claims_supported: [anthropicMhsPreviewExcerpt],
   reliable: true,
 };
 
@@ -238,6 +254,39 @@ function supportedTextVerification(
   };
 }
 
+function uncheckedSupportedTextVerification(
+  factText: string,
+  quote: string,
+  evidence: ManualNewsEvidence,
+) {
+  const seedText = factText.startsWith('Google') ? 'Google发布MHS。' : 'Anthropic发布Gemini。';
+  const seedCandidate = validateManualLeadAssessment(assessment({
+    title: seedText,
+    summary: seedText,
+    event_key: 'non-target-preview-verification-2026-08-28',
+    event_type: 'other',
+    occurred_at: null,
+    claims: [{ text: seedText, evidence_ids: [evidence.id] }],
+  }), [evidence]);
+  const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
+    assessment: seedCandidate,
+    evidence: [evidence],
+  }).user) as { facts: Array<{ fact_id: string }> }).facts;
+  const candidate: ManualNewsLeadAssessment = {
+    ...seedCandidate,
+    title: factText,
+    summary: factText,
+    claims: [{ text: atomicTestClaim(factText), evidence_ids: [evidence.id] }],
+  };
+  return {
+    candidate,
+    raw: {
+      overall_verdict: 'supported',
+      fact_results: facts.map((fact) => supportedFactResult(fact.fact_id, evidence.id, quote)),
+    },
+  };
+}
+
 function alibabaBanGeneratedAssessment(
   projection: { subject?: string; predicate?: string; object?: string } = {},
   source: { predicate?: string; object?: string } = {},
@@ -287,6 +336,68 @@ function alibabaBanGeneratedAssessment(
           subject_role: 'organization',
           predicate: projection.predicate ?? '据称禁止',
           object: projection.object ?? '员工使用Claude Code',
+        },
+      }],
+    },
+  };
+}
+
+function anthropicMhsPreviewGeneratedAssessment(input: {
+  evidence?: ManualNewsEvidence;
+  sourceSubject?: string;
+  sourcePredicate?: string;
+  sourceObject?: string;
+  projectionSubject?: string;
+  projectionPredicate?: string;
+  projectionObject?: string;
+  eventType?: 'product_release' | 'other';
+} = {}) {
+  const evidence = input.evidence || anthropicMhsPreviewEvidence;
+  return {
+    event_key: 'anthropic-mhs-research-preview-2026-08-28',
+    event_type: input.eventType || 'other',
+    material_update: false,
+    score: 86,
+    recommendation: 'recommended',
+    occurred_at: null,
+    uncertainties: ['The research preview is initially limited to selected organizations.'],
+    matched_event_key: null,
+    source_facts: [{
+      fact_ref: 'fact-01',
+      source_language: 'en',
+      atomic_fact: {
+        subject: input.sourceSubject || 'Anthropic',
+        subject_role: 'organization',
+        predicate: input.sourcePredicate || 'is opening a research preview of',
+        object: input.sourceObject || 'MHS',
+      },
+      evidence_ids: [evidence.id],
+    }],
+    evidence_dispositions: [{
+      evidence_id: evidence.id,
+      disposition: 'supports_core',
+      source_fact_refs: ['fact-01'],
+      reason_code: null,
+    }],
+    editorial_projection: {
+      title: {
+        projection_ref: 'title-01',
+        source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: input.projectionSubject || 'Anthropic',
+          subject_role: 'organization',
+          predicate: input.projectionPredicate || '正在开放研究预览',
+          object: input.projectionObject || 'MHS',
+        },
+      },
+      summary: [{
+        projection_ref: 'summary-01',
+        source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: input.projectionSubject || 'Anthropic',
+          subject_role: 'organization',
+          predicate: input.projectionPredicate || '正在开放研究预览',
+          object: input.projectionObject || 'MHS',
         },
       }],
     },
@@ -2530,6 +2641,186 @@ describe('manual news lead domain', () => {
         expect.objectContaining({ fact_id: validated.source_facts?.[0].fact_id, supported: true }),
       ]),
     });
+  });
+
+  test('accepts and independently verifies Anthropic opening the MHS research preview', () => {
+    const generated = validateManualLeadGeneratedAssessment(
+      anthropicMhsPreviewGeneratedAssessment(),
+      [anthropicMhsPreviewEvidence],
+    );
+    expect(generated).toMatchObject({
+      event_type: 'other',
+      claims: [{
+        text: 'Anthropic is opening a research preview of MHS.',
+        evidence_ids: [anthropicMhsPreviewEvidence.id],
+      }],
+      editorial_projection: {
+        title: { text_zh: 'Anthropic正在开放研究预览MHS。' },
+      },
+    });
+
+    const promptBody = JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: generated,
+      evidence: [anthropicMhsPreviewEvidence],
+    }).user) as {
+      facts: Array<{ fact_id: string }>;
+      projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+      evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
+    };
+    expect(validateManualLeadFactVerification({
+      overall_verdict: 'supported',
+      fact_results: promptBody.facts.map((fact) => supportedFactResult(
+        fact.fact_id,
+        anthropicMhsPreviewEvidence.id,
+        anthropicMhsPreviewAtomicQuote,
+      )),
+      projection_results: promptBody.projections.map((projection) => ({
+        projection_id: projection.projection_id,
+        source_fact_ids: projection.source_fact_ids,
+        supported: true,
+        issue_code: 'none',
+      })),
+      disposition_results: promptBody.evidence_dispositions.map((disposition) => ({
+        evidence_id: disposition.evidence_id,
+        disposition: disposition.disposition,
+        supported: true,
+        issue_code: 'none',
+        source_quotes: [{
+          evidence_id: disposition.evidence_id,
+          quote: anthropicMhsPreviewAtomicQuote,
+        }],
+      })),
+    }, generated, [anthropicMhsPreviewEvidence])).toMatchObject({
+      overall_verdict: 'supported',
+    });
+  });
+
+  test('folds the registered MHS full name and its parenthesized abbreviation for projection', () => {
+    const generated = validateManualLeadGeneratedAssessment(
+      anthropicMhsPreviewGeneratedAssessment({
+        sourceObject: 'Model Hardware Standard (MHS)',
+        projectionObject: 'MHS',
+      }),
+      [anthropicMhsPreviewEvidence],
+    );
+
+    expect(generated.source_facts?.[0].atomic_fact.object)
+      .toBe('Model Hardware Standard (MHS)');
+    expect(generated.editorial_projection?.title.atomic_fact.object).toBe('MHS');
+  });
+
+  test.each([
+    ['Google + MHS', {
+      ...anthropicMhsPreviewEvidence,
+      id: 'ev-google-mhs-preview-self-consistent',
+      url: 'https://blog.google/products/example/mhs-preview/',
+      publisher: 'Google',
+      title: 'Google opens a Model Hardware Standard research preview',
+      excerpt: 'Google is opening a research preview of the Model Hardware Standard (MHS).',
+      claims_supported: ['Google is opening a research preview of the Model Hardware Standard (MHS).'],
+    }, { sourceSubject: 'Google', projectionSubject: 'Google' }],
+    ['Anthropic + Gemini', {
+      ...anthropicMhsPreviewEvidence,
+      id: 'ev-anthropic-gemini-preview-self-consistent',
+      title: 'Anthropic opens a Gemini research preview',
+      excerpt: 'Anthropic is opening a research preview of Gemini.',
+      claims_supported: ['Anthropic is opening a research preview of Gemini.'],
+    }, { sourceObject: 'Gemini', projectionObject: 'Gemini' }],
+  ])('rejects non-target preview in generated assessment: %s', (_name, evidence, overrides) => {
+    expect(() => validateManualLeadGeneratedAssessment(
+      anthropicMhsPreviewGeneratedAssessment({ evidence, ...overrides }),
+      [evidence],
+    )).toThrow(/non_atomic_source_assembled:source_facts\[0\]\.atomic_fact\.assembled/);
+  });
+
+  test.each([
+    ['Google + MHS', {
+      ...anthropicMhsPreviewEvidence,
+      id: 'ev-google-mhs-preview-verification',
+      url: 'https://blog.google/products/example/mhs-preview/',
+      publisher: 'Google',
+      title: 'Google is opening a research preview of the Model Hardware Standard (MHS).',
+      excerpt: 'Google is opening a research preview of the Model Hardware Standard (MHS).',
+      claims_supported: ['Google is opening a research preview of the Model Hardware Standard (MHS).'],
+    }],
+    ['Anthropic + Gemini', {
+      ...anthropicMhsPreviewEvidence,
+      id: 'ev-anthropic-gemini-preview-verification',
+      title: 'Anthropic is opening a research preview of Gemini.',
+      excerpt: 'Anthropic is opening a research preview of Gemini.',
+      claims_supported: ['Anthropic is opening a research preview of Gemini.'],
+    }],
+  ])('rejects non-target preview in fact verification: %s', (_name, evidence) => {
+    const quote = evidence.claims_supported[0];
+    const fixture = uncheckedSupportedTextVerification(quote, quote, evidence);
+    expect(() => validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, [evidence],
+    )).toThrow(/non_atomic_fact/);
+  });
+
+  test.each([
+    ['repeated MHS target', 'Model Hardware Standard (MHS) MHS'],
+    ['non-corresponding parenthetical alias', 'Model Hardware Standard (Gemini)'],
+  ])('does not fold an invalid MHS target shape: %s', (_name, sourceObject) => {
+    expect(() => validateManualLeadGeneratedAssessment(
+      anthropicMhsPreviewGeneratedAssessment({ sourceObject, projectionObject: 'MHS' }),
+      [anthropicMhsPreviewEvidence],
+    )).toThrow();
+  });
+
+  test.each([
+    ['formal release from preview evidence', anthropicMhsPreviewGeneratedAssessment({
+      sourcePredicate: 'has released', projectionPredicate: '已经发布', eventType: 'product_release',
+    }), anthropicMhsPreviewEvidence, /evidence_disposition_classification_uncertain/],
+    ['unregistered standard', anthropicMhsPreviewGeneratedAssessment({
+      evidence: {
+        ...anthropicMhsPreviewEvidence,
+        id: 'ev-anthropic-unknown-standard',
+        title: 'Previewing the Model Software Standard \\ Anthropic',
+        excerpt: 'Anthropic is opening a research preview of the Model Software Standard (MSS).',
+        claims_supported: ['Anthropic is opening a research preview of the Model Software Standard (MSS).'],
+      },
+      sourceObject: 'MSS', projectionObject: 'MSS',
+    }), {
+      ...anthropicMhsPreviewEvidence,
+      id: 'ev-anthropic-unknown-standard',
+      title: 'Previewing the Model Software Standard \\ Anthropic',
+      excerpt: 'Anthropic is opening a research preview of the Model Software Standard (MSS).',
+      claims_supported: ['Anthropic is opening a research preview of the Model Software Standard (MSS).'],
+    }, /non_atomic_source_assembled:source_facts\[0\]\.atomic_fact\.assembled/],
+    ['different subject', anthropicMhsPreviewGeneratedAssessment({
+      evidence: {
+        ...anthropicMhsPreviewEvidence,
+        id: 'ev-google-mhs-preview',
+        publisher: 'Google',
+        title: 'Google opens a Model Hardware Standard research preview',
+        excerpt: 'Google is opening a research preview of the Model Hardware Standard (MHS).',
+        claims_supported: ['Google is opening a research preview of the Model Hardware Standard (MHS).'],
+      },
+    }), {
+      ...anthropicMhsPreviewEvidence,
+      id: 'ev-google-mhs-preview',
+      publisher: 'Google',
+      title: 'Google opens a Model Hardware Standard research preview',
+      excerpt: 'Google is opening a research preview of the Model Hardware Standard (MHS).',
+      claims_supported: ['Google is opening a research preview of the Model Hardware Standard (MHS).'],
+    }, /evidence_disposition_unrelated_misclassified/],
+    ['cross-sentence assembly', anthropicMhsPreviewGeneratedAssessment({
+      evidence: {
+        ...anthropicMhsPreviewEvidence,
+        id: 'ev-anthropic-cross-sentence',
+        excerpt: 'Anthropic is opening a research preview of a new program. Model Hardware Standard (MHS) is a shared specification.',
+        claims_supported: ['Anthropic is opening a research preview of a new program. Model Hardware Standard (MHS) is a shared specification.'],
+      },
+    }), {
+      ...anthropicMhsPreviewEvidence,
+      id: 'ev-anthropic-cross-sentence',
+      excerpt: 'Anthropic is opening a research preview of a new program. Model Hardware Standard (MHS) is a shared specification.',
+      claims_supported: ['Anthropic is opening a research preview of a new program. Model Hardware Standard (MHS) is a shared specification.'],
+    }, /evidence_disposition_classification_uncertain/],
+  ])('rejects MHS semantic widening: %s', (_name, raw, evidence, expectedError) => {
+    expect(() => validateManualLeadGeneratedAssessment(raw, [evidence]))
+      .toThrow(expectedError);
   });
 
   test('canonicalizes the production-shaped company role alias without changing fact semantics', () => {

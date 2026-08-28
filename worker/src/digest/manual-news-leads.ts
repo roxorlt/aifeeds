@@ -1103,7 +1103,16 @@ const BILINGUAL_FACT_CONCEPTS: ReadonlyArray<readonly [string, RegExp]> = [
 ];
 
 function bilingualFactConcepts(value: string): string[] {
-  return BILINGUAL_FACT_CONCEPTS.filter(([, pattern]) => pattern.test(value)).map(([concept]) => concept);
+  const normalized = value.normalize('NFKC');
+  const mask = new Array<boolean>(normalized.length).fill(false);
+  for (const target of productTargetTuples(normalized).filter((item) => item.entity === 'mhs')) {
+    consumeSemanticSpan(mask, target);
+  }
+  const outsideRegisteredProducts = normalized.split('').map((character, index) =>
+    mask[index] ? ' ' : character).join('');
+  return BILINGUAL_FACT_CONCEPTS
+    .filter(([, pattern]) => pattern.test(outsideRegisteredProducts))
+    .map(([concept]) => concept);
 }
 
 const BILINGUAL_TARGET_QUALIFIERS: ReadonlyArray<readonly [string, RegExp]> = [
@@ -1264,7 +1273,25 @@ function productTargetTuples(value: string): IndexedProductTargetTuple[] {
     });
     consumedUntil = cursor;
   }
-  return targets;
+  const folded: IndexedProductTargetTuple[] = [];
+  for (const target of targets) {
+    const previous = folded.at(-1);
+    const bridge = previous ? normalized.slice(previous.end, target.start) : '';
+    const closing = normalized.slice(target.end).match(/^\s*\)/u)?.[0] || '';
+    if (previous?.entity === 'mhs' && target.entity === 'mhs'
+      && canonicalProductKey(normalized.slice(previous.start, previous.end)) === 'model hardware standard'
+      && canonicalProductKey(normalized.slice(target.start, target.end)) === 'mhs'
+      && /^\s*\(\s*$/u.test(bridge) && closing) {
+      previous.end = target.end + closing.length;
+      continue;
+    }
+    folded.push({
+      ...target,
+      components: [...target.components],
+      component_spans: [...target.component_spans],
+    });
+  }
+  return folded;
 }
 
 function relativeFactTimeSpans(value: string): IndexedSemanticValue[] {
@@ -1825,6 +1852,18 @@ function relationAdditionHasSemanticContent(value: string): boolean {
   return semanticResidue.length > 0;
 }
 
+function independentlyReliableMhsPreviewClause(value: string): boolean {
+  const actions = factActionOccurrences(value);
+  const controller = leadingControllerIdentity(value);
+  const targets = productTargetTuples(value);
+  const identities = registeredEntityIdentities(value);
+  return actions.length === 1 && actions[0].action === 'preview' && !actions[0].negated
+    && controller.identity === 'anthropic' && !controller.ambiguous
+    && targets.length > 0 && targets.every((target) => target.entity === 'mhs')
+    && identities.size === 2 && identities.has('anthropic') && identities.has('mhs')
+    && atomicActionChainReliable(value) && !unknownCompoundShape(value);
+}
+
 function evidenceRelationUnitClauses(value: string): AtomicEvidenceClause[] {
   const normalized = normalizedRelationControllerText(value);
   if (!normalized) return [];
@@ -1846,7 +1885,8 @@ function evidenceRelationUnitClauses(value: string): AtomicEvidenceClause[] {
       if (!text) continue;
       clauses.push({
         text,
-        reliable: parsed.reliable && !parsed.has_unknown_compound,
+        reliable: (parsed.reliable && !parsed.has_unknown_compound)
+          || independentlyReliableMhsPreviewClause(text),
         linked_addition: hasLinkedAddition && unitIndex > 0,
       });
     }
@@ -3539,7 +3579,7 @@ type FactAction =
   | 'approve' | 'apply_approval' | 'reject' | 'disclose' | 'release' | 'request'
   | 'regulatory_require' | 'mandate' | 'order' | 'pause' | 'invest' | 'finance'
   | 'sign' | 'sue' | 'ban' | 'open_source' | 'train' | 'partner' | 'layoff'
-  | 'decide' | 'discuss' | 'deny' | 'open_access' | 'limit_scope';
+  | 'decide' | 'discuss' | 'deny' | 'open_access' | 'preview' | 'limit_scope';
 
 interface FactActionOccurrence {
   action: FactAction;
@@ -3587,7 +3627,8 @@ const FACT_ACTION_PATTERNS: ReadonlyArray<FactActionPattern> = [
   ['decide', /(?:决定)|\b(?:decid(?:e|es|ed|ing))\b/giu, /^decid(?:ing|ed|es|e)\b/iu],
   ['discuss', /(?:讨论|商议|磋商)|\b(?:discuss(?:es|ed|ing)?|deliberat(?:e|es|ed|ing))\b/giu, /^(?:discuss(?:ing|ed|es)?|deliberat(?:ing|ed|es|e))\b/iu],
   ['deny', /(?:否认)|\b(?:den(?:y|ies|ied|ying))\b/giu, /^den(?:y|ies|ied|ying)/iu],
-  ['open_access', /(?:开放)|\b(?:open(?:s|ed|ing)?\s+(?:access|service))\b/giu, /^open(?:ing|ed|s)?\b/iu],
+  ['open_access', /(?:开放(?!研究预览))|\b(?:open(?:s|ed|ing)?\s+(?:access|service))\b/giu, /^open(?:ing|ed|s)?\b/iu],
+  ['preview', /(?:开放研究预览)|\b(?:open(?:s|ed|ing)?\s+(?:a\s+)?research\s+preview(?:\s+of)?)\b/giu, /^open(?:ing|ed|s)?\b/iu],
   ['limit_scope', /(?:受限|限定|限于|限制(?:为|在)?)|\b(?:limit(?:s|ed|ing)?\b|restrict(?:s|ed|ing)?\b|(?:cover|support)(?:s|ed|ing)?\s+[^.;,]{0,60}(?:\bonly\b|\bsupported\s+(?:models?|products?)\b))/giu, /^(?:limit(?:s|ed|ing)?|restrict(?:s|ed|ing)?|cover(?:s|ed|ing)?|support(?:s|ed|ing)?)/iu],
 ];
 
@@ -3773,6 +3814,7 @@ const ORGANIZATION_ENTITY_REGISTRY: Readonly<Record<string, readonly string[]>> 
 };
 const PRODUCT_ENTITY_REGISTRY: Readonly<Record<string, readonly string[]>> = {
   gpt: ['gpt'], claude: ['claude'], kimi: ['kimi'], gemini: ['gemini'], codex: ['codex'],
+  mhs: ['mhs', 'model hardware standard'],
   google_sheets: ['google sheets', '谷歌表格'],
   chatgpt: ['chatgpt'], ernie: ['ernie', '文心', '文心一言'], qwen: ['qwen', '通义', '通义千问'],
   hunyuan: ['hunyuan', '混元'], doubao: ['doubao', '豆包'], pangu: ['pangu', '盘古'],
@@ -3944,7 +3986,7 @@ const GOVERNED_ACTION_COMPLEMENTS: Readonly<Record<FactAction, readonly FactActi
   disclose: ['limit_scope', 'support', 'add', 'remove'],
   acquire: [], sell: [], expand: [], exit: [], add: [], remove: [], support: [], approve: [], release: [],
   apply_approval: [], invest: [], finance: [], sign: [], sue: [], open_source: [], train: [], partner: [],
-  layoff: [], discuss: [], open_access: [], limit_scope: [],
+  layoff: [], discuss: [], open_access: [], preview: [], limit_scope: [],
 };
 const STRICT_CONTROL_CHAIN_ROOTS: ReadonlySet<FactAction> = new Set([
   'order', 'mandate', 'regulatory_require', 'request', 'ban',
@@ -4104,6 +4146,18 @@ function productComplementObjectLength(rawTail: string): number {
   return 0;
 }
 
+function isExactMhsPreviewObject(value: string): boolean {
+  const normalized = normalizedAtomicClause(value);
+  const targets = productTargetTuples(normalized);
+  if (targets.length !== 1 || targets[0].entity !== 'mhs') return false;
+  const mask = new Array<boolean>(normalized.length).fill(false);
+  for (const target of targets) {
+    for (let index = target.start; index < target.end; index += 1) mask[index] = true;
+  }
+  return !normalized.split('').map((character, index) => mask[index] ? ' ' : character)
+    .join('').replace(/\bthe\b/giu, ' ').replace(/[\p{P}\p{S}\s]+/gu, '');
+}
+
 interface ParsedProductFeatureTuple {
   tuple: ManualProductFeatureTuple;
   feature_span: IndexedSemanticValue;
@@ -4220,6 +4274,7 @@ function controlComplementTailRemainder(
     .replace(/\b(?:on|at)\s*$/iu, '')
     .trim();
   if (strictObject) {
+    if (action.action === 'preview' && isExactMhsPreviewObject(rawTail)) return '';
     if (directedProductFeatureTuple(rawTail)) return '';
     const productLength = productComplementObjectLength(rawTail);
     if (productLength) return rawTail.slice(productLength).trim();
@@ -4329,7 +4384,7 @@ function parseFactControlChain(value: string): FactControlChainParse {
     : '';
   const parsedControlChain = reliable && actions.length > 1
     && STRICT_CONTROL_CHAIN_ROOTS.has(actions[0].action);
-  const strictObject = parsedControlChain || node.occurrence.action === 'release';
+  const strictObject = parsedControlChain || ['release', 'preview'].includes(node.occurrence.action);
   const remainder = reliable
     ? controlComplementTailRemainder(value, node.occurrence, strictObject)
     : '';
@@ -4347,7 +4402,16 @@ function parseFactControlChain(value: string): FactControlChainParse {
 }
 
 function atomicActionChainReliable(value: string): boolean {
-  return parseFactControlChain(value).reliable;
+  const parsed = parseFactControlChain(value);
+  if (!parsed.reliable) return false;
+  const previews = parsed.actions.filter((action) => action.action === 'preview');
+  if (!previews.length) return true;
+  if (parsed.actions.length !== 1 || previews[0].negated) return false;
+  const controller = leadingControllerIdentity(value);
+  const identities = registeredEntityIdentities(value);
+  return controller.identity === 'anthropic' && !controller.ambiguous
+    && identities.size === 2 && identities.has('anthropic') && identities.has('mhs')
+    && isExactMhsPreviewObject(actionObjectSegment(value, previews[0], parsed.actions));
 }
 
 function unknownCompoundShape(value: string): boolean {
@@ -4803,6 +4867,13 @@ function canonicalSemanticResidue(value: string, subject: string | null): string
     const boundary = /[A-Za-z]/u.test(alias) ? `\\b${escaped}\\b` : escaped;
     source = source.replace(new RegExp(boundary, 'giu'), ` zz_region_${canonical.replace(/-/g, '_')} `);
   }
+  const mhsAliases = [...PRODUCT_ENTITY_REGISTRY.mhs]
+    .sort((left, right) => right.length - left.length)
+    .map((alias) => alias.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&').replace(/\s+/gu, '\\s+'));
+  source = source.replace(new RegExp(
+    `(?<![a-z0-9])(?:${mhsAliases.join('|')})(?:\\s*[（(]\\s*mhs\\s*[)）])?(?![a-z0-9])`,
+    'giu',
+  ), ' zz_product_mhs ');
   for (const [pattern, replacement] of SEMANTIC_RESIDUE_LEXEMES) source = source.replace(pattern, replacement);
   if (/\bzz_region_[a-z0-9_]+\b/u.test(source)) source = source.replace(/\bzz_market\b/gu, ' ');
   source = source.replace(
@@ -4835,8 +4906,20 @@ function structuredFactUnitSlots(
   const end = factUnitEnd(value, occurrence, all);
   const directObject = actionObjectSegment(value, occurrence, all);
   const prefix = stripFactTemporalText(value.slice(start, occurrence.index));
+  const representedProductTargets = productTargetTuples(directObject)
+    .filter((target) => target.entity === 'mhs');
+  const targetMask = new Array<boolean>(directObject.length).fill(false);
+  for (const target of representedProductTargets) {
+    consumeSemanticSpan(targetMask, target);
+    addStructuredSlot(slots, 'object', [
+      `product:${target.entity}`,
+      ...target.components.map((component) => `${component.kind}:${component.value}`),
+    ].join('|'));
+  }
+  const unrepresentedDirectObject = directObject.split('').map((character, index) =>
+    targetMask[index] ? ' ' : character).join('');
   const context = removeKnownRegionText(stripFactTemporalText(
-    `${prefix} ${directObject}`.replace(subject || /$^/u, ' '),
+    `${prefix} ${unrepresentedDirectObject}`.replace(subject || /$^/u, ' '),
   ));
 
   for (const match of context.matchAll(/\b([A-Za-z][A-Za-z0-9._+-]*)\s+((?:v(?:ersion)?\s*)?\d+(?:\.\d+)*|[A-Za-z]*\d+[A-Za-z0-9._+-]*)\b/giu)) {
