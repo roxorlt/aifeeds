@@ -1,6 +1,7 @@
 import {
   applyManualLeadEvidencePolicy,
   assertManualLeadTransition,
+  boundedManualLeadPriorEvents,
   buildManualLeadAssessmentPrompt,
   buildManualLeadAssessmentRegenerationPrompt,
   buildManualLeadFactVerificationPrompt,
@@ -306,6 +307,43 @@ function finalizeManualLeadAssessment(
   };
 }
 
+function persistedAssessmentMatchedEventKey(raw: unknown): string | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('persisted_assessment_exact_context_invalid');
+  }
+  const candidate = raw as Record<string, unknown>;
+  if (candidate.matched_event_key === null) return null;
+  if (typeof candidate.matched_event_key !== 'string'
+    || typeof candidate.event_key !== 'string'
+    || candidate.matched_event_key !== candidate.event_key
+    || !/^[a-z0-9][a-z0-9:_-]{5,199}$/.test(candidate.matched_event_key)) {
+    throw new Error('persisted_assessment_exact_context_invalid');
+  }
+  return candidate.matched_event_key;
+}
+
+function validExactVerifiedPriorEvents(
+  events: readonly ManualLeadPriorEvent[],
+  eventKey: string,
+): ManualLeadPriorEvent[] {
+  return events.filter((event) => {
+    const parsedReviewDate = /^\d{4}-\d{2}-\d{2}$/.test(event.review_date)
+      ? Date.parse(`${event.review_date}T00:00:00Z`)
+      : Number.NaN;
+    return event.event_key === eventKey
+      && Number.isFinite(parsedReviewDate)
+      && new Date(parsedReviewDate).toISOString().slice(0, 10) === event.review_date
+      && typeof event.lead_id === 'string' && !!event.lead_id.trim()
+      && /^[a-f0-9]{64}$/.test(event.verification_digest || '')
+      && typeof event.title === 'string' && !!event.title
+      && typeof event.summary === 'string' && !!event.summary
+      && Array.isArray(event.claims) && event.claims.length > 0
+      && event.claims.every((claim) => typeof claim?.text === 'string'
+        && Array.isArray(claim.evidence_ids)
+        && claim.evidence_ids.every((evidenceId) => typeof evidenceId === 'string'));
+  });
+}
+
 export async function processManualNewsLead(
   leadId: string,
   store: ManualLeadProcessingStore,
@@ -439,8 +477,23 @@ export async function processManualNewsLead(
         let cycle = await store.beginAssessmentGenerationCycle(leadId, lead.version);
         let finalizedAssessment: ProcessedManualLeadAssessment | null = null;
         if (cycle.call_state === 'validated' && cycle.validated_assessment) {
+          const matchedEventKey = persistedAssessmentMatchedEventKey(cycle.validated_assessment);
+          if (matchedEventKey) {
+            exactPriorEvents = boundedManualLeadPriorEvents(
+              validExactVerifiedPriorEvents(
+                await store.findPriorEventsByEventKey(matchedEventKey, leadId),
+                matchedEventKey,
+              ),
+              [matchedEventKey],
+            );
+            if (!exactPriorEvents.length) {
+              throw new Error('persisted_assessment_exact_context_invalid');
+            }
+          }
           finalizedAssessment = validateManualNewsProcessedAssessment(
-            cycle.validated_assessment, evidence, priorEvents.map((event) => event.event_key),
+            cycle.validated_assessment,
+            evidence,
+            [...priorEvents, ...exactPriorEvents].map((event) => event.event_key),
           );
           assessmentGenerationAudit = assessmentGenerationAuditFromCycle(cycle);
         } else {
