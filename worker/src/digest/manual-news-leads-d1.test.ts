@@ -517,6 +517,37 @@ function saveFixtureAssessment(
   return store.saveVerifiedAssessment(leadId, version, candidate, verifiedAssessment(candidate));
 }
 
+async function addTruncatedExactPriorContext(state: ReturnType<typeof fixture>) {
+  const targetEventKey = assessment().event_key;
+  const priorLeadId = 'manual-prior-exact-truncated';
+  state.db.sqlite.prepare(`INSERT INTO manual_news_leads (
+    id, review_date, input_type, input_text, input_url, note, status, version,
+    submit_idempotency_key, processing_owner, processing_attempt, created_at, updated_at
+  ) VALUES (?, '2026-07-29', 'url', '', 'https://support.claude.com/example', '', 'verifying', 4,
+    ?, ?, 1, 1, 1)`).run(priorLeadId, `submit-${priorLeadId}`, PROCESSING_OWNER);
+  state.db.sqlite.prepare(`INSERT INTO manual_news_evidence (
+    lead_id, evidence_id, response_key_id, url, source_type, publisher, published_at,
+    retrieved_at, title, excerpt, claims_supported_json, fetch_audit_json, reliable
+  ) SELECT ?, evidence_id, response_key_id, url, source_type, publisher, published_at,
+    retrieved_at, title, excerpt, claims_supported_json, fetch_audit_json, reliable
+    FROM manual_news_evidence WHERE lead_id = ?`).run(priorLeadId, state.leadId);
+  await saveFixtureAssessment(
+    new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1),
+    priorLeadId,
+    4,
+    { ...processedAssessment(), event_key: targetEventKey },
+  );
+  for (let index = 0; index < 24; index += 1) {
+    state.db.sqlite.prepare(`INSERT INTO items (
+      id, source_ref, extra, published_at, scraped_at, is_relevant, deleted_at
+    ) VALUES (?, 'rss', ?, '2026-08-11', '2026-08-11', 1, NULL)`).run(
+      `newer-automatic-prior-${String(index).padStart(2, '0')}`,
+      JSON.stringify({ event_fingerprint: `newer-automatic-event-${String(index).padStart(2, '0')}` }),
+    );
+  }
+  return { targetEventKey, priorLeadId };
+}
+
 function verifyingAdapters(): ManualLeadProcessingAdapters {
   return {
     search: async () => [], fetch: async () => { throw new Error('unused'); },
@@ -2194,6 +2225,219 @@ describe('manual lead D1-backed dedupe', () => {
     );
     expect(result).toMatchObject({ status: 'recommended', assessment: { duplicate_scope: null, matched_lead_id: null } });
   });
+
+  test('bounds and deterministically orders verified manual and automatic prior events', async () => {
+    const state = fixture();
+    const store = new D1ManualLeadProcessingStore(state.env);
+    const addVerifiedManualPrior = async (leadId: string, reviewDate: string, eventKey: string) => {
+      state.db.sqlite.prepare(`INSERT INTO manual_news_leads (
+        id, review_date, input_type, input_text, input_url, note, status, version,
+        submit_idempotency_key, processing_owner, processing_attempt, created_at, updated_at
+      ) VALUES (?, ?, 'url', '', 'https://support.claude.com/example', '', 'verifying', 4,
+        ?, ?, 1, 1, 1)`).run(leadId, reviewDate, `submit-${leadId}`, PROCESSING_OWNER);
+      state.db.sqlite.prepare(`INSERT INTO manual_news_evidence (
+        lead_id, evidence_id, response_key_id, url, source_type, publisher, published_at,
+        retrieved_at, title, excerpt, claims_supported_json, fetch_audit_json, reliable
+      ) SELECT ?, evidence_id, response_key_id, url, source_type, publisher, published_at,
+        retrieved_at, title, excerpt, claims_supported_json, fetch_audit_json, reliable
+        FROM manual_news_evidence WHERE lead_id = ?`).run(leadId, state.leadId);
+      await saveFixtureAssessment(
+        new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1),
+        leadId,
+        4,
+        { ...processedAssessment(), event_key: eventKey },
+      );
+    };
+
+    const sharedEventKey = 'shared-prior-event-2026-08-28';
+    await addVerifiedManualPrior('manual-prior-shared', '2026-08-27', sharedEventKey);
+    await addVerifiedManualPrior('manual-prior-unique', '2026-08-27', 'manual-prior-unique-2026-08-27');
+    for (let index = 0; index < 36; index += 1) {
+      const reviewDate = `2026-08-${String(28 - (index % 14)).padStart(2, '0')}`;
+      const eventKey = index === 0 ? sharedEventKey : `automatic-prior-event-${String(index).padStart(2, '0')}`;
+      state.db.sqlite.prepare(`INSERT INTO items (
+        id, source_ref, extra, published_at, scraped_at, is_relevant, deleted_at
+      ) VALUES (?, 'rss', ?, ?, ?, 1, NULL)`).run(
+        `automatic-prior-${String(index).padStart(2, '0')}`,
+        JSON.stringify({ event_fingerprint: eventKey }),
+        reviewDate,
+        reviewDate,
+      );
+    }
+    state.db.sqlite.prepare(`INSERT INTO items (
+      id, source_ref, extra, published_at, scraped_at, is_relevant, deleted_at
+    ) VALUES ('automatic-outside-window', 'rss', ?, '2026-08-13', '2026-08-13', 1, NULL)`).run(
+      JSON.stringify({ event_fingerprint: 'outside-window-event-2026-08-13' }),
+    );
+
+    const priorEvents = await store.listRecentPriorEvents('2026-08-28', state.leadId);
+
+    expect(priorEvents).toHaveLength(24);
+    expect(new Set(priorEvents.map((event) => event.event_key))).toHaveLength(24);
+    expect(priorEvents).toEqual([...priorEvents].sort((left, right) =>
+      right.review_date.localeCompare(left.review_date)
+      || left.event_key.localeCompare(right.event_key)
+      || (Number(!left.verification_digest) - Number(!right.verification_digest))
+      || left.lead_id.localeCompare(right.lead_id)));
+    expect(priorEvents.find((event) => event.event_key === sharedEventKey)).toMatchObject({
+      lead_id: 'manual-prior-shared',
+      review_date: '2026-08-27',
+      verification_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(priorEvents.some((event) => event.lead_id === 'manual-prior-unique')).toBe(true);
+    expect(priorEvents.some((event) => event.lead_id.startsWith('automatic-prior-'))).toBe(true);
+    expect(priorEvents.some((event) => event.event_key === 'outside-window-event-2026-08-13')).toBe(false);
+    const manualSql = state.db.preparedSql.find((sql) => sql.includes('manual_assessment:recent_prior_events')) || '';
+    const automaticSql = state.db.preparedSql.find((sql) => sql.includes('manual_assessment:recent_non_manual_items')) || '';
+    expect(manualSql).toMatch(/ORDER BY l\.review_date DESC, a\.event_key ASC, l\.id ASC\s+LIMIT \?/i);
+    expect(automaticSql).toMatch(/ORDER BY review_date DESC, event_key ASC, lead_id ASC\s+LIMIT \?/i);
+  });
+
+  test('reinjects a truncated exact HMAC context after a transient verification retry without reassessment', async () => {
+    const state = fixture();
+    const { targetEventKey, priorLeadId } = await addTruncatedExactPriorContext(state);
+
+    const firstStore = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1);
+    const bounded = await firstStore.listRecentPriorEvents('2026-08-11', state.leadId);
+    expect(bounded).toHaveLength(24);
+    expect(bounded.some((event) => event.event_key === targetEventKey)).toBe(false);
+    await expect(firstStore.findPriorEventsByEventKey(targetEventKey, state.leadId)).resolves.toEqual([
+      expect.objectContaining({
+        event_key: targetEventKey,
+        lead_id: priorLeadId,
+        verification_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    ]);
+
+    const adapters = verifyingAdapters();
+    const baseVerify = adapters.verify;
+    let assessmentCalls = 0;
+    let verificationCalls = 0;
+    adapters.assess = async () => {
+      assessmentCalls += 1;
+      return generatedAssessment({ material_update: true });
+    };
+    let verificationPriorEventKeys: string[] = [];
+    adapters.verify = async (prompt, context) => {
+      verificationCalls += 1;
+      if (verificationCalls === 1) throw new Error('trusted_gateway_http_503');
+      const body = JSON.parse(prompt.user) as {
+        facts: Array<{
+          fact_id: string;
+          untrusted_prior_events?: Array<{ event_key: string }>;
+        }>;
+      };
+      verificationPriorEventKeys = body.facts.find((fact) => fact.fact_id === 'field:material_update')
+        ?.untrusted_prior_events?.map((event) => event.event_key) || [];
+      const raw = await baseVerify(prompt, context) as {
+        fact_results: Array<Record<string, unknown>>;
+      };
+      return {
+        ...raw,
+        fact_results: raw.fact_results.map((fact) => fact.fact_id === 'field:material_update'
+          ? {
+            ...fact,
+            comparison_result: {
+              ...(fact.comparison_result as Record<string, unknown>),
+              value: true,
+              matched_event_key: targetEventKey,
+              prior_event_keys: [targetEventKey],
+              reason_code: 'material_change',
+            },
+          }
+          : fact),
+      };
+    };
+
+    await expect(processManualNewsLead(state.leadId, firstStore, adapters))
+      .rejects.toThrow(/trusted_gateway_http_503/);
+    expect(assessmentCalls).toBe(1);
+    expect(verificationCalls).toBe(1);
+    expect(state.db.sqlite.prepare(`SELECT call_state, validated_assessment_json
+      FROM manual_news_assessment_generation_cycles_v2 WHERE lead_id = ? AND is_current = 1`)
+      .get(state.leadId)).toMatchObject({
+      call_state: 'validated',
+      validated_assessment_json: expect.stringContaining(`"matched_event_key":"${targetEventKey}"`),
+    });
+
+    expect(await claimManualNewsLeadProcessing(state.env, state.leadId, PROCESSING_OWNER, 10)).toBe(2);
+    const result = await processManualNewsLead(
+      state.leadId,
+      new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 2),
+      adapters,
+    );
+
+    expect(assessmentCalls).toBe(1);
+    expect(verificationCalls).toBe(2);
+    expect(verificationPriorEventKeys).toHaveLength(24);
+    expect(verificationPriorEventKeys).toContain(targetEventKey);
+    expect(result).toMatchObject({
+      error_code: null,
+      assessment: {
+        material_update: true,
+        matched_event_key: targetEventKey,
+        matched_lead_id: priorLeadId,
+      },
+    });
+  });
+
+  test.each(['missing', 'damaged'] as const)(
+    'fails closed on validated-cycle recovery when the exact HMAC context is %s',
+    async (failureMode) => {
+      const state = fixture();
+      const { priorLeadId } = await addTruncatedExactPriorContext(state);
+      let assessmentCalls = 0;
+      let verificationCalls = 0;
+      const firstAdapters = verifyingAdapters();
+      firstAdapters.assess = async () => {
+        assessmentCalls += 1;
+        return generatedAssessment({ material_update: true });
+      };
+      firstAdapters.verify = async () => {
+        verificationCalls += 1;
+        throw new Error('trusted_gateway_http_503');
+      };
+      await expect(processManualNewsLead(
+        state.leadId,
+        new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1),
+        firstAdapters,
+      )).rejects.toThrow(/trusted_gateway_http_503/);
+
+      if (failureMode === 'missing') {
+        state.db.sqlite.prepare(`DELETE FROM manual_news_assessment_verifications
+          WHERE lead_id = ? AND status = 'active'`).run(priorLeadId);
+      } else {
+        state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications
+          SET hmac_sha256 = ? WHERE lead_id = ? AND status = 'active'`)
+          .run('0'.repeat(64), priorLeadId);
+      }
+      expect(await claimManualNewsLeadProcessing(state.env, state.leadId, PROCESSING_OWNER, 10)).toBe(2);
+      const retryAdapters = verifyingAdapters();
+      retryAdapters.assess = async () => {
+        assessmentCalls += 1;
+        throw new Error('unexpected_reassessment');
+      };
+      retryAdapters.verify = async () => {
+        verificationCalls += 1;
+        throw new Error('unexpected_reverification');
+      };
+
+      const result = await processManualNewsLead(
+        state.leadId,
+        new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 2),
+        retryAdapters,
+      );
+
+      expect(assessmentCalls).toBe(1);
+      expect(verificationCalls).toBe(1);
+      expect(result).toMatchObject({
+        status: 'failed',
+        error_code: 'processing_failed',
+        error_message: 'persisted_assessment_exact_context_invalid',
+        assessment: null,
+      });
+    },
+  );
 
   test('dedupe history ignores legacy rows and includes only independently verified assessments', async () => {
     const state = fixture();

@@ -2217,6 +2217,95 @@ describe('manual news lead domain', () => {
     });
   });
 
+  test('projects large prior-event history deterministically below the 64k provider prompt gate', () => {
+    const longText = '历史事实'.repeat(1_500);
+    const sharedEventKey = 'shared-prior-event-2026-08-28';
+    const manualEvents = Array.from({ length: 32 }, (_, index) => ({
+      event_key: index === 0 ? sharedEventKey : `verified-prior-event-${String(index).padStart(2, '0')}`,
+      review_date: `2026-08-${String(28 - (index % 14)).padStart(2, '0')}`,
+      lead_id: `manual-prior-${String(index).padStart(2, '0')}-${'l'.repeat(180)}`,
+      verification_digest: String(index % 10).repeat(64),
+      title: `title-${index}-${longText}`,
+      summary: `summary-${index}-${longText}`,
+      claims: Array.from({ length: 6 }, (_, claimIndex) => ({
+        text: `claim-${index}-${claimIndex}-${longText}`,
+        evidence_ids: [`prior-evidence-${index}-${claimIndex}-${'e'.repeat(180)}`],
+      })),
+    }));
+    const automaticEvents = Array.from({ length: 32 }, (_, index) => ({
+      event_key: index === 0 ? sharedEventKey : `automatic-prior-event-${String(index).padStart(2, '0')}`,
+      review_date: `2026-08-${String(28 - (index % 14)).padStart(2, '0')}`,
+      lead_id: `automatic-prior-${String(index).padStart(2, '0')}-${'a'.repeat(180)}`,
+    }));
+    const worstCaseEvidence = Array.from({ length: 8 }, (_, index) => {
+      const excerpt = `evidence-${index}-${'X'.repeat(3_000)}`.slice(0, 3_000);
+      return {
+        ...officialAnthropic,
+        id: index === 0 ? officialAnthropic.id : `ev-worst-${index}`,
+        url: `https://support.claude.com/worst-${index}`,
+        title: `evidence-title-${index}-${'E'.repeat(220)}`.slice(0, 220),
+        excerpt,
+        claims_supported: [excerpt],
+      };
+    });
+    const promptInput = {
+      date: '2026-08-28',
+      text: 'T'.repeat(4_000),
+      note: 'N'.repeat(1_000),
+      evidence: worstCaseEvidence,
+      prior_events: [...automaticEvents, ...manualEvents].reverse(),
+    };
+    const prompt = buildManualLeadAssessmentPrompt(promptInput);
+    const regenerationPrompt = buildManualLeadAssessmentRegenerationPrompt(
+      promptInput, 'unknown_evidence_id', 'source_facts[0].evidence_ids[0]',
+    );
+    const verificationPrompt = buildManualLeadFactVerificationPrompt({
+      assessment: validateManualLeadAssessment(assessment(), promptInput.evidence),
+      evidence: promptInput.evidence,
+      prior_events: promptInput.prior_events,
+    });
+    const priorEvents = (JSON.parse(prompt.user) as {
+      untrusted_data: { prior_events: Array<Record<string, unknown>> };
+    }).untrusted_data.prior_events;
+    const regenerationPriorEvents = (JSON.parse(regenerationPrompt.user) as {
+      untrusted_data: { prior_events: Array<Record<string, unknown>> };
+    }).untrusted_data.prior_events;
+    const verificationPriorEvents = (JSON.parse(verificationPrompt.user) as {
+      facts: Array<{ fact_id: string; untrusted_prior_events?: Array<Record<string, unknown>> }>;
+    }).facts.find((fact) => fact.fact_id === 'field:material_update')?.untrusted_prior_events;
+
+    const serializedPromptLengths = {
+      assessment: Array.from(JSON.stringify(prompt)).length,
+      regeneration: Array.from(JSON.stringify(regenerationPrompt)).length,
+      verification: Array.from(JSON.stringify(verificationPrompt)).length,
+    };
+    expect(serializedPromptLengths.assessment).toBeLessThan(64_000);
+    expect(serializedPromptLengths.regeneration).toBeLessThan(64_000);
+    expect(serializedPromptLengths.verification).toBeLessThan(64_000);
+    expect(regenerationPriorEvents).toEqual(priorEvents);
+    expect(verificationPriorEvents).toEqual(priorEvents);
+    expect(priorEvents).toHaveLength(24);
+    expect(new Set(priorEvents.map((event) => event.event_key))).toHaveLength(24);
+    expect(priorEvents).toEqual([...priorEvents].sort((left, right) =>
+      String(right.review_date).localeCompare(String(left.review_date))
+      || String(left.event_key).localeCompare(String(right.event_key))
+      || String(left.lead_id).localeCompare(String(right.lead_id))));
+    const shared = priorEvents.find((event) => event.event_key === sharedEventKey);
+    expect(shared).toMatchObject({
+      verification_digest: '0'.repeat(64),
+      title: expect.any(String),
+      summary: expect.any(String),
+      claims: expect.any(Array),
+    });
+    expect(Array.from(String(shared?.lead_id)).length).toBeLessThanOrEqual(96);
+    expect(Array.from(String(shared?.title)).length).toBeLessThanOrEqual(160);
+    expect(Array.from(String(shared?.summary)).length).toBeLessThanOrEqual(320);
+    expect(shared?.claims).toHaveLength(2);
+    expect((shared?.claims as string[]).every((claim) => Array.from(claim).length <= 240)).toBe(true);
+    expect(priorEvents.filter((event) => Array.isArray(event.claims))).toHaveLength(8);
+    expect(priorEvents.some((event) => String(event.event_key).startsWith('automatic-prior-event-'))).toBe(true);
+  });
+
   test('keeps the containing claim once and fails closed above the prompt evidence text boundary', () => {
     const containingClaim = {
       ...officialAnthropic,

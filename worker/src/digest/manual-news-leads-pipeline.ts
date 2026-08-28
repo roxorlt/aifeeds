@@ -1,6 +1,7 @@
 import {
   applyManualLeadEvidencePolicy,
   assertManualLeadTransition,
+  boundedManualLeadPriorEvents,
   buildManualLeadAssessmentPrompt,
   buildManualLeadAssessmentRegenerationPrompt,
   buildManualLeadFactVerificationPrompt,
@@ -275,13 +276,11 @@ function auditMetadataWithProviderFailure(
   return providerFailure && metadata ? { ...metadata, provider_failure: providerFailure } : metadata;
 }
 
-async function finalizeManualLeadAssessment(
-  leadId: string,
+function finalizeManualLeadAssessment(
   reviewDate: string,
   assessment: ManualNewsLeadAssessment & { evidence_tier: ManualNewsProcessedAssessment['evidence_tier'] },
-  store: ManualLeadProcessingStore,
-): Promise<ProcessedManualLeadAssessment> {
-  const priorEvents = await store.findPriorEventsByEventKey(assessment.event_key, leadId);
+  priorEvents: readonly ManualLeadPriorEvent[],
+): ProcessedManualLeadAssessment {
   const duplicate = classifyManualLeadDuplicate(assessment, priorEvents, reviewDate);
   if (duplicate.duplicate) {
     return {
@@ -306,6 +305,43 @@ async function finalizeManualLeadAssessment(
     matched_lead_id: duplicate.matched_lead_id,
     matched_event_key: exactMatch ? assessment.event_key : null,
   };
+}
+
+function persistedAssessmentMatchedEventKey(raw: unknown): string | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('persisted_assessment_exact_context_invalid');
+  }
+  const candidate = raw as Record<string, unknown>;
+  if (candidate.matched_event_key === null) return null;
+  if (typeof candidate.matched_event_key !== 'string'
+    || typeof candidate.event_key !== 'string'
+    || candidate.matched_event_key !== candidate.event_key
+    || !/^[a-z0-9][a-z0-9:_-]{5,199}$/.test(candidate.matched_event_key)) {
+    throw new Error('persisted_assessment_exact_context_invalid');
+  }
+  return candidate.matched_event_key;
+}
+
+function validExactVerifiedPriorEvents(
+  events: readonly ManualLeadPriorEvent[],
+  eventKey: string,
+): ManualLeadPriorEvent[] {
+  return events.filter((event) => {
+    const parsedReviewDate = /^\d{4}-\d{2}-\d{2}$/.test(event.review_date)
+      ? Date.parse(`${event.review_date}T00:00:00Z`)
+      : Number.NaN;
+    return event.event_key === eventKey
+      && Number.isFinite(parsedReviewDate)
+      && new Date(parsedReviewDate).toISOString().slice(0, 10) === event.review_date
+      && typeof event.lead_id === 'string' && !!event.lead_id.trim()
+      && /^[a-f0-9]{64}$/.test(event.verification_digest || '')
+      && typeof event.title === 'string' && !!event.title
+      && typeof event.summary === 'string' && !!event.summary
+      && Array.isArray(event.claims) && event.claims.length > 0
+      && event.claims.every((claim) => typeof claim?.text === 'string'
+        && Array.isArray(claim.evidence_ids)
+        && claim.evidence_ids.every((evidenceId) => typeof evidenceId === 'string'));
+  });
 }
 
 export async function processManualNewsLead(
@@ -421,6 +457,7 @@ export async function processManualNewsLead(
         await store.invalidateAssessment(leadId, lead.version, 'persisted_verification_invalid');
       }
       const priorEvents = await store.listRecentPriorEvents(normalized.date, leadId);
+      let exactPriorEvents: ManualLeadPriorEvent[] = [];
       if (assessment) {
         try {
           assessment = validateManualNewsProcessedAssessment(assessment, evidence);
@@ -440,8 +477,23 @@ export async function processManualNewsLead(
         let cycle = await store.beginAssessmentGenerationCycle(leadId, lead.version);
         let finalizedAssessment: ProcessedManualLeadAssessment | null = null;
         if (cycle.call_state === 'validated' && cycle.validated_assessment) {
+          const matchedEventKey = persistedAssessmentMatchedEventKey(cycle.validated_assessment);
+          if (matchedEventKey) {
+            exactPriorEvents = boundedManualLeadPriorEvents(
+              validExactVerifiedPriorEvents(
+                await store.findPriorEventsByEventKey(matchedEventKey, leadId),
+                matchedEventKey,
+              ),
+              [matchedEventKey],
+            );
+            if (!exactPriorEvents.length) {
+              throw new Error('persisted_assessment_exact_context_invalid');
+            }
+          }
           finalizedAssessment = validateManualNewsProcessedAssessment(
-            cycle.validated_assessment, evidence, priorEvents.map((event) => event.event_key),
+            cycle.validated_assessment,
+            evidence,
+            [...priorEvents, ...exactPriorEvents].map((event) => event.event_key),
           );
           assessmentGenerationAudit = assessmentGenerationAuditFromCycle(cycle);
         } else {
@@ -551,8 +603,9 @@ export async function processManualNewsLead(
               return (await store.getLead(leadId))!;
             }
             const validatedAssessment = applyManualLeadEvidencePolicy(validatedCore, evidence);
-            finalizedAssessment = await finalizeManualLeadAssessment(
-              leadId, normalized.date, validatedAssessment, store,
+            exactPriorEvents = await store.findPriorEventsByEventKey(validatedAssessment.event_key, leadId);
+            finalizedAssessment = finalizeManualLeadAssessment(
+              normalized.date, validatedAssessment, exactPriorEvents,
             );
             cycle = await store.recordAssessmentGenerationValidation(leadId, lead.version, {
               generation_revision: generationRevision,
@@ -564,13 +617,20 @@ export async function processManualNewsLead(
           }
         }
         if (!finalizedAssessment) throw new Error('assessment_generation_state_invalid');
+        if (finalizedAssessment.matched_event_key
+          && !exactPriorEvents.some((event) => event.event_key === finalizedAssessment!.matched_event_key)) {
+          exactPriorEvents = await store.findPriorEventsByEventKey(
+            finalizedAssessment.matched_event_key, leadId,
+          );
+        }
+        const verificationPriorEvents = [...priorEvents, ...exactPriorEvents];
         let verificationRaw: unknown;
         try {
           verificationRaw = await adapters.verify(
             buildManualLeadFactVerificationPrompt({
               assessment: finalizedAssessment,
               evidence,
-              prior_events: priorEvents,
+              prior_events: verificationPriorEvents,
             }),
             providerCallContext('verification', evidence.length),
           );
@@ -600,7 +660,7 @@ export async function processManualNewsLead(
         let verification;
         try {
           verification = validateManualLeadFactVerification(
-            verificationRaw, finalizedAssessment, evidence, { prior_events: priorEvents },
+            verificationRaw, finalizedAssessment, evidence, { prior_events: verificationPriorEvents },
           );
         } catch (error) {
           await store.invalidateAssessment(leadId, lead.version, 'fact_verification_schema_invalid');
