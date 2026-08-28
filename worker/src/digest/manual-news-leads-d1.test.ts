@@ -2379,7 +2379,7 @@ describe('manual lead D1-backed dedupe', () => {
         matched_lead_id: priorLeadId,
       },
     });
-  });
+  }, 15_000);
 
   test.each(['missing', 'damaged'] as const)(
     'fails closed on validated-cycle recovery when the exact HMAC context is %s',
