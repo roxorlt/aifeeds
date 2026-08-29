@@ -68,3 +68,29 @@ wrangler.jsonc
 
 # events 健康度脚本（别 session 在用，先 ignore 避免噪音）
 scripts/events_health.py
+
+# ─────────────────────────────────────────────────────────────
+# 运维资料 — 禁止进入公开仓（2026-08-30 安全清理）
+#
+# roxorlt/aifeeds 是 PUBLIC 仓库。以下文件含服务器登录坐标
+# （香港 VPS / 腾讯云 IP、root 用户、SSH 密钥路径）、完整鉴权
+# 拓扑（各 endpoint 用什么头认证）、ICP/公安备案主体信息。
+# 这些不是 secret 值（真 secret 在 .secrets/，另有 gitleaks 守护），
+# 但公开后等于给出一张攻击地图，故整体移出追踪。
+#
+# 本地文件全部保留，日常开发照常读写；跨机器/跨协作方同步请走
+# 私有渠道，不要重新 git add。
+# ─────────────────────────────────────────────────────────────
+docs/operations.md
+docs/reviews/c-end-perf-staging-change-packet.md
+docs/memo/2026-05-04-icp-备案讨论备忘录.md
+docs/wechat/
+docs/beian/
+docs/plans/2026-06-22-rsshub-hk-vps-deploy-handoff.md
+docs/plans/2026-06-22-rsshub-hk-vps-deploy-requirements.md
+cc-site/
+scripts/ci/performance-validation-contract.test.mjs
+
+# 备份 / 中间产物 — 常含替换前的敏感原值，禁止入库
+*.bak
+docs/plans/*.pre-merge-untracked.md

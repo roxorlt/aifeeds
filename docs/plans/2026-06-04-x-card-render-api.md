@@ -17,7 +17,7 @@
 | 侧 | 负责 |
 |----|------|
 | **aifeeds(Claude)** | X 抓取、清洗、字段标准化、中文翻译 + 摘要、**所有图片资源缓存到 R2 给稳定 https 链接**、拼完整 payload、调 Codex 渲染、把成品图转存回 R2 对外 |
-| **Codex(腾讯云 82.156.0.68)** | 鉴权、接收 JSON、下载图片(已是 aifeeds R2 稳定链接)、套模板、Chrome 渲染 PNG、返回成品 |
+| **Codex(腾讯云 ${CN_RENDER_HOST})** | 鉴权、接收 JSON、下载图片(已是 aifeeds R2 稳定链接)、套模板、Chrome 渲染 PNG、返回成品 |
 
 **关键约定:Codex 保持无状态** —— 不查 aifeeds 数据库、不碰我们的鉴权、不依赖原始 twimg 链接。
 所有它需要的数据都在 payload 里,所有图片 URL 都是 aifeeds R2 的 https 稳定地址。
@@ -66,7 +66,7 @@ aifeeds 把每条 X 推文存在 D1 `items` 表(`source_type='x_list'`),源专�
 
 > 2026-06-04 Codex 已确认 3 个开放项 + 提议扁平结构,本节为**双方约定的 v1 schema**。
 
-端点:`POST http://82.156.0.68/aifeeds/api/render/x-card`
+端点:`POST http://${CN_RENDER_HOST}/aifeeds/api/render/x-card`
 请求头:`Authorization: Bearer <shared_token>` + `Content-Type: application/json` + `Accept: image/png`
 
 ### 5.1 请求体(aifeeds → Codex)

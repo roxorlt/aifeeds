@@ -25,7 +25,7 @@
 7. 抓到的字/图/视频各种排列组合,要在前端三个面(流内卡片、抽屉详情、分享海报)各有合适样式。
 8. **暂不**把新源接入「订阅日报」和「给 codex 推送 daily」(只是不接,不是不做主功能)。
 
-**致命外部约束**:公网前端 `ai-feeds.com` / api `api.ai-feeds.com` / 字体都经香港 VPS(`154.12.188.231`,DMIT HKG)中转,这台机器 **1 vCPU / 961MB RAM(实测 free ~645MB)/ 1GB swap / 20G 盘**,只装了 nginx,是 prod 全站中转单点 —— 运维手册 §6b 明写「它挂了前端 + api + 字体全挂」。任何基建设计都要正面回答「会不会拖垮这台机器」。
+**致命外部约束**:公网前端 `ai-feeds.com` / api `api.ai-feeds.com` / 字体都经香港 VPS(`${HK_VPS_IP}`,境外机房)中转,这台机器 **单核低配小鸡(内存不足 1G)**,只装了 nginx,是 prod 全站中转单点 —— 运维手册 §6b 明写「它挂了前端 + api + 字体全挂」。任何基建设计都要正面回答「会不会拖垮这台机器」。
 
 ---
 
@@ -365,13 +365,13 @@ async function dedupStep(env, itemId) {
 |------|-----------------|--------|
 | ① 不部署:CF Worker 直连现成 feed | 零耦合 | ✓ **Phase 1 首选**(单凭它覆盖 24 源) |
 | ② 同机 bare-node RSSHub(香港中转机) | **共命运**,swap thrash 拖慢全站 | ✗ 否决(仅理论兜底,须 systemd `MemoryMax=300M` + nginx `OOMScoreAdjust=-900` 才勉强) |
-| ③ **复用 Codex 腾讯云渲染机**(`82.156.0.68`,大陆 IP,已跑 Chrome + 与 aifeeds 有 X-card 渲染契约) | **跨方依赖 Codex**(非 aifeeds 自有) | ✓ **用户已定:无头/全文渲染主路径**(详见 §6.3,镜像 X-card HTTP 契约;余量待 Codex 确认) |
+| ③ **复用 Codex 腾讯云渲染机**(`${CN_RENDER_HOST}`,大陆 IP,已跑 Chrome + 与 aifeeds 有 X-card 渲染契约) | **跨方依赖 Codex**(非 aifeeds 自有) | ✓ **用户已定:无头/全文渲染主路径**(详见 §6.3,镜像 X-card HTTP 契约;余量待 Codex 确认) |
 | ④ 另起独立最小小鸡跑 RSSHub | 解耦:它挂只停 blog/podcast 入库 | ○ 仅 Phase 2 中文播客才需;Oracle Always Free=$0 或 $3-7/mo,或并入 ③ Codex 机 |
 | ⑤ CF Browser Rendering binding | 零自建,Chrome 在 CF 侧 | ○ **备选/兜底**(Codex 机余量不足或不愿持续占用时启用;Workers Paid 已支持) |
 
 ### 6.3 无头/全文渲染:复用 Codex 腾讯云机(主)+ CF-BR(备选)
 
-> **用户 2026-06-09 已定:复用 Codex 腾讯云渲染机(`82.156.0.68`)为无头/详情页渲染主路径。** 这台是协作方 Codex 拥有/运维的机器,已跑 Chrome 给 aifeeds 渲染 X-card PNG 和日报图,双方已有「HTTP 端点 + `shared_token`」渲染契约(见 `docs/plans/2026-06-04-x-card-render-api.md`)。新源复用 = 请 Codex 新开一个抓文章的 HTTP 端点(如 `POST /render-article`,输入 url → 返回渲染后 HTML/正文/图),aifeeds worker 带 `shared_token` 调用。它是**大陆 IP**,抓国内厂商 SPA 站反而比 CF 边缘更顺。
+> **用户 2026-06-09 已定:复用 Codex 腾讯云渲染机(`${CN_RENDER_HOST}`)为无头/详情页渲染主路径。** 这台是协作方 Codex 拥有/运维的机器,已跑 Chrome 给 aifeeds 渲染 X-card PNG 和日报图,双方已有「HTTP 端点 + `shared_token`」渲染契约(见 `docs/plans/2026-06-04-x-card-render-api.md`)。新源复用 = 请 Codex 新开一个抓文章的 HTTP 端点(如 `POST /render-article`,输入 url → 返回渲染后 HTML/正文/图),aifeeds worker 带 `shared_token` 调用。它是**大陆 IP**,抓国内厂商 SPA 站反而比 CF 边缘更顺。
 >
 > **⚠️ 必须如实权衡的 caveat(不淡化)**:① 这台**归 Codex 所有、非 aifeeds 自有** —— 持续抓取 = 跨方依赖 + 需与 Codex 协调新端点 + 它挂了 aifeeds 这部分 feed 会停;② 它已承担 X-card + 日报图渲染,**叠加文章渲染的余量未知**(无法 SSH 自查,只能走 Codex 暴露的 HTTP 契约);③ X-card 是偶发渲染、文章抓取是**持续负载**,是更大的长期占用,**需 Codex 同意 + 验证余量**;④ **Phase 1 那 34 个零基建源根本不需要它**,无头只在 Phase 3 启用,可先不依赖。
 
@@ -933,7 +933,7 @@ R2 bucket 实测 binding `READMES` = `xlist-readme-assets`(prod)/ `xlist-readme-
 > 用户可一句「**全部按推荐**」,或逐条改。
 
 > **✅ 已定决策(2026-06-09 用户拍板)**:
-> - **D1 + D3 基建**:复用 **Codex 腾讯云渲染机**(`82.156.0.68`,大陆 IP,已有 X-card 渲染契约)为无头/全文渲染**主路径**;CF-BR 降备选;RSSHub(仅 Phase 2 中文播客需要)待 Phase 2 与 Codex 确认余量,否则退最小免费小鸡;**绝不香港中转**。caveat:跨方依赖 Codex、余量未知、持续负载需 Codex 同意(详见 §6.3)。
+> - **D1 + D3 基建**:复用 **Codex 腾讯云渲染机**(`${CN_RENDER_HOST}`,大陆 IP,已有 X-card 渲染契约)为无头/全文渲染**主路径**;CF-BR 降备选;RSSHub(仅 Phase 2 中文播客需要)待 Phase 2 与 Codex 确认余量,否则退最小免费小鸡;**绝不香港中转**。caveat:跨方依赖 Codex、余量未知、持续负载需 Codex 同意(详见 §6.3)。
 > - **D2 预算**:复用已有腾讯云机 → 现金月费 **~$0**,成本转为跨方协调 + 共享单点依赖;暂不上 ASR。
 > - **D4 公众号**:v1 不接,标 v2。
 > - **D7 前端入口**:blog + podcast 合并为**单频道「官方新闻」**(filter `source_type=blog,podcast`),底层仍 2 source_type + 2 workflow + 2 卡片样式混排(**前端合并、数据模型不合并**)。
@@ -942,7 +942,7 @@ R2 bucket 实测 binding `READMES` = `xlist-readme-assets`(prod)/ `xlist-readme-
 
 | # | 决策 | Claude 推荐默认 / 用户裁决 | 影响 |
 |---|------|----------------|------|
-| **D1** | RSSHub(+ 可选无头)放哪台机? | **✅ 用户已定:复用 Codex 腾讯云机**(`82.156.0.68`)为渲染主路径;RSSHub(仅 Phase 2 中文播客需要)待与 Codex 确认余量,否则退最小免费小鸡(Oracle Always Free=$0)。**绝不香港中转**(swap thrash 拖慢全站) | 跨方依赖 Codex;Phase 1 不依赖它 |
+| **D1** | RSSHub(+ 可选无头)放哪台机? | **✅ 用户已定:复用 Codex 腾讯云机**(`${CN_RENDER_HOST}`)为渲染主路径;RSSHub(仅 Phase 2 中文播客需要)待与 Codex 确认余量,否则退最小免费小鸡(Oracle Always Free=$0)。**绝不香港中转**(swap thrash 拖慢全站) | 跨方依赖 Codex;Phase 1 不依赖它 |
 | **D2** | 月度基建预算上限? | **✅ 用户已定:复用已有腾讯云机 → 现金月费 ~$0**,成本转为跨方协调 + 共享单点依赖;暂不上 ASR。(若后续要付费小鸡 / ASR 再单独定上限) | 决定是否另上付费小鸡 / ASR |
 | **D3** | 无头/全文抓取走哪条路? | **✅ 用户已定:复用 Codex 腾讯云渲染机**(大陆 IP,镜像 X-card HTTP 渲染契约,请 Codex 加抓文章端点)为主路径;**CF-BR 降备选/兜底**;xAI/Perplexity 默认降级。Phase 3 启动前验 Codex 余量 + 联调端点 | headless-drain lane = worker→Codex HTTP 契约(需 Codex 配合 + 错峰);余量不足回退 CF-BR |
 | **D4** | 微信公众号 13 家 v1 接不接? | **✅ 用户已确认:v1 不接,标 v2**(公共 RSSHub 被封 + 需 wechat2rss 登录态账号/付费桥,运维脆弱)。它对 DeepSeek/月之暗面/阶跃是主信号,但不该拖累 v1 上线 | 决定 v1 是否缺这批国内主信号 |

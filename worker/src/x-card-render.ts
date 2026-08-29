@@ -6,7 +6,7 @@
 //   → put 到 R2 `x-card/<render_key>.png` → 返 https://<apiBase>/r/x-card/<render_key>.png
 //
 // Codex 约定(2026-06-05 确认):
-//   - 端点 POST http://82.156.0.68/aifeeds/api/render/x-card,成功 200 image/png(Header X-Render-Key)
+//   - 端点 POST http://${CN_RENDER_HOST}/aifeeds/api/render/x-card,成功 200 image/png(Header X-Render-Key)
 //   - 失败 JSON {error,message};401/400/413/500;4xx 不重试,5xx/网络超时重试 1 次
 //   - 限流保守:uncached 并发 1、3-5s/张;render_key 幂等(Codex 侧也缓存)
 //   - v1 只处理 media type=image;纯视频发 poster 当 image;固定 1080x1440
@@ -18,7 +18,7 @@ import { sbTweetToIngestItem, type SbTweet } from './scrapebadger';
 import { triggerXWorkflowForItem } from './enrich';
 
 // 2026-06-05 Codex 切到 HTTPS 域名端点(避免 token 明文 + 绕开 Worker 调 IP literal 触发的网络层拦截)。
-// 旧 http://82.156.0.68 端点 Worker 调会 403(疑似腾讯云/宝塔全局 IP 黑名单,请求没进 nginx)。
+// 旧 http://${CN_RENDER_HOST} 端点 Worker 调会 403(疑似腾讯云/宝塔全局 IP 黑名单,请求没进 nginx)。
 const DEFAULT_ENDPOINT = 'https://ai-feeds.cc/aifeeds/api/render/x-card';
 const RENDER_TIMEOUT_MS = 60_000;
 

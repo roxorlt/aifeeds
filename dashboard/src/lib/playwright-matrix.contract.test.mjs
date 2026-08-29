@@ -48,10 +48,13 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
   const remoteRunnerPath = path.join(dashboard, "scripts/run-perf-staging-e2e.sh");
   assert.equal(fs.existsSync(remoteRunnerPath), true, "remote perf-staging runner must exist");
   const remoteRunner = fs.readFileSync(remoteRunnerPath, "utf8");
-  const stagingRunbook = fs.readFileSync(
-    path.join(root, "docs/reviews/c-end-perf-staging-change-packet.md"),
-    "utf8",
-  );
+  // docs/reviews/c-end-perf-staging-change-packet.md 2026-08-30 起移出公开仓
+  // （含香港 VPS SSH 登录命令，见 .gitignore 末段），本地仍保留。文档在场时
+  // 照常校验 fixture 契约；缺席时只跳过下面三条断言，本 test 其余断言不受影响。
+  const stagingRunbookPath = path.join(root, "docs/reviews/c-end-perf-staging-change-packet.md");
+  const stagingRunbook = fs.existsSync(stagingRunbookPath)
+    ? fs.readFileSync(stagingRunbookPath, "utf8")
+    : "";
 
   assert.match(config, /E2E_BASE_URL/);
   assert.match(config, /E2E_OUTPUT_DIR/);
@@ -74,9 +77,11 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
   assert.match(remoteRunner, /x_list:perf-staging-\[a-f0-9\]\{20\}/);
   assert.match(remoteRunner, /blog:perf-staging-\[a-f0-9\]\{20\}/);
   assert.match(remoteRunner, /exec npx playwright test e2e\/perf-staging-remote\.spec\.ts/);
-  assert.match(stagingRunbook, /FIXTURES="\$EVIDENCE\/synthetic-feed-fixtures\.json"/);
-  assert.match(stagingRunbook, /E2E_EXPECTED_X_FIXTURE_ID="\$X_FIXTURE_ID"/);
-  assert.match(stagingRunbook, /E2E_EXPECTED_BLOG_FIXTURE_ID="\$BLOG_FIXTURE_ID"/);
+  if (stagingRunbook) {
+    assert.match(stagingRunbook, /FIXTURES="\$EVIDENCE\/synthetic-feed-fixtures\.json"/);
+    assert.match(stagingRunbook, /E2E_EXPECTED_X_FIXTURE_ID="\$X_FIXTURE_ID"/);
+    assert.match(stagingRunbook, /E2E_EXPECTED_BLOG_FIXTURE_ID="\$BLOG_FIXTURE_ID"/);
+  }
   assert.match(remoteSpec, /E2E_REMOTE/);
   assert.match(remoteSpec, /E2E_COOKIE_JAR/);
   assert.match(remoteSpec, /E2E_EXPECTED_UID/);

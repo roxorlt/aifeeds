@@ -287,7 +287,7 @@ git commit -m "fix: report only measurable worker timing"
 **Step 1: Inspect live block names without printing secrets**
 
 ```bash
-ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 "grep -R -nE 'server_name|access_log|proxy_pass|proxy_http_version' /etc/nginx/sites-enabled /etc/nginx/conf.d"
+ssh -i ${HK_SSH_KEY} root@${HK_VPS_IP} "grep -R -nE 'server_name|access_log|proxy_pass|proxy_http_version' /etc/nginx/sites-enabled /etc/nginx/conf.d"
 ```
 
 Expected: identify the actual front/API blocks and confirm there is no staging block on this VPS. Never send raw

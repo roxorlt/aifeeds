@@ -137,7 +137,7 @@ Expected: `git status` 为空；Worker 测试和 relay smoke 全绿。
 - `ai-feeds.cc` 当前 Nginx root 为 `/www/wwwroot/ai-feeds.cc`。
 - Node ≥18。
 - 服务器磁盘可用空间至少为预计镜像 HTML 总量的 3 倍。
-- 备案号仍为 `京ICP备2025123594号-2`，公安备案为 `京公网安备11010802048455号`。
+- 备案号仍为 `${ICP_BEIAN_NO}`，公安备案为 `${GONGAN_BEIAN_NO}`。
 
 ---
 

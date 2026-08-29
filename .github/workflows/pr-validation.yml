@@ -14,9 +14,7 @@ on:
       - 'scripts/benchmark-aifeeds-upstream*'
       - 'scripts/run-aifeeds-staging-backfill*'
       - 'scripts/ci/**'
-      - 'docs/operations.md'
       - 'docs/plans/2026-07-10-c-end-performance-optimization-plan.md'
-      - 'docs/reviews/c-end-perf-staging-change-packet.md'
       - 'docs/reviews/c-end-performance-rollout-template.md'
       - '.github/workflows/**'
 
@@ -51,10 +49,7 @@ jobs:
               - 'deploy/systemd/aifeeds-performance-logrotate.*'
               - 'scripts/benchmark-aifeeds-upstream*'
               - 'scripts/run-aifeeds-staging-backfill*'
-              - 'scripts/ci/performance-validation-contract.test.mjs'
-              - 'docs/operations.md'
               - 'docs/plans/2026-07-10-c-end-performance-optimization-plan.md'
-              - 'docs/reviews/c-end-perf-staging-change-packet.md'
               - 'docs/reviews/c-end-performance-rollout-template.md'
             workflow_contracts:
               - 'scripts/ci/actions-node24-contract.test.mjs'
@@ -183,7 +178,6 @@ jobs:
           scripts/benchmark-aifeeds-upstream.test.mjs
           scripts/run-aifeeds-staging-backfill.test.mjs
           deploy/nginx/*.test.mjs
-          scripts/ci/performance-validation-contract.test.mjs
       - name: Validate nginx performance deployment helpers
         run: |
           python3 deploy/nginx/check-nginx-request-id.test.py

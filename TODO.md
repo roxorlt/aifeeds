@@ -205,7 +205,7 @@
 > 关键实测结论:45 个候选里 34 个零 VPS 基建可拿(24 原生 feed + 10 页面抓取),只 4 个中文播客必须 RSSHub、8 个 SPA 必须无头。
 > ⚠️ 香港中转 VPS(1 核 961MB,prod 全站单点)**绝不跑无头/RSSHub**——无头走 CF Browser Rendering、RSSHub 另起独立小鸡。
 
-- [x] **D1/D3/D4/D7 已定**(2026-06-09 用户拍板,见设计文档 §13 顶部小结):基建复用 Codex 腾讯云机 82.156.0.68(跨方依赖,Phase 1 不用它)/ 公众号 v1 不接标 v2 / 前端合并单频道「官方新闻」。余 D2 上限 / D5 中文播客 ASR / D6 SPA 硬骨头 / D8 去重范围 / D9 publisher logo / D10 冷启动深度 维持推荐默认,可读后再调
+- [x] **D1/D3/D4/D7 已定**(2026-06-09 用户拍板,见设计文档 §13 顶部小结):基建复用 Codex 腾讯云机 ${CN_RENDER_HOST}(跨方依赖,Phase 1 不用它)/ 公众号 v1 不接标 v2 / 前端合并单频道「官方新闻」。余 D2 上限 / D5 中文播客 ASR / D6 SPA 硬骨头 / D8 去重范围 / D9 publisher logo / D10 冷启动深度 维持推荐默认,可读后再调
 - [x] **Phase 0 mockup 三件套已出**(2026-06-09):[索引](docs/plans/_mockups/2026-06-09-feeds-index.html) + kit + feed/卡片变体/blog抽屉/podcast抽屉/海报 5 页。审查通过(emoji 零违规、token 对齐 TweetCard 基线、合并频道/卡片家族/chipColor 全落实)
 - [x] **2 个视觉取舍已定**(2026-06-09 看 mockup 后):① blog 流内卡 = **右侧小缩略图(news-card 式,文字为主,非满宽 hero)** ② publisher logo = **真实 logo(BE 迁 R2)**。已记设计文档 §10.1/§10.2/§13 + 决策矩阵。→ **Phase 0(设计 + mockup)彻底完成**
   - 注:`feeds-feed-mockup.html` 里 blog 卡画的是旧的满宽 hero,**最终以 `feeds-card-variants.html` 的 ② 右侧小缩略图为准**(设计文档已是权威);Phase 1 建卡照 §10.2,需要的话可再刷一版 feed-mockup
@@ -426,7 +426,7 @@
 
 > 详见：[`docs/memo/2026-05-04-icp-备案讨论备忘录.md`](docs/memo/2026-05-04-icp-备案讨论备忘录.md) / [`docs/beian/README.md`](docs/beian/README.md)（备案号 + footer 标准片段 + 部署 SOP）/ [`docs/wechat/architecture.md`](docs/wechat/architecture.md)（微信登录架构 + state HMAC + bridge HMAC + 实施清单）
 
-ai-feeds.cc + 腾讯云轻量服务器（82.156.0.68）+ 5 个静态合规页已部署。2026-05-13 ICP 备案 + 公安备案号已下证（**京ICP备2025123594号-2** / **京公网安备11010802048455号**）。三套品牌名约定：网页「AI源信」 / 备案主体「科赞源信」 / 全球版「AI Feeds」。
+ai-feeds.cc + 腾讯云轻量服务器（${CN_RENDER_HOST}）+ 5 个静态合规页已部署。2026-05-13 ICP 备案 + 公安备案号已下证（**${ICP_BEIAN_NO}** / **${GONGAN_BEIAN_NO}**）。三套品牌名约定：网页「AI源信」 / 备案主体「${BEIAN_ENTITY}」 / 全球版「AI Feeds」。
 
 **备案号下来后**（按顺序）：
 - [x] **footer 贴上工信部 + 公安双备案 + 公安图标**（2026-05-13 完成，5 个静态页已纳入 [`cc-site/`](cc-site/)；`cc-site/deploy.sh` 一键部署）
@@ -437,7 +437,7 @@ ai-feeds.cc + 腾讯云轻量服务器（82.156.0.68）+ 5 个静态合规页已
 - [x] 微信开放平台企业认证（2026-05-14）
 - [x] 微信开放平台「网站应用」创建 + 提审（2026-05-14 提交，授权回调域名 `ai-feeds.cc`，等审核结果约 7 工作日）
 - [ ] 拿到 AppID + AppSecret 后落盘到 `.secrets/wechat-open-platform.env` + worker secrets
-- [ ] 腾讯云短信签名「科赞源信」+ 模板
+- [ ] 腾讯云短信签名「${BEIAN_ENTITY}」+ 模板
 
 **微信生态接入**（设计已拍板，等 AppID 下来开工）：
 - 微信扫码登录（高优）— 设计见 [`docs/wechat/architecture.md`](docs/wechat/architecture.md) §9 实施清单
@@ -450,7 +450,7 @@ ai-feeds.cc + 腾讯云轻量服务器（82.156.0.68）+ 5 个静态合规页已
 - 三路径分发：PC OpenSDK（PC 浏览器）/ 海报手动分享（移动浏览器）/ JS-SDK 自定义卡片（微信内浏览器）
 - 三路径分发：PC OpenSDK（PC 浏览器）/ 海报手动分享（移动浏览器）/ JS-SDK 自定义卡片（微信内浏览器）
 
-**清理**：临时 SSH 密钥 `~/.ssh/aifeeds_temp` 备案过审 + SSL 配好后撤销
+**清理**：临时 SSH 密钥 `${CC_SSH_KEY}` 备案过审 + SSL 配好后撤销
 
 ### 12. 国内 SEO / GEO 镜像站
 

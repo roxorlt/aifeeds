@@ -1,7 +1,0 @@
-User-agent: *
-Allow: /
-Allow: /i/
-Allow: /ai-news/
-Disallow: /auth/
-
-Sitemap: https://ai-feeds.cc/sitemap.xml

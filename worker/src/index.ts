@@ -345,7 +345,7 @@ export interface Env {
   RESEND_WEBHOOK_SECRET?: string;         // Resend(Svix)webhook 签名校验 secret
   DIGEST_API_KEY?: string;                // 对外日报 JSON API(GET /api/digest/daily)Bearer key
   X_CARD_SHARED_TOKEN?: string;           // 调 Codex X 卡片渲染 API 的 Bearer token(P3)。日报推送也复用此 token
-  X_CARD_RENDER_ENDPOINT?: string;        // Codex 渲染端点(默认 http://82.156.0.68/aifeeds/api/render/x-card)
+  X_CARD_RENDER_ENDPOINT?: string;        // Codex 渲染端点(默认 http://${CN_RENDER_HOST}/aifeeds/api/render/x-card)
   DAILY_PUSH_ENDPOINT?: string;           // Codex 日报 ingest 端点(默认 https://ai-feeds.cc/aifeeds/api/daily/ingest)
   DAILY_PUSH_ENABLED?: string;            // 早8点自动推 Codex 总开关:'1'=开;不设/其他=关(手动 mode 不受此限)
   DAILY_STAGED_PUSH_ENABLED?: string;     // v2 分批预生产开关:'1'=06:30/07:50/08:00 stages;关闭时保留 v1 早8点全量

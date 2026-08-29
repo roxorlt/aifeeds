@@ -202,44 +202,9 @@ test("versioned nginx location is placeholder-only, uncached, and preserves auth
   assert.match(config, /proxy_cache_bypass\s+1;/);
 });
 
-test("operations runbook keeps perf staging isolated and makes auth, deep-link, and rollback gates explicit", () => {
-  const operations = fs.readFileSync(path.join(repoRoot, "docs/operations.md"), "utf8");
-  const start = operations.indexOf("<!-- aifeeds-same-origin-api:start -->");
-  const end = operations.indexOf("<!-- aifeeds-same-origin-api:end -->");
-  assert.ok(start >= 0 && end > start, "same-origin API runbook section must be bounded");
-  const section = operations.slice(start, end);
-
-  for (const required of [
-    "当前未部署",
-    "xlist-dashboard-perf",
-    "perf-staging.ai-feeds.com",
-    "现有 staging 保持不变",
-    "独立明确审批",
-    "/api/auth/me",
-    "邮件验证码",
-    "SMS",
-    "favorite",
-    "subscription",
-    "feedback",
-    "/t/:id",
-    "/g/:owner/:repo",
-    "/ph/:slug/:date",
-    "/c/:slug",
-    "/e/:eventId",
-    "/h/:arxivId",
-    "/o/:id",
-    "/s/:token",
-    "/daily",
-    "/i/",
-    "Set-Cookie",
-    "Server-Timing",
-    "X-Request-Id",
-    "npm run deploy",
-    "保留 `/api/` route",
-  ]) {
-    assert.match(section, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), required);
-  }
-});
+// 注：原「operations runbook keeps perf staging isolated...」契约测试已随
+// docs/operations.md 一起移出公开仓（2026-08-30 安全清理，见 .gitignore 末段）。
+// 该文档含服务器登录坐标，不适合在公开仓追踪；runbook 内容契约改由本地校验。
 
 test("share and Worker media paths use the public base instead of request-base mirrors", () => {
   const app = fs.readFileSync(path.join(dashboardRoot, "src/App.tsx"), "utf8");

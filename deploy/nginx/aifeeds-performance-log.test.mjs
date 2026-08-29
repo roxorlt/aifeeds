@@ -42,7 +42,12 @@ const integration = existsSync(integrationPath) ? readFileSync(integrationPath, 
 const scenarioRunner = existsSync(scenarioRunnerPath) ? readFileSync(scenarioRunnerPath, 'utf8') : '';
 const service = existsSync(servicePath) ? readFileSync(servicePath, 'utf8') : '';
 const timer = existsSync(timerPath) ? readFileSync(timerPath, 'utf8') : '';
-const operations = readFileSync(operationsPath, 'utf8');
+const operations = existsSync(operationsPath) ? readFileSync(operationsPath, 'utf8') : '';
+
+// docs/operations.md 2026-08-30 起移出公开仓（含服务器登录坐标，见 .gitignore 末段），
+// 本地仍保留。文档在场时 runbook 契约照常校验；缺席时只跳过这三个 test，
+// 其余 nginx 配置/安装脚本断言不受影响。
+const runbookAbsent = operations === '' && 'docs/operations.md 不在工作区（公开仓不追踪），跳过 runbook 契约校验';
 
 const cJournalCleanupScenarios = Object.freeze([
   'journal-source-g-reentry',
@@ -298,7 +303,7 @@ test('probe validator accepts empty upstream timings only for cached front respo
   assert.notEqual(uncached.status, 0, 'uncached empty upstream timings must remain invalid');
 });
 
-test('runbook scopes installation to aifeeds sites and documents safe join and staging limits', () => {
+test('runbook scopes installation to aifeeds sites and documents safe join and staging limits', { skip: runbookAbsent }, () => {
   const runbook = performanceRunbook();
   assert.ok(runbook, 'performance log runbook markers must exist');
 
@@ -307,7 +312,6 @@ test('runbook scopes installation to aifeeds sites and documents safe join and s
     'staging.ai-feeds.com',
     'staging-api.ai-feeds.com',
     '不经过香港 VPS',
-    '~/.ssh/aifeeds-hk.pem',
     '/etc/nginx/conf.d/aifeeds-performance-log.conf',
     '/etc/nginx/sites-available/aifeeds.conf',
     'access_log /var/log/nginx/aifeeds-performance.jsonl aifeeds_performance buffer=64k flush=5s if=$aifeeds_performance_loggable;',
@@ -341,7 +345,7 @@ test('runbook scopes installation to aifeeds sites and documents safe join and s
   assert.match(runbook, /`www-data` 服务账号也可读/);
 });
 
-test('runbook rotates by reopening nginx and gives exact rollback files', () => {
+test('runbook rotates by reopening nginx and gives exact rollback files', { skip: runbookAbsent }, () => {
   const runbook = performanceRunbook();
 
   for (const required of [
@@ -1627,7 +1631,7 @@ test('pre-live automatic rollback seals an empty schema-2 terminal manifest befo
   );
 });
 
-test('GL-a runbook preserves failed transcripts and reconciles automatic rollback read-only', () => {
+test('GL-a runbook preserves failed transcripts and reconciles automatic rollback read-only', { skip: runbookAbsent }, () => {
   const runbook = performanceRunbook();
 
   for (const required of [
