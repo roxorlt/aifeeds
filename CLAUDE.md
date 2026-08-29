@@ -6,8 +6,8 @@
 > - **公网**：`https://ai-feeds.com`（前端）/ `https://api.ai-feeds.com`（worker）
 > - **CF 资源命名**（保留历史 `xlist-` 前缀，迁移成本太高）：worker = `xlist-api` / Pages = `xlist-dashboard` / D1 = `xlist`（staging 是 `xlist-staging`）
 > - **数据源现状（4 个）**：X 走 ScrapeBadger API / GitHub trending 走 GH API / Product Hunt 走 PH GraphQL API + worker cron / ClawHub 走 Convex
-> - **GitHub 私有仓**：`roxorlt/aifeeds`（备份用，CICD 待接）
-> - **Token 速查**：见 `docs/operations.md` § 4「运维 Token 速查」
+> - **GitHub 仓库**：`roxorlt/aifeeds` — **⚠️ 这是 PUBLIC 公开仓**（2026-05-10 创建起即公开；在此之前 CLAUDE.md 与仓库描述一直误记为「私有备份仓」，2026-08-30 更正）。推任何东西前默认「全世界都看得见」。
+> - **Token 速查**：见 `docs/operations.md` § 4「运维 Token 速查」（⚠️ 该文件 2026-08-30 起不再进 git，仅存本地；换机器/新协作方需另行私下同步）
 >
 > **🔐 Secret 管理（强制约定，2026-05-16 OPS 事故后统一改造）**：
 > - **唯一源**：本项目所有 secret 只在 2 个文件 — `.secrets/aifeeds-prod.env`（prod）/ `.secrets/aifeeds-staging.env`（staging）
@@ -20,7 +20,8 @@
 > - ❌ 不要假设 `~/.claude/skills/xlist-scraper/` 存在 — 那个 skill 已于 2026-05-10 删除（含本地目录 + GitHub 公开仓）。aifeeds 跟它没任何依赖关系，名字相似纯属历史巧合。
 > - ❌ 不要把任何 secret 值写到 docs / CLAUDE.md / 设计文档里 — 只引用文件路径（`.secrets/aifeeds-prod.env` / `.secrets/aifeeds-staging.env`）。所有 token 来源 + 再生方式见 operations.md § 3 / § 4。
 > - ❌ 不要新建散落 `.env` 文件存 secret（违反上方强制约定）；新增 secret 加到统一文件
-> - ❌ 不要在没 review diff 的情况下 push 到 GitHub — 私有仓也要防 secret 写错。
+> - ❌ 不要在没 review diff 的情况下 push 到 GitHub — **这是公开仓，推上去即公开**。
+> - ❌ **不要把运维/部署资料提交进仓库**（服务器 IP、SSH 用户名与密钥路径、机器规格与供应商、备案主体、各 endpoint 的鉴权方式）。这类内容 2026-08-30 已整体移出追踪，`.gitignore` 末段列了清单；本地照常读写，但**不要重新 `git add`**。文档里非写不可时用占位符（`${HK_VPS_IP}` / `${CN_RENDER_HOST}` / `${HK_SSH_KEY}` / `${CC_SSH_KEY}` / `${ICP_BEIAN_NO}` / `${GONGAN_BEIAN_NO}` / `${BEIAN_ENTITY}`），真值只留在本地。
 > - ❌ 不要混淆 prod 域名 `api.ai-feeds.com` 和 staging `staging-api.ai-feeds.com`。运维操作前确认目标环境。
 
 ---
