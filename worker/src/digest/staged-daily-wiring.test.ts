@@ -35,8 +35,17 @@ describe('staged daily worker wiring', () => {
 
   test('HK review proxy has a dedicated authenticated API route', () => {
     expect(indexSource).toContain("path === '/api/digest/daily-news-review'");
-    expect(indexSource).toContain('handleDailyNewsReviewApi(request, env)');
+    expect(indexSource).toContain('handleDailyNewsReviewApi(request, env, Date.now(), ctx)');
     expect(indexSource).toContain('DAILY_NEWS_REVIEW_SECRET');
+  });
+
+  test('R02 current-date review reconciliation runs independently on every existing five-minute scheduler tick', () => {
+    const scheduled = indexSource.slice(indexSource.indexOf('async scheduled('));
+    expect(scheduled).toContain('const reviewNow = Date.now()');
+    expect(scheduled).toContain('const reviewDate = bjtDateStr(reviewNow)');
+    expect(scheduled).toContain('reconcileDailyNewsReviewPublication(env, reviewDate, reviewNow)');
+    expect(scheduled).toContain("env.DAILY_NEWS_REVIEW_ENABLED === '1'");
+    expect(scheduled).toContain('ctx.waitUntil(');
   });
 
   test('rescore auto-repair pushes tag their origin from the frozen batch review state', () => {

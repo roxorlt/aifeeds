@@ -814,6 +814,20 @@ export async function markNewsReviewPublished(
   ).run();
 }
 
+export async function markNewsReviewPending(
+  env: Env,
+  date: string,
+  batchId: string,
+  selectionHash: string,
+  error = '',
+): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE daily_news_review_batches SET publish_status = 'pending', publish_error = ?, published_at = NULL
+     WHERE review_date = ? AND batch_id = ? AND selection_hash = ?
+       AND publish_status != 'published'`,
+  ).bind(error ? error.slice(0, 500) : null, date, batchId, selectionHash).run();
+}
+
 interface NewsReviewPoolMetaCandidate {
   id?: string;
   title?: string;

@@ -128,7 +128,7 @@ import { routeDigestCronWorkflows } from './digest/node-run';
 import { generateDailyPage, backfillDailyPages } from './digest/daily-page-run';
 import { backfillItemPages, generateItemPage } from './seo/item-page-run';
 import { checkDailyPageFreshness } from './digest/daily-page-monitor';
-import { handleDailyNewsReviewApi } from './digest/news-review-api';
+import { handleDailyNewsReviewApi, reconcileDailyNewsReviewPublication } from './digest/news-review-api';
 import { handleManualNewsLeadsApi } from './digest/manual-news-leads-api';
 import { freezeNewsReviewBatchFromPool, markNewsReviewPublished, notifyNewsReviewBatch } from './digest/news-review';
 import { isSeoPath, handleSeoRoute } from './seo-routes';
@@ -913,7 +913,7 @@ export default {
         return handleDailyVideoUpload(request, env);
       }
       if (path === '/api/digest/daily-news-review') {
-        return handleDailyNewsReviewApi(request, env);
+        return handleDailyNewsReviewApi(request, env, Date.now(), ctx);
       }
       if (path === '/api/digest/daily-news-leads' || path.startsWith('/api/digest/daily-news-leads/')) {
         return handleManualNewsLeadsApi(request, env, ctx);
@@ -2101,6 +2101,16 @@ export default {
         })
           .then(() => undefined)
           .catch((e) => console.error('[digest] node-run create fail', e)),
+      );
+    }
+    if (env.DAILY_STAGED_PUSH_ENABLED === '1'
+      && env.DAILY_PUSH_ENABLED === '1'
+      && env.DAILY_NEWS_REVIEW_ENABLED === '1') {
+      const reviewNow = Date.now();
+      const reviewDate = bjtDateStr(reviewNow);
+      ctx.waitUntil(
+        reconcileDailyNewsReviewPublication(env, reviewDate, reviewNow)
+          .catch((error) => console.error('[cron] daily review reconciliation failed:', error)),
       );
     }
 

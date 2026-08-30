@@ -5,14 +5,17 @@ import {
   getActiveNewsReviewBatch,
   getPublishedNewsReviewSelection,
   getNewsReviewBatch,
+  markNewsReviewPending,
   markNewsReviewPublished,
   newsReviewSecret,
   sanitizeCurrentNewsReviewBatch,
   submitNewsReviewSelection,
   verifyNewsReviewTokenSignature,
 } from './news-review';
-import { getDailyStageState, pushDailyStageToCodex } from './codex-push';
+import { buildStagedDailyCodexPayload, getDailyStageState, pushDailyStageToCodex } from './codex-push';
+import { safeDailyDeliveryError } from './daily-delivery-error';
 import { generateDailyPage } from './daily-page-run';
+import { bjtDateStr } from './lib';
 
 const MAX_REVIEW_BODY_BYTES = 8 * 1024;
 
@@ -63,10 +66,84 @@ function containsManualCandidate(batch: { candidates: Parameters<typeof isManual
   return batch.candidates.some(isManualCandidate);
 }
 
+function finalizeBindsEditorialTarget(
+  finalize: Awaited<ReturnType<typeof getDailyStageState>>,
+  editorial: Awaited<ReturnType<typeof getDailyStageState>>,
+): boolean {
+  const reference = finalize?.final_manifest?.stage_revisions.editorial;
+  return !!reference && !!editorial
+    && reference.revision === editorial.revision
+    && reference.content_hash === editorial.content_hash;
+}
+
+function editorialBindsActiveReview(
+  editorial: Awaited<ReturnType<typeof getDailyStageState>>,
+  batch: Awaited<ReturnType<typeof getActiveNewsReviewBatch>>,
+): boolean {
+  const snapshot = editorial?.snapshot?.meta?.news_review;
+  const selectedIds = batch?.applied_selected_ids;
+  return !!snapshot && !!batch?.selection_hash && !!selectedIds
+    && snapshot.batch_id === batch.batch_id
+    && snapshot.selection_hash === batch.selection_hash
+    && snapshot.selected_ids.length === selectedIds.length
+    && snapshot.selected_ids.every((id, index) => id === selectedIds[index]);
+}
+
+export async function reconcileDailyNewsReviewPublication(
+  env: Env,
+  date: string,
+  now = Date.now(),
+): Promise<Record<string, unknown>> {
+  if (date !== bjtDateStr(now)) return { ok: true, skipped: 'stale_date' };
+  const existing = await getActiveNewsReviewBatch(env, date);
+  if (!existing?.applied_selected_ids?.length || !existing.selection_hash) {
+    return { ok: true, skipped: 'no_pending_review' };
+  }
+  if (existing.publish_status === 'published') return { ok: true, skipped: 'already_published' };
+  const failPending = async (stage: string, error: string) => {
+    const concise = safeDailyDeliveryError(
+      error, [env.X_CARD_SHARED_TOKEN, env.DAILY_NEWS_REVIEW_SECRET], 500,
+    );
+    await markNewsReviewPending(env, date, existing.batch_id, existing.selection_hash!, concise);
+    return { ok: false, stage, error: concise };
+  };
+  let stage = 'sanitize';
+  try {
+    const sanitized = await sanitizeCurrentNewsReviewBatch(env, date, now);
+    const batch = sanitized.batch;
+    if (batch.batch_id !== existing.batch_id || batch.selection_hash !== existing.selection_hash
+      || !batch.applied_selected_ids?.length) {
+      return { ok: true, skipped: 'review_superseded' };
+    }
+    stage = 'editorial';
+    const editorial = await pushDailyStageToCodex(env, 'editorial', date, { origin: 'review' });
+    if (!editorial.ok) {
+      return failPending('editorial', editorial.error || editorial.skipped || 'editorial_push_failed');
+    }
+    stage = 'papers';
+    const papers = await getDailyStageState(env, date, 'papers');
+    if (!papers?.pushed_at) return { ok: true, pending: 'papers', editorial };
+    stage = 'finalize';
+    const finalize = await pushDailyStageToCodex(env, 'finalize', date, { origin: 'review' });
+    if (!finalize.ok) {
+      return failPending('finalize', finalize.error || finalize.skipped || 'finalize_push_failed');
+    }
+    stage = 'daily_page';
+    await generateDailyPage(env, date);
+    stage = 'publish';
+    await markNewsReviewPublished(env, date, batch.batch_id, batch.selection_hash!);
+    return { ok: true, published: true, editorial, finalize };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return failPending(stage, message);
+  }
+}
+
 export async function handleDailyNewsReviewApi(
   request: Request,
   env: Env,
   now = Date.now(),
+  ctx?: Pick<ExecutionContext, 'waitUntil'>,
 ): Promise<Response> {
   if (!authorized(request, env)) return response({ ok: false, error: 'unauthorized' }, 401);
   if (env.DAILY_NEWS_REVIEW_ENABLED !== undefined && env.DAILY_NEWS_REVIEW_ENABLED !== '1') {
@@ -130,12 +207,19 @@ export async function handleDailyNewsReviewApi(
         ])],
       };
     }
-    let [publishedSelectedIds, editorialState] = await Promise.all([
+    let [publishedSelectedIds, editorialState, finalizeState] = await Promise.all([
       getPublishedNewsReviewSelection(env, date, batch),
       batch.edit_revision > 0 && batch.applied_selected_ids?.length
         ? getDailyStageState(env, date, 'editorial')
         : Promise.resolve(null),
+      batch.edit_revision > 0 && batch.applied_selected_ids?.length
+        ? getDailyStageState(env, date, 'finalize')
+        : Promise.resolve(null),
     ]);
+    if (!requestedIsActive || !editorialBindsActiveReview(editorialState, active)) {
+      editorialState = null;
+      finalizeState = null;
+    } else if (!finalizeBindsEditorialTarget(finalizeState, editorialState)) finalizeState = null;
     const authorizationBatch = requestedIsActive ? active : requestedBatch;
     const outwardAuthorization = await authorizeNewsReviewBatchSnapshot(
       env, date, authorizationBatch, authorizationBatch.candidate_ids, 'review_api_final_projection',
@@ -184,12 +268,18 @@ export async function handleDailyNewsReviewApi(
       published_selected_ids: publishedSelectedIds,
       edit_revision: batch.edit_revision,
       publish_status: batch.publish_status,
-      publish_error: batch.publish_error,
+      publish_error: batch.publish_error
+        ? safeDailyDeliveryError(
+          batch.publish_error, [env.X_CARD_SHARED_TOKEN, env.DAILY_NEWS_REVIEW_SECRET], 500,
+        )
+        : batch.publish_error,
       generation_target: batch.edit_revision > 0 && batch.applied_selected_ids?.length
         ? {
           review_revision: batch.edit_revision,
           editorial_revision: editorialState?.revision || null,
           editorial_content_hash: editorialState?.content_hash || '',
+          finalize_revision: finalizeState?.revision || null,
+          finalize_content_hash: finalizeState?.content_hash || '',
         }
         : null,
       auto_repaired_invalid_ids: batch.auto_repaired_invalid_ids,
@@ -239,41 +329,37 @@ export async function handleDailyNewsReviewApi(
 
   const selectionHash = submitted.batch.selection_hash;
   if (!selectionHash) return response({ ok: false, error: 'selection_hash_missing' }, 409);
-  // 人审提交路径：内容就是这次人工确认的选题序列，来源恒为 review，
-  // 不依赖 D1 标记推断（推断失败也不能把人审推送降级成 auto）。
-  const editorial = await pushDailyStageToCodex(env, 'editorial', date, { origin: 'review' });
-  if (!editorial.ok) {
-    const error = editorial.error || editorial.skipped || 'editorial_push_failed';
-    await markNewsReviewPublished(env, date, batchId, selectionHash, error);
-    return response({ ok: false, error, stage: 'editorial' }, 502);
-  }
-
-  const papers = await getDailyStageState(env, date, 'papers');
-  let finalize: Awaited<ReturnType<typeof pushDailyStageToCodex>> | null = null;
-  if (papers?.pushed_at) {
-    finalize = await pushDailyStageToCodex(env, 'finalize', date, { origin: 'review' });
-    if (!finalize.ok) {
-      const error = finalize.error || finalize.skipped || 'finalize_push_failed';
-      await markNewsReviewPublished(env, date, batchId, selectionHash, error);
-      return response({ ok: false, error, stage: 'finalize', editorial }, 502);
-    }
-    await generateDailyPage(env, date);
-  }
-  await markNewsReviewPublished(env, date, batchId, selectionHash);
+  // Commit and prepare the deterministic editorial target before returning. Network delivery is owned by
+  // durable reconciliation (waitUntil + five-minute scheduler), never by the browser request lifetime.
+  const editorial = await buildStagedDailyCodexPayload(env, 'editorial', {
+    date, persistRevision: true, origin: 'review',
+  });
+  await markNewsReviewPending(env, date, batchId, selectionHash);
+  ctx?.waitUntil(
+    reconcileDailyNewsReviewPublication(env, date, now)
+      .catch((error) => console.error('[daily-news-review] immediate reconciliation failed', error)),
+  );
   return response({
     ok: true,
     changed: submitted.changed,
     regenerated: true,
     selected_ids: submitted.selected_ids,
-    editorial,
-    finalize,
-    finalize_pending: !papers?.pushed_at,
+    editorial: {
+      ok: true,
+      stage: editorial.stage,
+      revision: editorial.revision,
+      content_hash: editorial.content_hash,
+      render_key: editorial.render_key,
+    },
+    finalize: null,
+    finalize_pending: true,
     generation_target: {
       review_revision: submitted.batch.edit_revision,
-      editorial_revision: editorial.revision || null,
-      editorial_content_hash: editorial.content_hash || '',
-      finalize_revision: finalize?.revision || null,
-      codex_id: finalize?.codex_id || editorial.codex_id || '',
+      editorial_revision: editorial.revision,
+      editorial_content_hash: editorial.content_hash,
+      finalize_revision: null,
+      finalize_content_hash: '',
+      codex_id: '',
     },
-  }, papers?.pushed_at ? 200 : 202);
+  }, 202);
 }
