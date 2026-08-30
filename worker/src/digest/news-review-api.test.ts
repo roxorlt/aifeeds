@@ -12,6 +12,7 @@ vi.mock('./news-review', () => ({
   getAppliedNewsReviewSelection: vi.fn(),
   getPublishedNewsReviewSelection: vi.fn(),
   getNewsReviewBatch: vi.fn(),
+  markNewsReviewPending: vi.fn(),
   markNewsReviewPublished: vi.fn(),
   newsReviewSecret: vi.fn((env) => env.DAILY_NEWS_REVIEW_SECRET || ''),
   sanitizeCurrentNewsReviewBatch: vi.fn(),
@@ -19,23 +20,25 @@ vi.mock('./news-review', () => ({
   verifyNewsReviewTokenSignature: vi.fn(async () => true),
 }));
 vi.mock('./codex-push', () => ({
+  buildStagedDailyCodexPayload: vi.fn(),
   getDailyStageState: vi.fn(),
   pushDailyStageToCodex: vi.fn(),
 }));
 vi.mock('./daily-page-run', () => ({ generateDailyPage: vi.fn() }));
 vi.mock('./news-source-policy', () => ({ authorizeFormalNewsSet: vi.fn() }));
 
-import { handleDailyNewsReviewApi } from './news-review-api';
+import { handleDailyNewsReviewApi, reconcileDailyNewsReviewPublication } from './news-review-api';
 import {
   getActiveNewsReviewBatch,
   getAppliedNewsReviewSelection,
   getPublishedNewsReviewSelection,
   getNewsReviewBatch,
+  markNewsReviewPending,
   markNewsReviewPublished,
   sanitizeCurrentNewsReviewBatch,
   submitNewsReviewSelection,
 } from './news-review';
-import { getDailyStageState, pushDailyStageToCodex } from './codex-push';
+import { buildStagedDailyCodexPayload, getDailyStageState, pushDailyStageToCodex } from './codex-push';
 import { generateDailyPage } from './daily-page-run';
 import { authorizeFormalNewsSet } from './news-source-policy';
 
@@ -93,6 +96,13 @@ describe('daily news review API', () => {
       batch, changed: false, dropped_ids: [],
     } as never);
     vi.mocked(pushDailyStageToCodex).mockResolvedValue({ ok: true } as never);
+    vi.mocked(buildStagedDailyCodexPayload).mockResolvedValue({
+      protocol_version: 2, date: '2026-07-30', density: 'normal', batch_id: 'daily-2026-07-30-normal',
+      stage: 'editorial', revision: 7, content_hash: `sha256:${'a'.repeat(64)}`,
+      render_key: 'daily-2026-07-30-normal-editorial-r7-aaaaaaaa', expected_stages: [], title: '',
+      source: 'cloudflare-daily-staged', origin: 'review', digest: { meta: {}, sections: { normal: [] } },
+      final_manifest: null,
+    } as never);
     vi.mocked(generateDailyPage).mockResolvedValue({} as never);
     vi.mocked(authorizeFormalNewsSet).mockImplementation(async (_env, _date, ids) => ({
       allowed_ids: [...ids],
@@ -132,6 +142,51 @@ describe('daily news review API', () => {
       review_revision: 2,
       editorial_revision: 7,
       editorial_content_hash: `sha256:${'a'.repeat(64)}`,
+      finalize_revision: null,
+      finalize_content_hash: '',
+    });
+  });
+
+  test('GET exposes a finalize target only when its manifest binds the current editorial target', async () => {
+    const reviewedBatch = {
+      ...batch, applied_selected_ids: ['news-1'], selection_hash: 'selection-hash', edit_revision: 3,
+    };
+    vi.mocked(getNewsReviewBatch).mockResolvedValue(reviewedBatch as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({ batch: reviewedBatch, changed: false, dropped_ids: [] } as never);
+    vi.mocked(getDailyStageState).mockImplementation(async (_env, _date, stage) => stage === 'editorial'
+      ? { stage, revision: 4, content_hash: `sha256:${'a'.repeat(64)}`, pushed_at: 1 }
+      : {
+        stage, revision: 2, content_hash: `sha256:${'b'.repeat(64)}`, pushed_at: 2,
+        final_manifest: {
+          stage_revisions: {
+            foundation: { revision: 1, content_hash: `sha256:${'c'.repeat(64)}` },
+            editorial: { revision: 4, content_hash: `sha256:${'a'.repeat(64)}` },
+            papers: { revision: 1, content_hash: `sha256:${'d'.repeat(64)}` },
+          },
+          section_order: [], items: [], manifest_hash: `sha256:${'e'.repeat(64)}`,
+        },
+      } as never);
+
+    const bound = await handleDailyNewsReviewApi(request('GET'), env(), Date.parse('2026-07-30T08:00:00Z'));
+    await expect(bound.json()).resolves.toMatchObject({
+      generation_target: {
+        editorial_revision: 4,
+        finalize_revision: 2,
+        finalize_content_hash: `sha256:${'b'.repeat(64)}`,
+      },
+    });
+
+    vi.mocked(getDailyStageState).mockImplementation(async (_env, _date, stage) => stage === 'editorial'
+      ? { stage, revision: 5, content_hash: `sha256:${'f'.repeat(64)}`, pushed_at: 3 } as never
+      : {
+        stage, revision: 2, content_hash: `sha256:${'b'.repeat(64)}`, pushed_at: 2,
+        final_manifest: {
+          stage_revisions: { editorial: { revision: 4, content_hash: `sha256:${'a'.repeat(64)}` } },
+        },
+      } as never);
+    const stale = await handleDailyNewsReviewApi(request('GET'), env(), Date.parse('2026-07-30T08:00:00Z'));
+    await expect(stale.json()).resolves.toMatchObject({
+      generation_target: { editorial_revision: 5, finalize_revision: null, finalize_content_hash: '' },
     });
   });
 
@@ -325,7 +380,7 @@ describe('daily news review API', () => {
     expect(getActiveNewsReviewBatch).toHaveBeenCalledWith(expect.anything(), '2026-07-30');
   });
 
-  test('changed submission pushes editorial and finalizes only when papers are ready', async () => {
+  test('R02 changed submission durably prepares editorial, schedules reconciliation, and returns 202', async () => {
     const changedBatch = {
       ...batch,
       applied_selected_ids: ['news-6', 'news-2', 'news-7', 'news-1', 'news-5'],
@@ -336,40 +391,32 @@ describe('daily news review API', () => {
     vi.mocked(submitNewsReviewSelection).mockResolvedValue({
       ok: true, changed: true, retry_publish: true, batch: changedBatch, selected_ids: changedBatch.applied_selected_ids,
     } as never);
-    vi.mocked(getDailyStageState).mockResolvedValue({ stage: 'papers', revision: 3, pushed_at: 123 } as never);
-    vi.mocked(pushDailyStageToCodex).mockImplementation(async (_env, stage) => ({
-      ok: true,
-      stage,
-      revision: stage === 'editorial' ? 7 : 4,
-      content_hash: `sha256:${stage === 'editorial' ? 'a' : 'b'}`.padEnd(71, stage === 'editorial' ? 'a' : 'b'),
-      codex_id: 'daily-20260730',
-    }) as never);
+    let scheduled: Promise<unknown> | null = null;
+    const ctx = { waitUntil(task: Promise<unknown>) { scheduled = task; } };
 
     const response = await handleDailyNewsReviewApi(request('POST', {
       selected_ids: changedBatch.applied_selected_ids,
-    }), env(), Date.parse('2026-07-30T08:00:00Z'));
+    }), env(), Date.parse('2026-07-30T08:00:00Z'), ctx as never);
 
-    expect(response.status).toBe(200);
-    expect(vi.mocked(pushDailyStageToCodex).mock.calls.map((call) => call[1])).toEqual(['editorial', 'finalize']);
-    // HK 靠 origin 区分人审推送和自动推送；提交路径必须显式标 review，
-    // 不能依赖 D1 标记推断（推断退化时不许把人审降级成 auto）。
-    expect(vi.mocked(pushDailyStageToCodex).mock.calls.map((call) => call[3]))
-      .toEqual([{ origin: 'review' }, { origin: 'review' }]);
-    expect(generateDailyPage).toHaveBeenCalledWith(expect.anything(), '2026-07-30');
-    expect(markNewsReviewPublished).toHaveBeenCalledWith(
+    expect(response.status).toBe(202);
+    expect(buildStagedDailyCodexPayload).toHaveBeenCalledWith(expect.anything(), 'editorial', {
+      date: '2026-07-30', persistRevision: true, origin: 'review',
+    });
+    expect(markNewsReviewPending).toHaveBeenCalledWith(
       expect.anything(), '2026-07-30', batch.batch_id, 'selection-hash',
     );
+    expect(scheduled).not.toBeNull();
     await expect(response.clone().json()).resolves.toMatchObject({
       generation_target: {
         review_revision: 1,
         editorial_revision: 7,
-        finalize_revision: 4,
-        codex_id: 'daily-20260730',
+        editorial_content_hash: `sha256:${'a'.repeat(64)}`,
+        finalize_revision: null,
       },
     });
   });
 
-  test('manual API publish fails closed when a proof expires after editorial push but before finalize', async () => {
+  test('POST leaves downstream proof revalidation to durable reconciliation', async () => {
     const changedBatch = {
       ...batch,
       applied_selected_ids: ['news-6', 'news-2'],
@@ -384,23 +431,15 @@ describe('daily news review API', () => {
     vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
       batch: changedBatch, changed: false, dropped_ids: [],
     } as never);
-    vi.mocked(getDailyStageState).mockResolvedValue({ stage: 'papers', revision: 3, pushed_at: 123 } as never);
-    vi.mocked(pushDailyStageToCodex)
-      .mockResolvedValueOnce({ ok: true, stage: 'editorial', revision: 7, content_hash: `sha256:${'a'.repeat(64)}` } as never)
-      .mockResolvedValueOnce({ ok: false, stage: 'finalize', error: 'manual_news_finalize_snapshot_stale' } as never);
-
     const response = await handleDailyNewsReviewApi(request('POST', {
       selected_ids: changedBatch.applied_selected_ids,
     }), env(), Date.parse('2026-07-30T08:00:00Z'));
 
-    expect(response.status).toBe(502);
-    await expect(response.json()).resolves.toMatchObject({
-      ok: false, stage: 'finalize', error: 'manual_news_finalize_snapshot_stale',
-    });
-    expect(markNewsReviewPublished).toHaveBeenCalledWith(
+    expect(response.status).toBe(202);
+    expect(markNewsReviewPending).toHaveBeenCalledWith(
       expect.anything(), '2026-07-30', batch.batch_id, 'selection-hash-stale-finalize',
-      'manual_news_finalize_snapshot_stale',
     );
+    expect(pushDailyStageToCodex).not.toHaveBeenCalled();
     expect(generateDailyPage).not.toHaveBeenCalled();
   });
 
@@ -454,5 +493,106 @@ describe('daily news review API', () => {
     expect(payload.changed).toBe(false);
     expect(pushDailyStageToCodex).not.toHaveBeenCalled();
     expect(generateDailyPage).not.toHaveBeenCalled();
+  });
+
+  test('R12 unchanged explicit retry re-arms pending reconciliation without changing review revision', async () => {
+    const retryBatch = {
+      ...batch, applied_selected_ids: batch.default_selected_ids, selection_hash: 'selection-hash',
+      edit_revision: 3, publish_status: 'pending', publish_error: 'network: lost response',
+    };
+    vi.mocked(submitNewsReviewSelection).mockResolvedValue({
+      ok: true, changed: false, retry_publish: true, batch: retryBatch,
+      selected_ids: retryBatch.applied_selected_ids,
+    } as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({ batch: retryBatch, changed: false, dropped_ids: [] } as never);
+    let scheduled: Promise<unknown> | null = null;
+    const response = await handleDailyNewsReviewApi(request('POST', {
+      selected_ids: retryBatch.applied_selected_ids,
+    }), env(), Date.parse('2026-07-30T08:00:00Z'), {
+      waitUntil(task: Promise<unknown>) { scheduled = task; },
+    } as never);
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({ changed: false, generation_target: { review_revision: 3 } });
+    expect(markNewsReviewPending).toHaveBeenCalledWith(
+      expect.anything(), '2026-07-30', retryBatch.batch_id, retryBatch.selection_hash,
+    );
+    expect(scheduled).not.toBeNull();
+  });
+
+  test('R01 R06 reconciler replays editorial but waits for papers acknowledgement before finalize', async () => {
+    const pending = {
+      ...batch, applied_selected_ids: batch.default_selected_ids, selection_hash: 'selection-hash',
+      edit_revision: 3, publish_status: 'pending',
+    };
+    vi.mocked(getActiveNewsReviewBatch).mockResolvedValue(pending as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({ batch: pending, changed: false, dropped_ids: [] } as never);
+    vi.mocked(pushDailyStageToCodex).mockResolvedValue({
+      ok: true, stage: 'editorial', revision: 4, content_hash: `sha256:${'a'.repeat(64)}`,
+    } as never);
+    vi.mocked(getDailyStageState).mockResolvedValue(null);
+
+    const result = await reconcileDailyNewsReviewPublication(
+      env(), '2026-07-30', Date.parse('2026-07-30T08:00:00Z'),
+    );
+
+    expect(result).toMatchObject({ ok: true, pending: 'papers' });
+    expect(pushDailyStageToCodex).toHaveBeenCalledTimes(1);
+    expect(pushDailyStageToCodex).toHaveBeenCalledWith(expect.anything(), 'editorial', '2026-07-30', { origin: 'review' });
+    expect(markNewsReviewPublished).not.toHaveBeenCalled();
+  });
+
+  test('R07 exact deterministic reconciliation converges through finalize and marks only the exact batch published', async () => {
+    const pending = {
+      ...batch, applied_selected_ids: batch.default_selected_ids, selection_hash: 'selection-hash',
+      edit_revision: 3, publish_status: 'pending',
+    };
+    vi.mocked(getActiveNewsReviewBatch).mockResolvedValue(pending as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({ batch: pending, changed: false, dropped_ids: [] } as never);
+    vi.mocked(getDailyStageState).mockResolvedValue({ stage: 'papers', revision: 1, pushed_at: 123 } as never);
+    vi.mocked(pushDailyStageToCodex).mockImplementation(async (_env, stage) => ({
+      ok: true, stage, revision: stage === 'editorial' ? 4 : 2,
+      content_hash: `sha256:${(stage === 'editorial' ? 'a' : 'b').repeat(64)}`,
+    }) as never);
+
+    const result = await reconcileDailyNewsReviewPublication(
+      env(), '2026-07-30', Date.parse('2026-07-30T08:00:00Z'),
+    );
+
+    expect(result).toMatchObject({ ok: true, published: true, finalize: { revision: 2 } });
+    expect(vi.mocked(pushDailyStageToCodex).mock.calls.map((call) => call[1])).toEqual(['editorial', 'finalize']);
+    expect(generateDailyPage).toHaveBeenCalledWith(expect.anything(), '2026-07-30');
+    expect(markNewsReviewPublished).toHaveBeenCalledWith(
+      expect.anything(), '2026-07-30', pending.batch_id, pending.selection_hash,
+    );
+  });
+
+  test('G03 reconciler is bounded to the current BJT date', async () => {
+    const result = await reconcileDailyNewsReviewPublication(
+      env(), '2026-07-29', Date.parse('2026-07-30T08:00:00Z'),
+    );
+    expect(result).toEqual({ ok: true, skipped: 'stale_date' });
+    expect(pushDailyStageToCodex).not.toHaveBeenCalled();
+    expect(generateDailyPage).not.toHaveBeenCalled();
+  });
+
+  test('G04 reconciliation guard failure stays pending and records a concise error', async () => {
+    const pending = {
+      ...batch, applied_selected_ids: batch.default_selected_ids, selection_hash: 'selection-hash',
+      edit_revision: 3, publish_status: 'pending',
+    };
+    vi.mocked(getActiveNewsReviewBatch).mockResolvedValue(pending as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({ batch: pending, changed: false, dropped_ids: [] } as never);
+    vi.mocked(pushDailyStageToCodex).mockResolvedValue({ ok: false, stage: 'editorial', error: 'formal_guard_failed' } as never);
+
+    const result = await reconcileDailyNewsReviewPublication(
+      env(), '2026-07-30', Date.parse('2026-07-30T08:00:00Z'),
+    );
+
+    expect(result).toMatchObject({ ok: false, stage: 'editorial', error: 'formal_guard_failed' });
+    expect(markNewsReviewPending).toHaveBeenCalledWith(
+      expect.anything(), '2026-07-30', pending.batch_id, pending.selection_hash, 'formal_guard_failed',
+    );
+    expect(markNewsReviewPublished).not.toHaveBeenCalled();
   });
 });

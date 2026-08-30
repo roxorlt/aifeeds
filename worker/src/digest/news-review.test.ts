@@ -21,6 +21,7 @@ import {
   freezeNewsReviewBatchFromPool,
   getAppliedNewsReviewSelection,
   getPublishedNewsReviewSelection,
+  markNewsReviewPending,
   repairInvalidNewsReviewSelection,
   validateNewsReviewSelection,
   verifyNewsReviewToken,
@@ -35,6 +36,23 @@ const candidates = Array.from({ length: 10 }, (_, index) => ({
 }));
 
 describe('daily news review contract', () => {
+  test('R07 a late failed reconciler cannot demote an exact batch that another reconciler published', async () => {
+    let sql = '';
+    const env = {
+      DB: {
+        prepare(statement: string) {
+          sql = statement;
+          const query = { bind() { return query; }, async run() { return { success: true }; } };
+          return query;
+        },
+      },
+    } as never;
+
+    await markNewsReviewPending(env, '2026-07-30', 'nr-20260730-abcdef123456', 'selection-hash', 'lost response');
+
+    expect(sql).toMatch(/publish_status\s*!=\s*'published'/);
+  });
+
   test('batch id is stable for an immutable snapshot and changes when order or copy changes', async () => {
     const first = await buildNewsReviewBatchId('2026-07-30', candidates);
     const identical = await buildNewsReviewBatchId('2026-07-30', structuredClone(candidates));

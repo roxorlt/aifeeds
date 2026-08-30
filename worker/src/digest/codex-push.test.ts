@@ -135,6 +135,23 @@ function makeEnv() {
   };
 }
 
+function exactReceiptResponse(_input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const payload = JSON.parse(String(init?.body || '{}')) as {
+    date: string; batch_id: string; stage: string; revision: number; content_hash: string; render_key: string;
+  };
+  return Promise.resolve(new Response(JSON.stringify({
+    id: 'stage-1', status: 'queued',
+    receipt: {
+      date: payload.date,
+      batch_id: payload.batch_id,
+      stage: payload.stage,
+      revision: payload.revision,
+      content_hash: payload.content_hash,
+      render_key: payload.render_key,
+    },
+  }), { status: 202, headers: { 'content-type': 'application/json' } }));
+}
+
 beforeEach(() => {
   vi.mocked(authorizeFormalNewsSet).mockImplementation(async (_env, _date, ids) => ({
     allowed_ids: [...ids],
@@ -549,10 +566,7 @@ describe('daily Codex payload v2', () => {
     Object.assign(env as object, {
       DAILY_PUSH_STAGING_ENDPOINT: 'https://staging-render.example.test/aifeeds/api/daily/ingest',
     });
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
-      JSON.stringify({ id: 'stage-1', status: 'queued' }),
-      { status: 202, headers: { 'content-type': 'application/json' } },
-    ));
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(exactReceiptResponse);
     const pushed = await pushDailyStageToCodex(env, 'foundation', '2026-07-21');
 
     expect(pushed).toMatchObject({ ok: true, stage: 'foundation', revision: 1 });
@@ -561,6 +575,52 @@ describe('daily Codex payload v2', () => {
       expect.objectContaining({ method: 'POST' }),
     );
     expect((await getDailyStageState(env, '2026-07-21', 'foundation'))?.pushed_at).toEqual(expect.any(Number));
+  });
+
+  test('R05 rejects a non-exact HK receipt and leaves the stage unacknowledged', async () => {
+    const { env, setPool } = makeEnv();
+    seedAll(setPool);
+    Object.assign(env as object, {
+      API_BASE: 'https://staging-api.ai-feeds.com',
+      X_CARD_SHARED_TOKEN: 'test-token',
+      DAILY_PUSH_STAGING_ENDPOINT: 'https://staging-render.example.test/aifeeds/api/daily/ingest',
+    });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      receipt: {
+        date: '2026-07-21', batch_id: 'daily-2026-07-21-normal', stage: 'foundation', revision: 1,
+        content_hash: `sha256:${'f'.repeat(64)}`, render_key: 'wrong-render-key',
+      },
+    }), { status: 202, headers: { 'content-type': 'application/json' } }));
+
+    const result = await pushDailyStageToCodex(env, 'foundation', '2026-07-21');
+
+    expect(result).toMatchObject({ ok: false, stage: 'foundation', error: 'receipt_mismatch' });
+    const pending = await getDailyStageState(env, '2026-07-21', 'foundation');
+    expect(pending?.pushed_at).toBeUndefined();
+    expect(pending).toMatchObject({ attempt_count: 1, last_error: 'receipt_mismatch' });
+  });
+
+  test('R01 a lost HK response replays the exact identity and records the eventual exact receipt', async () => {
+    const { env, setPool } = makeEnv();
+    seedAll(setPool);
+    Object.assign(env as object, {
+      API_BASE: 'https://staging-api.ai-feeds.com',
+      X_CARD_SHARED_TOKEN: 'test-token',
+      DAILY_PUSH_STAGING_ENDPOINT: 'https://staging-render.example.test/aifeeds/api/daily/ingest',
+    });
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockRejectedValueOnce(new Error('response_lost'))
+      .mockImplementationOnce(exactReceiptResponse);
+
+    const result = await pushDailyStageToCodex(env, 'editorial', '2026-07-21', { origin: 'review' });
+
+    expect(result).toMatchObject({ ok: true, stage: 'editorial', revision: 1 });
+    const identities = fetchMock.mock.calls.map((call) => {
+      const payload = JSON.parse(String(call[1]?.body));
+      return [payload.date, payload.batch_id, payload.stage, payload.revision, payload.content_hash, payload.render_key];
+    });
+    expect(identities[1]).toEqual(identities[0]);
+    expect((await getDailyStageState(env, '2026-07-21', 'editorial'))?.pushed_at).toEqual(expect.any(Number));
   });
 
   test('does not push finalize until all three input stages have successful push markers', async () => {
@@ -780,10 +840,7 @@ describe('staged push origin contract', () => {
 
   test('sends origin on the wire and reports it back to the ops caller', async () => {
     const { env } = pushableEnv();
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
-      JSON.stringify({ id: 'stage-1', status: 'queued' }),
-      { status: 202, headers: { 'content-type': 'application/json' } },
-    ));
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(exactReceiptResponse);
 
     const reviewed = await pushDailyStageToCodex(env, 'editorial', date, { origin: 'review' });
     const reviewedBody = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));

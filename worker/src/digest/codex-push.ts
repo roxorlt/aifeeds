@@ -234,6 +234,10 @@ export interface DailyStageState {
   revision: number;
   content_hash: string;
   pushed_at?: number;
+  attempt_count?: number;
+  last_attempt_at?: number;
+  last_error?: string;
+  final_manifest?: DailyFinalManifest;
   // Immutable payload snapshot selected for this revision. The shared
   // digest_pool rows remain live and can be rebuilt by later jobs, so the
   // 08:00 final manifest must never reconstruct a locked stage from them.
@@ -311,6 +315,12 @@ function parseStageState(raw: string | null | undefined, stage: DailyCodexStage)
       revision: Number(value.revision),
       content_hash: value.content_hash,
       ...(typeof value.pushed_at === 'number' ? { pushed_at: value.pushed_at } : {}),
+      ...(typeof value.attempt_count === 'number' ? { attempt_count: Math.min(999, Math.max(0, value.attempt_count)) } : {}),
+      ...(typeof value.last_attempt_at === 'number' ? { last_attempt_at: value.last_attempt_at } : {}),
+      ...(typeof value.last_error === 'string' ? { last_error: value.last_error.slice(0, 200) } : {}),
+      ...(value.final_manifest && typeof value.final_manifest === 'object'
+        ? { final_manifest: value.final_manifest as DailyFinalManifest }
+        : {}),
       ...(value.snapshot && typeof value.snapshot === 'object'
         ? { snapshot: value.snapshot as DailyCodexPayload['digest'] }
         : {}),
@@ -362,7 +372,23 @@ async function markDailyStagePushed(
   if (!current || current.revision !== revision || current.content_hash !== contentHash) {
     throw new Error(`stage_state_changed_during_push:${stage}`);
   }
-  await persistDailyStageState(env, date, { ...current, pushed_at: Date.now() });
+  await persistDailyStageState(env, date, { ...current, pushed_at: Date.now(), last_error: '' });
+}
+
+async function recordDailyStageAttempt(
+  env: Env,
+  date: string,
+  stage: DailyCodexStage,
+  error = '',
+): Promise<void> {
+  const current = await getDailyStageState(env, date, stage);
+  if (!current) return;
+  await persistDailyStageState(env, date, {
+    ...current,
+    attempt_count: Math.min(999, Number(current.attempt_count || 0) + 1),
+    last_attempt_at: Date.now(),
+    last_error: error.slice(0, 200),
+  });
 }
 
 async function buildCodexSections(
@@ -603,6 +629,10 @@ export async function buildStagedDailyCodexPayload(
       revision,
       content_hash: contentHash,
       ...(previous?.content_hash === contentHash && previous.pushed_at ? { pushed_at: previous.pushed_at } : {}),
+      ...(previous?.content_hash === contentHash && previous.attempt_count ? { attempt_count: previous.attempt_count } : {}),
+      ...(previous?.content_hash === contentHash && previous.last_attempt_at ? { last_attempt_at: previous.last_attempt_at } : {}),
+      ...(previous?.content_hash === contentHash && previous.last_error ? { last_error: previous.last_error } : {}),
+      ...(finalManifest ? { final_manifest: finalManifest } : {}),
       snapshot: digest,
     });
   }
@@ -636,6 +666,26 @@ export interface DailyPushResult {
   content_hash?: string;
   origin?: DailyPushOrigin;
   error?: string;
+}
+
+interface StagedIngestReceipt {
+  date: string;
+  batch_id: string;
+  stage: DailyCodexStage;
+  revision: number;
+  content_hash: string;
+  render_key: string;
+}
+
+function exactStagedReceipt(payload: StagedDailyCodexPayload, receipt: unknown): receipt is StagedIngestReceipt {
+  if (!receipt || typeof receipt !== 'object') return false;
+  const value = receipt as Partial<StagedIngestReceipt>;
+  return value.date === payload.date
+    && value.batch_id === payload.batch_id
+    && value.stage === payload.stage
+    && Number(value.revision) === payload.revision
+    && value.content_hash === payload.content_hash
+    && value.render_key === payload.render_key;
 }
 
 function stagedDailyEndpoint(env: Env): string | null {
@@ -745,6 +795,7 @@ export async function pushDailyStageToCodex(
     const message = raw.includes('empty_stage:') || raw.includes('stale_editorial_')
       ? raw
       : `network: ${raw}`;
+    await recordDailyStageAttempt(env, dateOverride || bjtDateStr(), stage, message).catch(() => {});
     await pushDeerAlert(env, '分批日报推 Codex 失败', `${stage}: ${message}`).catch(() => {});
     return { ok: false, stage, error: message };
   }
@@ -753,6 +804,7 @@ export async function pushDailyStageToCodex(
   if (!response.ok) {
     const text = (await response.text().catch(() => '')).slice(0, 200);
     const error = `http_${response.status}: ${text}`;
+    await recordDailyStageAttempt(env, payload.date, stage, error).catch(() => {});
     await pushDeerAlert(env, '分批日报推 Codex 失败', `${payload.render_key}: ${error}`).catch(() => {});
     return {
       ok: false, stage, revision: payload.revision, content_hash: payload.content_hash,
@@ -760,17 +812,29 @@ export async function pushDailyStageToCodex(
     };
   }
 
+  const data = (await response.json().catch(() => ({}))) as {
+    id?: string; status?: string; receipt?: unknown;
+  };
+  if (!exactStagedReceipt(payload, data.receipt)) {
+    await recordDailyStageAttempt(env, payload.date, stage, 'receipt_mismatch').catch(() => {});
+    return {
+      ok: false, stage, revision: payload.revision, content_hash: payload.content_hash,
+      render_key: payload.render_key, total_items: total, error: 'receipt_mismatch',
+    };
+  }
+
   try {
+    await recordDailyStageAttempt(env, payload.date, stage);
     await markDailyStagePushed(env, payload.date, stage, payload.revision, payload.content_hash);
   } catch (error) {
     const message = String(error).slice(0, 200);
+    await recordDailyStageAttempt(env, payload.date, stage, message).catch(() => {});
     await pushDeerAlert(env, '分批日报状态落库失败', `${payload.render_key}: ${message}`).catch(() => {});
     return {
       ok: false, stage, revision: payload.revision, content_hash: payload.content_hash,
       render_key: payload.render_key, total_items: total, error: message,
     };
   }
-  const data = (await response.json().catch(() => ({}))) as { id?: string; status?: string };
   console.log(
     `[daily-codex-stage] ${payload.render_key} origin=${payload.origin} items=${total}`
     + ` → id=${data.id} status=${data.status}`,
