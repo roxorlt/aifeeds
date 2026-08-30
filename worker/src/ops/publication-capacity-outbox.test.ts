@@ -6,6 +6,7 @@ import { describe, expect, test } from 'vitest';
 import {
   activatePublicationCapacityBudget,
   buildPublicationCapacityWarningEvent,
+  derivePublicationCapacityActivationAuditId,
   drainPublicationCapacityWarningOutbox,
   increasePublicationCapacityBudget,
   producePublicationCapacityWarnings,
@@ -82,15 +83,48 @@ function capacityDb(
   return { sqlite, DB: sqliteD1(sqlite, hooks) as unknown as D1Database, hooks };
 }
 
-async function activate(DB: D1Database, baseline: number, nowMs = 10) {
-  return activatePublicationCapacityBudget({ DB } as never, {
-    audit_id: `activate-${nowMs}`,
+async function activationInput(
+  baseline: number,
+  nowMs = 10,
+  oldSnapshotOverrides: Record<string, unknown> = {},
+) {
+  const immutable = {
     legacy_baseline_bytes: baseline,
     inventory_digest: 'a'.repeat(64),
     inventory_object_count: 3,
     inventory_at_ms: nowMs,
     actor: 'test-operator', reason: 'audited fixture', ticket_ref: 'TEST-42', now_ms: nowMs,
-  });
+    old_budget_snapshot: {
+      singleton_id: 1,
+      namespace: 'daily-publications-v1',
+      budget_bytes: 10_000,
+      legacy_baseline_bytes: 0,
+      reserved_bytes: 0,
+      version: 0,
+      state: 'uninitialized',
+      legacy_inventory_digest: null,
+      legacy_inventory_object_count: null,
+      legacy_inventory_at_ms: null,
+      updated_at_ms: 0,
+      ...oldSnapshotOverrides,
+    },
+  };
+  return {
+    audit_id: await derivePublicationCapacityActivationAuditId(immutable as never),
+    ...immutable,
+  };
+}
+
+async function activate(
+  DB: D1Database,
+  baseline: number,
+  nowMs = 10,
+  oldSnapshotOverrides: Record<string, unknown> = {},
+) {
+  return activatePublicationCapacityBudget(
+    { DB } as never,
+    await activationInput(baseline, nowMs, oldSnapshotOverrides) as never,
+  );
 }
 
 function reserveCapacityBytes(sqlite: DatabaseSync, slot: number, bytes: number, nowMs: number): void {
@@ -202,6 +236,86 @@ describe('publication capacity warning outbox', () => {
       GROUP BY action ORDER BY action`).all()).toEqual([
       { action: 'activate_inventory', count: 1 }, { action: 'increase_budget', count: 1 },
     ]);
+  });
+
+  test('activation rejects a stale authoritative old snapshot before creating an audit', async () => {
+    for (const stale of [
+      { budget_bytes: 9_999 },
+      { updated_at_ms: 1 },
+    ]) {
+      const { sqlite, DB } = capacityDb();
+      await expect(activate(DB, 1_000, 10, stale))
+        .rejects.toThrow('PUBLICATION_CAPACITY_ACTIVATION_STALE');
+      expect(sqlite.prepare(`SELECT COUNT(*) count FROM publication_budget_audit`).get())
+        .toEqual({ count: 0 });
+      expect(sqlite.prepare(`SELECT state,version FROM publication_storage_budget`).get())
+        .toEqual({ state: 'uninitialized', version: 0 });
+    }
+  });
+
+  test('same activation audit ID with only old snapshot updated_at drift fails closed', async () => {
+    const { DB } = capacityDb();
+    const input = await activationInput(1_000);
+    expect(input.audit_id).toBe('a3b98a025115034292fce1077e3957eb5f8bad7bbb5fcfdebb0eaa28a88f7aa6');
+    await expect(activatePublicationCapacityBudget({ DB } as never, input as never))
+      .resolves.toMatchObject({ status: 'activated' });
+
+    await expect(activatePublicationCapacityBudget({ DB } as never, {
+      ...input,
+      old_budget_snapshot: {
+        ...input.old_budget_snapshot,
+        updated_at_ms: input.old_budget_snapshot.updated_at_ms + 1,
+      },
+    } as never)).rejects.toThrow('PUBLICATION_CAPACITY_AUDIT_ID_INVALID');
+  });
+
+  test('activation replay rejects every mismatch in the immutable audit tuple', async () => {
+    const mutations = [
+      `action='freeze'`,
+      `old_budget_bytes=old_budget_bytes-1`,
+      `new_budget_bytes=new_budget_bytes+1`,
+      `old_occupied_bytes=old_occupied_bytes+1`,
+      `new_occupied_bytes=new_occupied_bytes+1`,
+      `inventory_digest='${'b'.repeat(64)}'`,
+      `actor='different-operator'`,
+      `reason='different reason'`,
+      `ticket_ref='DIFFERENT-42'`,
+      `created_at_ms=created_at_ms+1`,
+    ];
+    for (const mutation of mutations) {
+      const { sqlite, DB } = capacityDb();
+      await activate(DB, 1_000);
+      sqlite.exec(`UPDATE publication_budget_audit SET ${mutation} WHERE action='activate_inventory'`);
+
+      await expect(activate(DB, 1_000))
+        .rejects.toThrow('PUBLICATION_CAPACITY_ACTIVATION_STALE');
+      expect(sqlite.prepare(`SELECT COUNT(*) count FROM publication_budget_audit`).get())
+        .toEqual({ count: 1 });
+    }
+  });
+
+  test('activation replay requires control to remain an exact projection of the final budget', async () => {
+    const { sqlite, DB } = capacityDb();
+    await activate(DB, 1_000);
+    sqlite.exec(`UPDATE publication_capacity_warning_control
+      SET budget_bytes_snapshot=budget_bytes_snapshot+1`);
+
+    await expect(activate(DB, 1_000))
+      .rejects.toThrow('PUBLICATION_CAPACITY_ACTIVATION_STALE');
+  });
+
+  test('unknown committed activation response reconciles exactly without a second audit', async () => {
+    const fixture = capacityDb();
+    fixture.hooks.batchOutcome = 'throw_after';
+
+    await expect(activate(fixture.DB, 1_000)).resolves.toMatchObject({
+      status: 'replayed', epoch: 1, budget_version: 1,
+    });
+    await expect(activate(fixture.DB, 1_000)).resolves.toMatchObject({
+      status: 'replayed', epoch: 1, budget_version: 1,
+    });
+    expect(fixture.sqlite.prepare(`SELECT COUNT(*) count FROM publication_budget_audit`).get())
+      .toEqual({ count: 1 });
   });
 
   test('unknown committed budget increase replays after one or more legal reservation descendants', async () => {
