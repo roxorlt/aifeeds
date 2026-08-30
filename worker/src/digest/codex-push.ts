@@ -18,9 +18,11 @@ import {
   type VerifiedNewsReviewSelectionSnapshot,
 } from './news-review';
 import { authorizeFormalNewsSet } from './news-source-policy';
+import { safeDailyDeliveryError } from './daily-delivery-error';
 
 const DEFAULT_DAILY_ENDPOINT = 'https://ai-feeds.cc/aifeeds/api/daily/ingest';
 const PUSH_TIMEOUT_MS = 30_000;
+const STAGE_STATE_CAS_MAX_ATTEMPTS = 3;
 // Codex 渲这几源(X/clawhub 暂不打包,等模板扩展)。
 // news(行业新闻)推送由 env.NEWS_CODEX_PUSH 门控:默认关,等下游 Codex 适配好 news 板块再开
 // (prod 设 NEWS_CODEX_PUSH=1 即生效,无需改码 / 重部署)。
@@ -335,30 +337,63 @@ export async function getDailyStageState(
   date: string,
   stage: DailyCodexStage,
 ): Promise<DailyStageState | null> {
+  return (await observeDailyStageState(env, date, stage)).state;
+}
+
+interface DailyStageStateObservation {
+  exists: boolean;
+  raw: string | null;
+  state: DailyStageState | null;
+}
+
+async function observeDailyStageState(
+  env: Env,
+  date: string,
+  stage: DailyCodexStage,
+): Promise<DailyStageStateObservation> {
   const row = await env.DB.prepare(
     `SELECT items_meta FROM digest_pool WHERE slot_key = ? AND source = ? AND density = ?`,
   )
     .bind(`${date}-08`, stageStateSource(stage), 'meta')
     .first<{ items_meta: string | null }>();
-  return parseStageState(row?.items_meta, stage);
+  if (!row) return { exists: false, raw: null, state: null };
+  return { exists: true, raw: row.items_meta, state: parseStageState(row.items_meta, stage) };
 }
 
-async function persistDailyStageState(env: Env, date: string, state: DailyStageState): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO digest_pool (slot_key, source, density, item_ids, items_meta, generated_at)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(slot_key, source, density) DO UPDATE SET
-       item_ids = excluded.item_ids, items_meta = excluded.items_meta, generated_at = excluded.generated_at`,
-  )
-    .bind(
+async function persistDailyStageState(
+  env: Env,
+  date: string,
+  state: DailyStageState,
+  observed: DailyStageStateObservation,
+): Promise<boolean> {
+  const generatedAt = Date.now();
+  const serialized = JSON.stringify(state);
+  const result = observed.exists
+    ? await env.DB.prepare(
+      `UPDATE digest_pool SET item_ids = ?, items_meta = ?, generated_at = ?
+       WHERE slot_key = ? AND source = ? AND density = ? AND items_meta IS ?`,
+    ).bind(
+      '[]',
+      serialized,
+      generatedAt,
+      `${date}-08`,
+      stageStateSource(state.stage),
+      'meta',
+      observed.raw,
+    ).run()
+    : await env.DB.prepare(
+      `INSERT INTO digest_pool (slot_key, source, density, item_ids, items_meta, generated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(slot_key, source, density) DO NOTHING`,
+    ).bind(
       `${date}-08`,
       stageStateSource(state.stage),
       'meta',
       '[]',
-      JSON.stringify(state),
-      Date.now(),
-    )
-    .run();
+      serialized,
+      generatedAt,
+    ).run();
+  return Number(result.meta?.changes || 0) === 1;
 }
 
 async function markDailyStagePushed(
@@ -400,6 +435,9 @@ async function recordDailyStageAttempt(
   error = '',
 ): Promise<void> {
   const attemptedAt = Date.now();
+  const safeError = error
+    ? safeDailyDeliveryError(error, [env.X_CARD_SHARED_TOKEN, env.DAILY_NEWS_REVIEW_SECRET], 200)
+    : '';
   await env.DB.prepare(
     `UPDATE digest_pool SET
        items_meta = json_set(
@@ -416,7 +454,7 @@ async function recordDailyStageAttempt(
        AND json_extract(items_meta, '$.content_hash') = ?`,
   ).bind(
     attemptedAt,
-    error.slice(0, 200),
+    safeError,
     attemptedAt,
     `${date}-08`,
     stageStateSource(stage),
@@ -622,45 +660,65 @@ export async function buildStagedDailyCodexPayload(
 ): Promise<StagedDailyCodexPayload> {
   const date = opts.date || bjtDateStr();
   const sources = sourcesForStage(stage);
-  const newsReviewSnapshot = stage === 'editorial'
-    ? await getVerifiedNewsReviewSelectionSnapshot(env, date)
-    : null;
-  const lockedSnapshots = stage === 'finalize' ? await loadLockedStageSnapshots(env, date) : null;
-  if (lockedSnapshots) {
-    await assertCurrentEditorialNewsReviewSnapshot(env, date, lockedSnapshots.editorial.digest);
-    await assertCurrentLockedEditorialAuthorization(env, date, lockedSnapshots.editorial.digest);
-  }
-  const sections = lockedSnapshots
-    ? combineLockedStageSections(lockedSnapshots)
-    : await buildCodexSections(env, `${date}-08`, sources, newsReviewSnapshot?.selected_ids);
-  const total = sections.reduce((count, section) => count + section.count, 0);
-  if (!total) throw new Error(`empty_stage:${stage}`);
+  const maxAttempts = opts.persistRevision ? STAGE_STATE_CAS_MAX_ATTEMPTS : 1;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const newsReviewSnapshot = stage === 'editorial'
+      ? await getVerifiedNewsReviewSelectionSnapshot(env, date)
+      : null;
+    const lockedSnapshots = stage === 'finalize' ? await loadLockedStageSnapshots(env, date) : null;
+    if (lockedSnapshots) {
+      await assertCurrentEditorialNewsReviewSnapshot(env, date, lockedSnapshots.editorial.digest);
+      await assertCurrentLockedEditorialAuthorization(env, date, lockedSnapshots.editorial.digest);
+    }
+    const sections = lockedSnapshots
+      ? combineLockedStageSections(lockedSnapshots)
+      : await buildCodexSections(env, `${date}-08`, sources, newsReviewSnapshot?.selected_ids);
+    const total = sections.reduce((count, section) => count + section.count, 0);
+    if (!total) throw new Error(`empty_stage:${stage}`);
 
-  const digest: DailyCodexPayload['digest'] = {
-    meta: {
-      // This field participates in content_hash. Keep it deterministic for a
-      // date/stage so retries and the 08:00 finalize integrity check see the
-      // same snapshot hash when the selected content has not changed.
-      generated_at: stagedGeneratedAtBjt(date, stage),
+    const digest: DailyCodexPayload['digest'] = {
+      meta: {
+        // This field participates in content_hash. Keep it deterministic for a
+        // date/stage so retries and the 08:00 finalize integrity check see the
+        // same snapshot hash when the selected content has not changed.
+        generated_at: stagedGeneratedAtBjt(date, stage),
+        density: 'normal',
+        source_order: [...sources],
+        final_source_order: [...FINAL_SECTION_ORDER],
+        source_labels: Object.fromEntries(sources.map((source) => [source, SOURCE_LABELS[source] || source])),
+        ...(stage === 'editorial' && newsReviewSnapshot ? { news_review: newsReviewSnapshot } : {}),
+        ...(lockedSnapshots?.editorial.digest.meta.news_review
+          ? { news_review: lockedSnapshots.editorial.digest.meta.news_review }
+          : {}),
+      },
+      sections: { normal: sections },
+    };
+    const finalManifest = lockedSnapshots ? await buildFinalManifest(lockedSnapshots, sections) : null;
+    // 跨端契约：content_hash 只覆盖实际 digest，HK 可在 ingest 时独立重算并拒绝
+    // 传输损坏；final_manifest 另有自己的 manifest_hash，职责不混用。
+    const contentHash = `sha256:${await sha256Hex(stableJson(digest))}`;
+    const observed = await observeDailyStageState(env, date, stage);
+    const previous = observed.state;
+    const revision = previous?.content_hash === contentHash ? previous.revision : (previous?.revision || 0) + 1;
+    const payload: StagedDailyCodexPayload = {
+      protocol_version: 2,
+      date,
       density: 'normal',
-      source_order: [...sources],
-      final_source_order: [...FINAL_SECTION_ORDER],
-      source_labels: Object.fromEntries(sources.map((source) => [source, SOURCE_LABELS[source] || source])),
-      ...(stage === 'editorial' && newsReviewSnapshot ? { news_review: newsReviewSnapshot } : {}),
-      ...(lockedSnapshots?.editorial.digest.meta.news_review
-        ? { news_review: lockedSnapshots.editorial.digest.meta.news_review }
-        : {}),
-    },
-    sections: { normal: sections },
-  };
-  const finalManifest = lockedSnapshots ? await buildFinalManifest(lockedSnapshots, sections) : null;
-  // 跨端契约：content_hash 只覆盖实际 digest，HK 可在 ingest 时独立重算并拒绝
-  // 传输损坏；final_manifest 另有自己的 manifest_hash，职责不混用。
-  const contentHash = `sha256:${await sha256Hex(stableJson(digest))}`;
-  const previous = await getDailyStageState(env, date, stage);
-  const revision = previous?.content_hash === contentHash ? previous.revision : (previous?.revision || 0) + 1;
-  if (opts.persistRevision) {
-    await persistDailyStageState(env, date, {
+      batch_id: `daily-${date}-normal`,
+      stage,
+      revision,
+      content_hash: contentHash,
+      render_key: `daily-${date}-normal-${stage}-r${revision}-${contentHash.slice(7, 15)}`,
+      expected_stages: [...DAILY_CODEX_EXPECTED_STAGES],
+      title: `AI Feeds ${date} 日报`,
+      source: 'cloudflare-daily-staged',
+      origin: await resolveDailyPushOrigin(env, date, stage, opts.origin),
+      digest,
+      final_manifest: finalManifest,
+    };
+    if (!opts.persistRevision) return payload;
+
+    const persisted = await persistDailyStageState(env, date, {
       stage,
       revision,
       content_hash: contentHash,
@@ -670,24 +728,10 @@ export async function buildStagedDailyCodexPayload(
       ...(previous?.content_hash === contentHash && previous.last_error ? { last_error: previous.last_error } : {}),
       ...(finalManifest ? { final_manifest: finalManifest } : {}),
       snapshot: digest,
-    });
+    }, observed);
+    if (persisted) return payload;
   }
-  return {
-    protocol_version: 2,
-    date,
-    density: 'normal',
-    batch_id: `daily-${date}-normal`,
-    stage,
-    revision,
-    content_hash: contentHash,
-    render_key: `daily-${date}-normal-${stage}-r${revision}-${contentHash.slice(7, 15)}`,
-    expected_stages: [...DAILY_CODEX_EXPECTED_STAGES],
-    title: `AI Feeds ${date} 日报`,
-    source: 'cloudflare-daily-staged',
-    origin: await resolveDailyPushOrigin(env, date, stage, opts.origin),
-    digest,
-    final_manifest: finalManifest,
-  };
+  throw new Error(`stage_state_cas_exhausted:${stage}`);
 }
 
 export interface DailyPushResult {
@@ -832,10 +876,12 @@ export async function pushDailyStageToCodex(
       },
     );
   } catch (error) {
-    const raw = String(error).slice(0, 180);
-    const message = raw.includes('empty_stage:') || raw.includes('stale_editorial_')
-      ? raw
-      : `network: ${raw}`;
+    const safe = safeDailyDeliveryError(
+      error, [env.X_CARD_SHARED_TOKEN, env.DAILY_NEWS_REVIEW_SECRET], 180,
+    );
+    const message = safe.includes('empty_stage:') || safe.includes('stale_editorial_')
+      ? safe
+      : `network: ${safe}`;
     const attemptedPayload = attemptState.payload;
     if (attemptedPayload) {
       await recordDailyStageAttempt(
@@ -848,8 +894,7 @@ export async function pushDailyStageToCodex(
   const { response, payload } = posted;
   const total = payload.digest.sections.normal.reduce((count, section) => count + section.count, 0);
   if (!response.ok) {
-    const text = (await response.text().catch(() => '')).slice(0, 200);
-    const error = `http_${response.status}: ${text}`;
+    const error = `http_${response.status}`;
     await recordDailyStageAttempt(
       env, payload.date, stage, payload.revision, payload.content_hash, error,
     ).catch(() => {});
@@ -877,7 +922,9 @@ export async function pushDailyStageToCodex(
     await recordDailyStageAttempt(env, payload.date, stage, payload.revision, payload.content_hash);
     await markDailyStagePushed(env, payload.date, stage, payload.revision, payload.content_hash);
   } catch (error) {
-    const message = String(error).slice(0, 200);
+    const message = safeDailyDeliveryError(
+      error, [env.X_CARD_SHARED_TOKEN, env.DAILY_NEWS_REVIEW_SECRET], 200,
+    );
     await recordDailyStageAttempt(
       env, payload.date, stage, payload.revision, payload.content_hash, message,
     ).catch(() => {});

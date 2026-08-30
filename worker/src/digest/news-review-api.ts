@@ -13,6 +13,7 @@ import {
   verifyNewsReviewTokenSignature,
 } from './news-review';
 import { buildStagedDailyCodexPayload, getDailyStageState, pushDailyStageToCodex } from './codex-push';
+import { safeDailyDeliveryError } from './daily-delivery-error';
 import { generateDailyPage } from './daily-page-run';
 import { bjtDateStr } from './lib';
 
@@ -100,7 +101,9 @@ export async function reconcileDailyNewsReviewPublication(
   }
   if (existing.publish_status === 'published') return { ok: true, skipped: 'already_published' };
   const failPending = async (stage: string, error: string) => {
-    const concise = error.slice(0, 500);
+    const concise = safeDailyDeliveryError(
+      error, [env.X_CARD_SHARED_TOKEN, env.DAILY_NEWS_REVIEW_SECRET], 500,
+    );
     await markNewsReviewPending(env, date, existing.batch_id, existing.selection_hash!, concise);
     return { ok: false, stage, error: concise };
   };
@@ -265,7 +268,11 @@ export async function handleDailyNewsReviewApi(
       published_selected_ids: publishedSelectedIds,
       edit_revision: batch.edit_revision,
       publish_status: batch.publish_status,
-      publish_error: batch.publish_error,
+      publish_error: batch.publish_error
+        ? safeDailyDeliveryError(
+          batch.publish_error, [env.X_CARD_SHARED_TOKEN, env.DAILY_NEWS_REVIEW_SECRET], 500,
+        )
+        : batch.publish_error,
       generation_target: batch.edit_revision > 0 && batch.applied_selected_ids?.length
         ? {
           review_revision: batch.edit_revision,

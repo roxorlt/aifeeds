@@ -651,15 +651,18 @@ describe('daily news review API', () => {
     );
   });
 
-  test('DRD-003 sanitization exceptions persist a bounded error for the exact pending batch', async () => {
+  test('DRD-003 sanitization exceptions persist a bounded secret-safe error for the exact pending batch', async () => {
     const pending = {
       ...batch, applied_selected_ids: batch.default_selected_ids, selection_hash: 'selection-hash',
       edit_revision: 3, publish_status: 'pending',
     };
     vi.mocked(getActiveNewsReviewBatch).mockResolvedValue(pending as never);
-    vi.mocked(sanitizeCurrentNewsReviewBatch).mockRejectedValue(
-      new Error(`sanitize exploded ${'x'.repeat(700)}`),
-    );
+    const secretSentinel = 'shared-secret';
+    const bearerSentinel = 'exception-bearer-sentinel';
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockRejectedValue(new Error(
+      `sanitize exploded Bearer ${bearerSentinel} ${secretSentinel} `
+      + `https://url-user:url-pass@example.test/private?token=query-sentinel ${'x'.repeat(700)}`,
+    ));
 
     const result = await reconcileDailyNewsReviewPublication(
       env(), '2026-07-30', Date.parse('2026-07-30T08:00:00Z'),
@@ -670,8 +673,56 @@ describe('daily news review API', () => {
     const call = vi.mocked(markNewsReviewPending).mock.calls[0];
     expect(call.slice(1, 4)).toEqual(['2026-07-30', pending.batch_id, pending.selection_hash]);
     expect(String(call[4])).toContain('sanitize exploded');
-    expect(String(call[4])).toHaveLength(500);
+    expect(String(call[4]).length).toBeLessThanOrEqual(500);
+    for (const sentinel of [secretSentinel, bearerSentinel, 'url-user', 'url-pass', 'query-sentinel', 'example.test']) {
+      expect(JSON.stringify({ result, persisted: call[4] })).not.toContain(sentinel);
+    }
     expect(markNewsReviewPublished).not.toHaveBeenCalled();
+  });
+
+  test('DRD-003 HK HTTP body is removed before the exact batch is marked pending', async () => {
+    const pending = {
+      ...batch, applied_selected_ids: batch.default_selected_ids, selection_hash: 'selection-hash',
+      edit_revision: 3, publish_status: 'pending',
+    };
+    const bodySentinel = 'hk-body-sentinel-19c0de';
+    vi.mocked(getActiveNewsReviewBatch).mockResolvedValue(pending as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({ batch: pending, changed: false, dropped_ids: [] } as never);
+    vi.mocked(pushDailyStageToCodex).mockResolvedValue({
+      ok: false, stage: 'editorial', error: `http_503: ${bodySentinel} Bearer hk-body-token`,
+    } as never);
+
+    const result = await reconcileDailyNewsReviewPublication(
+      env(), '2026-07-30', Date.parse('2026-07-30T08:00:00Z'),
+    );
+    const persisted = String(vi.mocked(markNewsReviewPending).mock.calls[0]?.[4] || '');
+
+    expect(result).toMatchObject({ ok: false, stage: 'editorial', error: expect.stringContaining('http_503') });
+    expect(JSON.stringify({ result, persisted })).not.toContain(bodySentinel);
+    expect(JSON.stringify({ result, persisted })).not.toContain('hk-body-token');
+  });
+
+  test('DRD-003 GET redacts legacy persisted delivery details before returning them', async () => {
+    const bodySentinel = 'legacy-hk-body-sentinel-880a5e';
+    const reviewedBatch = {
+      ...batch, applied_selected_ids: ['news-1'], selection_hash: 'selection-hash', edit_revision: 3,
+      publish_status: 'pending',
+      publish_error: `http_502: ${bodySentinel} Bearer legacy-token shared-secret `
+        + 'https://url-user:url-pass@example.test/private?token=query-sentinel',
+    };
+    vi.mocked(getNewsReviewBatch).mockResolvedValue(reviewedBatch as never);
+    vi.mocked(getActiveNewsReviewBatch).mockResolvedValue(reviewedBatch as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({ batch: reviewedBatch, changed: false, dropped_ids: [] } as never);
+
+    const response = await handleDailyNewsReviewApi(request('GET'), env(), Date.parse('2026-07-30T08:00:00Z'));
+    const payload = await response.json<Record<string, unknown>>();
+    const exposed = JSON.stringify(payload);
+
+    expect(response.status).toBe(200);
+    expect(payload.publish_error).toEqual(expect.stringContaining('http_502'));
+    for (const sentinel of [
+      bodySentinel, 'legacy-token', 'shared-secret', 'url-user', 'url-pass', 'query-sentinel', 'example.test',
+    ]) expect(exposed).not.toContain(sentinel);
   });
 
   test('DRD-003 papers lookup exceptions persist a bounded error for the exact pending batch', async () => {

@@ -111,7 +111,11 @@ function makeEnv() {
           if (/INSERT INTO digest_pool/i.test(sql)) {
             beforeStageMutation?.({ sql, binds: [...binds] });
             const [slot, source, density, itemIds, itemsMeta, generatedAt] = binds;
-            pools.set(key(String(slot), String(source), String(density)), {
+            const poolKey = key(String(slot), String(source), String(density));
+            if (/DO NOTHING/i.test(sql) && pools.has(poolKey)) {
+              return { success: true, meta: { changes: 0 } };
+            }
+            pools.set(poolKey, {
               item_ids: String(itemIds),
               items_meta: itemsMeta == null ? null : String(itemsMeta),
               generated_at: Number(generatedAt),
@@ -120,6 +124,20 @@ function makeEnv() {
           }
           if (/UPDATE digest_pool/i.test(sql)) {
             beforeStageMutation?.({ sql, binds: [...binds] });
+            if (!/json_set/i.test(sql)) {
+              const [itemIds, itemsMeta, generatedAt, slot, source, density, observedRaw] = binds;
+              const poolKey = key(String(slot), String(source), String(density));
+              const row = pools.get(poolKey);
+              if (!row || row.items_meta !== (observedRaw == null ? null : String(observedRaw))) {
+                return { success: true, meta: { changes: 0 } };
+              }
+              pools.set(poolKey, {
+                item_ids: String(itemIds),
+                items_meta: itemsMeta == null ? null : String(itemsMeta),
+                generated_at: Number(generatedAt),
+              });
+              return { success: true, meta: { changes: 1 } };
+            }
             const pushed = sql.includes("'$.pushed_at'");
             const [value, errorOrGeneratedAt, generatedAtOrSlot, slotOrSource, sourceOrDensity,
               densityOrStage, stageOrRevision, revisionOrHash, maybeHash] = binds;
@@ -380,6 +398,132 @@ describe('daily Codex payload v2', () => {
     expect((await getDailyStageState(env, '2026-07-21', 'foundation'))?.revision).toBe(2);
   });
 
+  test('DRD-002 insert CAS discards a stale ordered selection when another builder creates the stage row first', async () => {
+    const { env, setPool, pools, setBeforeStageMutation } = makeEnv();
+    setPool('2026-07-21', 'news', ['news:1', 'news:2', 'news:3']);
+    const staleSnapshot = {
+      batch_id: 'nr-20260721-casinsert001', batch_revision: 2,
+      selection_hash: `sha256:${'1'.repeat(64)}`, selected_ids: ['news:1', 'news:2'], manual_verifications: [],
+    };
+    const currentSnapshot = {
+      ...staleSnapshot, batch_revision: 3, selection_hash: `sha256:${'2'.repeat(64)}`,
+      selected_ids: ['news:3', 'news:1'],
+    };
+    vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mockResolvedValue(staleSnapshot);
+    const stale = await buildStagedDailyCodexPayload(env, 'editorial', { date: '2026-07-21' });
+    vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mockResolvedValue(currentSnapshot);
+    const competing = await buildStagedDailyCodexPayload(env, 'editorial', { date: '2026-07-21' });
+    vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mockResolvedValue(staleSnapshot);
+    const stateKey = '2026-07-21-08|_codex_stage_editorial|meta';
+    let interleaved = false;
+    setBeforeStageMutation(({ sql }) => {
+      if (interleaved || !/INSERT INTO digest_pool/i.test(sql)) return;
+      interleaved = true;
+      vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mockResolvedValue(currentSnapshot);
+      pools.set(stateKey, {
+        item_ids: '[]', generated_at: 2_000,
+        items_meta: JSON.stringify({
+          stage: 'editorial', revision: competing.revision, content_hash: competing.content_hash,
+          snapshot: competing.digest,
+        }),
+      });
+    });
+
+    const built = await buildStagedDailyCodexPayload(env, 'editorial', {
+      date: '2026-07-21', persistRevision: true,
+    });
+    const current = await getDailyStageState(env, '2026-07-21', 'editorial');
+
+    expect(interleaved).toBe(true);
+    expect(stale.content_hash).not.toBe(competing.content_hash);
+    expect(built).toMatchObject({ revision: competing.revision, content_hash: competing.content_hash });
+    expect(built.digest.meta.news_review).toEqual(currentSnapshot);
+    expect(current).toMatchObject({ revision: competing.revision, content_hash: competing.content_hash });
+    expect(current?.snapshot?.meta.news_review).toEqual(currentSnapshot);
+  });
+
+  test('DRD-002 update CAS discards a stale candidate after a different ordered selection wins from the same raw state', async () => {
+    const { env, setPool, pools, setBeforeStageMutation } = makeEnv();
+    setPool('2026-07-21', 'news', ['news:1', 'news:2', 'news:3']);
+    const priorSnapshot = {
+      batch_id: 'nr-20260721-casupdate01', batch_revision: 1,
+      selection_hash: `sha256:${'0'.repeat(64)}`, selected_ids: ['news:1'], manual_verifications: [],
+    };
+    vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mockResolvedValue(priorSnapshot);
+    const prior = await buildStagedDailyCodexPayload(env, 'editorial', {
+      date: '2026-07-21', persistRevision: true,
+    });
+    const staleSnapshot = {
+      ...priorSnapshot, batch_revision: 2, selection_hash: `sha256:${'3'.repeat(64)}`,
+      selected_ids: ['news:1', 'news:2'],
+    };
+    const currentSnapshot = {
+      ...priorSnapshot, batch_revision: 3, selection_hash: `sha256:${'4'.repeat(64)}`,
+      selected_ids: ['news:3', 'news:1'],
+    };
+    vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mockResolvedValue(staleSnapshot);
+    const stale = await buildStagedDailyCodexPayload(env, 'editorial', { date: '2026-07-21' });
+    vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mockResolvedValue(currentSnapshot);
+    const competing = await buildStagedDailyCodexPayload(env, 'editorial', { date: '2026-07-21' });
+    vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mockResolvedValue(staleSnapshot);
+    const stateKey = '2026-07-21-08|_codex_stage_editorial|meta';
+    const observedRaw = pools.get(stateKey)!.items_meta;
+    let interleaved = false;
+    setBeforeStageMutation(({ sql }) => {
+      if (interleaved || !/digest_pool/i.test(sql)) return;
+      interleaved = true;
+      vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mockResolvedValue(currentSnapshot);
+      pools.get(stateKey)!.items_meta = JSON.stringify({
+        stage: 'editorial', revision: competing.revision, content_hash: competing.content_hash,
+        snapshot: competing.digest,
+      });
+    });
+
+    const built = await buildStagedDailyCodexPayload(env, 'editorial', {
+      date: '2026-07-21', persistRevision: true,
+    });
+    const current = await getDailyStageState(env, '2026-07-21', 'editorial');
+
+    expect(interleaved).toBe(true);
+    expect(observedRaw).toContain(prior.content_hash);
+    expect(stale.revision).toBe(prior.revision + 1);
+    expect(competing.revision).toBe(prior.revision + 1);
+    expect(stale.content_hash).not.toBe(competing.content_hash);
+    expect(built).toMatchObject({ revision: competing.revision, content_hash: competing.content_hash });
+    expect(current).toMatchObject({ revision: competing.revision, content_hash: competing.content_hash });
+    expect(current?.snapshot?.meta.news_review).toEqual(currentSnapshot);
+  });
+
+  test('DRD-002 bounded build CAS exhaustion prevents the stale candidate from being sent', async () => {
+    const { env, setPool, pools, setBeforeStageMutation } = makeEnv();
+    seedAll(setPool);
+    await buildStagedDailyCodexPayload(env, 'foundation', {
+      date: '2026-07-21', persistRevision: true,
+    });
+    Object.assign(env as object, {
+      API_BASE: 'https://staging-api.ai-feeds.com',
+      X_CARD_SHARED_TOKEN: 'test-token',
+      DAILY_PUSH_STAGING_ENDPOINT: 'https://staging-render.example.test/aifeeds/api/daily/ingest',
+    });
+    const stateKey = '2026-07-21-08|_codex_stage_foundation|meta';
+    let conflicts = 0;
+    setBeforeStageMutation(({ sql }) => {
+      if (!/digest_pool/i.test(sql) || /json_set/i.test(sql)) return;
+      conflicts += 1;
+      const current = JSON.parse(pools.get(stateKey)!.items_meta!) as Record<string, unknown>;
+      pools.get(stateKey)!.items_meta = JSON.stringify({ ...current, attempt_count: conflicts });
+    });
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(exactReceiptResponse);
+
+    const result = await pushDailyStageToCodex(env, 'foundation', '2026-07-21');
+
+    expect(result).toMatchObject({
+      ok: false, stage: 'foundation', error: expect.stringContaining('stage_state_cas_exhausted:foundation'),
+    });
+    expect(conflicts).toBe(3);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   test('finalize references all stage revisions/hashes and emits deterministic segment/card bindings', async () => {
     const { env, setPool } = makeEnv();
     seedAll(setPool);
@@ -635,6 +779,59 @@ describe('daily Codex payload v2', () => {
     const pending = await getDailyStageState(env, '2026-07-21', 'foundation');
     expect(pending?.pushed_at).toBeUndefined();
     expect(pending).toMatchObject({ attempt_count: 1, last_error: 'receipt_mismatch' });
+  });
+
+  test('DRD-003 HK HTTP failure keeps the status but never persists or returns its raw response body', async () => {
+    const { env, setPool } = makeEnv();
+    seedAll(setPool);
+    const tokenSentinel = 'hk-token-sentinel-8f462c';
+    const reviewSentinel = 'review-secret-sentinel-90bd21';
+    const bodySentinel = 'hk-response-body-sentinel-4ce177';
+    Object.assign(env as object, {
+      API_BASE: 'https://staging-api.ai-feeds.com',
+      X_CARD_SHARED_TOKEN: tokenSentinel,
+      DAILY_NEWS_REVIEW_SECRET: reviewSentinel,
+      DAILY_PUSH_STAGING_ENDPOINT: 'https://user:query-secret@staging-render.example.test/aifeeds/api/daily/ingest?token=query-secret',
+    });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      `${bodySentinel} Bearer body-bearer ${tokenSentinel} ${reviewSentinel}`,
+      { status: 502 },
+    ));
+
+    const result = await pushDailyStageToCodex(env, 'foundation', '2026-07-21');
+    const pending = await getDailyStageState(env, '2026-07-21', 'foundation');
+    const exposed = JSON.stringify({ result, pending });
+
+    expect(result).toMatchObject({ ok: false, stage: 'foundation', error: expect.stringContaining('http_502') });
+    for (const sentinel of [bodySentinel, tokenSentinel, reviewSentinel, 'body-bearer', 'query-secret']) {
+      expect(exposed).not.toContain(sentinel);
+    }
+  });
+
+  test('DRD-003 thrown delivery errors redact exact secrets, bearer credentials, and credentialed URLs', async () => {
+    const { env, setPool } = makeEnv();
+    seedAll(setPool);
+    const tokenSentinel = 'hk-token-sentinel-a19ec0';
+    const reviewSentinel = 'review-secret-sentinel-f3e980';
+    Object.assign(env as object, {
+      API_BASE: 'https://staging-api.ai-feeds.com',
+      X_CARD_SHARED_TOKEN: tokenSentinel,
+      DAILY_NEWS_REVIEW_SECRET: reviewSentinel,
+      DAILY_PUSH_STAGING_ENDPOINT: 'https://staging-render.example.test/aifeeds/api/daily/ingest',
+    });
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error(
+      `transport exploded Bearer arbitrary-bearer ${tokenSentinel} ${reviewSentinel} `
+      + 'https://url-user:url-pass@hk.example/private?token=url-query-secret',
+    ));
+
+    const result = await pushDailyStageToCodex(env, 'foundation', '2026-07-21');
+    const pending = await getDailyStageState(env, '2026-07-21', 'foundation');
+    const exposed = JSON.stringify({ result, pending });
+
+    expect(result).toMatchObject({ ok: false, stage: 'foundation', error: expect.stringContaining('transport exploded') });
+    for (const sentinel of [
+      tokenSentinel, reviewSentinel, 'arbitrary-bearer', 'url-user', 'url-pass', 'url-query-secret', 'hk.example',
+    ]) expect(exposed).not.toContain(sentinel);
   });
 
   test('R01 a lost HK response replays the exact identity and records the eventual exact receipt', async () => {
