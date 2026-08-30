@@ -118,6 +118,8 @@ export async function buildPublicationCapacityWarningEvent(
 }
 
 interface BudgetRow {
+  singleton_id: number;
+  namespace: string;
   budget_bytes: number;
   legacy_baseline_bytes: number;
   reserved_bytes: number;
@@ -126,6 +128,7 @@ interface BudgetRow {
   legacy_inventory_digest: string | null;
   legacy_inventory_object_count: number | null;
   legacy_inventory_at_ms: number | null;
+  updated_at_ms: number;
 }
 
 interface CapacityControlRow {
@@ -137,6 +140,7 @@ interface CapacityControlRow {
   occupied_bytes_snapshot: number;
   state: string;
   last_audit_id: string | null;
+  updated_at_ms: number;
 }
 
 function exactChanges(value: unknown): number {
@@ -149,15 +153,31 @@ function validHex64(value: string): boolean {
 }
 
 async function loadBudget(db: D1Database): Promise<BudgetRow | null> {
-  return db.prepare(`SELECT budget_bytes,legacy_baseline_bytes,reserved_bytes,version,state,
-    legacy_inventory_digest,legacy_inventory_object_count,legacy_inventory_at_ms
+  return db.prepare(`SELECT singleton_id,namespace,budget_bytes,legacy_baseline_bytes,
+    reserved_bytes,version,state,legacy_inventory_digest,legacy_inventory_object_count,
+    legacy_inventory_at_ms,updated_at_ms
     FROM publication_storage_budget WHERE singleton_id=1`).first<BudgetRow>();
 }
 
 async function loadControl(db: D1Database): Promise<CapacityControlRow | null> {
   return db.prepare(`SELECT epoch,budget_version_snapshot,budget_bytes_snapshot,
     legacy_baseline_bytes_snapshot,reserved_bytes_snapshot,occupied_bytes_snapshot,state,last_audit_id
+    ,updated_at_ms
     FROM publication_capacity_warning_control WHERE singleton_id=1`).first<CapacityControlRow>();
+}
+
+export interface PublicationCapacityBudgetSnapshot {
+  singleton_id: 1;
+  namespace: 'daily-publications-v1';
+  budget_bytes: number;
+  legacy_baseline_bytes: number;
+  reserved_bytes: number;
+  version: number;
+  state: 'uninitialized';
+  legacy_inventory_digest: null;
+  legacy_inventory_object_count: null;
+  legacy_inventory_at_ms: null;
+  updated_at_ms: number;
 }
 
 export interface ActivatePublicationCapacityBudgetInput {
@@ -170,10 +190,117 @@ export interface ActivatePublicationCapacityBudgetInput {
   reason: string;
   ticket_ref: string;
   now_ms: number;
+  old_budget_snapshot: PublicationCapacityBudgetSnapshot;
+}
+
+const ACTIVATION_AUDIT_ID_DOMAIN = 'aifeeds-publication-capacity-activation-request-v1\0';
+
+function activationAuditIdentity(
+  input: Omit<ActivatePublicationCapacityBudgetInput, 'audit_id'>,
+): string {
+  const old = input.old_budget_snapshot;
+  return JSON.stringify([
+    1,
+    input.legacy_baseline_bytes,
+    input.inventory_digest,
+    input.inventory_object_count,
+    input.inventory_at_ms,
+    input.actor,
+    input.reason,
+    input.ticket_ref,
+    input.now_ms,
+    [
+      old.singleton_id,
+      old.namespace,
+      old.budget_bytes,
+      old.legacy_baseline_bytes,
+      old.reserved_bytes,
+      old.version,
+      old.state,
+      old.legacy_inventory_digest,
+      old.legacy_inventory_object_count,
+      old.legacy_inventory_at_ms,
+      old.updated_at_ms,
+    ],
+  ]);
+}
+
+export async function derivePublicationCapacityActivationAuditId(
+  input: Omit<ActivatePublicationCapacityBudgetInput, 'audit_id'>,
+): Promise<string> {
+  return sha256(`${ACTIVATION_AUDIT_ID_DOMAIN}${activationAuditIdentity(input)}`);
 }
 
 function validateAuditText(value: string, name: string): void {
   if (!value || byteLength(value) > 256) throw new Error(`PUBLICATION_CAPACITY_${name}_INVALID`);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+const ACTIVATION_SNAPSHOT_KEYS = [
+  'budget_bytes',
+  'legacy_baseline_bytes',
+  'legacy_inventory_at_ms',
+  'legacy_inventory_digest',
+  'legacy_inventory_object_count',
+  'namespace',
+  'reserved_bytes',
+  'singleton_id',
+  'state',
+  'updated_at_ms',
+  'version',
+] as const;
+
+function validateActivationSnapshot(value: unknown): PublicationCapacityBudgetSnapshot {
+  if (!isRecord(value)) throw new Error('PUBLICATION_CAPACITY_OLD_SNAPSHOT_INVALID');
+  const keys = Object.keys(value).sort();
+  if (keys.length !== ACTIVATION_SNAPSHOT_KEYS.length
+    || keys.some((key, index) => key !== [...ACTIVATION_SNAPSHOT_KEYS].sort()[index])) {
+    throw new Error('PUBLICATION_CAPACITY_OLD_SNAPSHOT_INVALID');
+  }
+  if (value.singleton_id !== 1 || value.namespace !== 'daily-publications-v1'
+    || value.state !== 'uninitialized' || value.version !== 0
+    || value.legacy_baseline_bytes !== 0 || value.reserved_bytes !== 0
+    || value.legacy_inventory_digest !== null
+    || value.legacy_inventory_object_count !== null
+    || value.legacy_inventory_at_ms !== null) {
+    throw new Error('PUBLICATION_CAPACITY_OLD_SNAPSHOT_INVALID');
+  }
+  safeInteger(value.budget_bytes, 'old_snapshot_budget_bytes', 1);
+  safeInteger(value.updated_at_ms, 'old_snapshot_updated_at_ms');
+  return value as unknown as PublicationCapacityBudgetSnapshot;
+}
+
+function sameBudgetSnapshot(
+  budget: BudgetRow | null,
+  snapshot: PublicationCapacityBudgetSnapshot,
+): boolean {
+  return budget?.singleton_id === snapshot.singleton_id
+    && budget.namespace === snapshot.namespace
+    && budget.budget_bytes === snapshot.budget_bytes
+    && budget.legacy_baseline_bytes === snapshot.legacy_baseline_bytes
+    && budget.reserved_bytes === snapshot.reserved_bytes
+    && budget.version === snapshot.version
+    && budget.state === snapshot.state
+    && budget.legacy_inventory_digest === snapshot.legacy_inventory_digest
+    && budget.legacy_inventory_object_count === snapshot.legacy_inventory_object_count
+    && budget.legacy_inventory_at_ms === snapshot.legacy_inventory_at_ms
+    && budget.updated_at_ms === snapshot.updated_at_ms;
+}
+
+interface ActivationAuditRow {
+  action: string;
+  old_budget_bytes: number;
+  new_budget_bytes: number;
+  old_occupied_bytes: number;
+  new_occupied_bytes: number;
+  inventory_digest: string | null;
+  actor: string;
+  reason: string;
+  ticket_ref: string;
+  created_at_ms: number;
 }
 
 async function exactActivation(
@@ -182,20 +309,43 @@ async function exactActivation(
 ): Promise<CapacityControlRow | null> {
   const budget = await loadBudget(db);
   const control = await loadControl(db);
-  const audit = await db.prepare(`SELECT 1 ok FROM publication_budget_audit
-    WHERE audit_id=? AND action='activate_inventory' AND new_budget_bytes=?
-      AND new_occupied_bytes=? AND inventory_digest=?`).bind(
-    input.audit_id, budget?.budget_bytes ?? -1, input.legacy_baseline_bytes, input.inventory_digest,
-  ).first<{ ok: number }>();
-  return budget?.state === 'active'
+  const old = input.old_budget_snapshot;
+  const audit = await db.prepare(`SELECT action,old_budget_bytes,new_budget_bytes,
+      old_occupied_bytes,new_occupied_bytes,inventory_digest,actor,reason,ticket_ref,created_at_ms
+    FROM publication_budget_audit WHERE audit_id=?`).bind(input.audit_id).first<ActivationAuditRow>();
+  const oldOccupied = old.legacy_baseline_bytes + old.reserved_bytes;
+  const newOccupied = input.legacy_baseline_bytes + old.reserved_bytes;
+  const auditMatches = audit?.action === 'activate_inventory'
+    && audit.old_budget_bytes === old.budget_bytes
+    && audit.new_budget_bytes === old.budget_bytes
+    && audit.old_occupied_bytes === oldOccupied
+    && audit.new_occupied_bytes === newOccupied
+    && audit.inventory_digest === input.inventory_digest
+    && audit.actor === input.actor
+    && audit.reason === input.reason
+    && audit.ticket_ref === input.ticket_ref
+    && audit.created_at_ms === input.now_ms;
+  const occupied = (budget?.legacy_baseline_bytes ?? 0) + (budget?.reserved_bytes ?? 0);
+  return budget?.singleton_id === old.singleton_id
+    && budget.namespace === old.namespace
+    && budget.state === 'active'
+    && budget.budget_bytes === old.budget_bytes
     && budget.legacy_baseline_bytes === input.legacy_baseline_bytes
+    && budget.reserved_bytes >= old.reserved_bytes
+    && budget.version >= old.version + 1
     && budget.legacy_inventory_digest === input.inventory_digest
     && budget.legacy_inventory_object_count === input.inventory_object_count
     && budget.legacy_inventory_at_ms === input.inventory_at_ms
     && control?.state === 'active'
+    && control.epoch === 1
     && control.last_audit_id === input.audit_id
     && control.budget_version_snapshot === budget.version
-    && Number(audit?.ok || 0) === 1 ? control : null;
+    && control.budget_bytes_snapshot === budget.budget_bytes
+    && control.legacy_baseline_bytes_snapshot === budget.legacy_baseline_bytes
+    && control.reserved_bytes_snapshot === budget.reserved_bytes
+    && control.occupied_bytes_snapshot === occupied
+    && control.updated_at_ms === budget.updated_at_ms
+    && auditMatches ? control : null;
 }
 
 export async function activatePublicationCapacityBudget(
@@ -210,27 +360,46 @@ export async function activatePublicationCapacityBudget(
   for (const [name, value] of Object.entries({
     AUDIT_ID: input.audit_id, ACTOR: input.actor, REASON: input.reason, TICKET_REF: input.ticket_ref,
   })) validateAuditText(value, name);
+  const old = validateActivationSnapshot(input.old_budget_snapshot);
+  if (!validHex64(input.audit_id)
+    || input.audit_id !== await derivePublicationCapacityActivationAuditId(input)) {
+    throw new Error('PUBLICATION_CAPACITY_AUDIT_ID_INVALID');
+  }
   const existing = await exactActivation(env.DB, input);
   if (existing) return { status: 'replayed', epoch: existing.epoch, budget_version: existing.budget_version_snapshot };
   const budget = await loadBudget(env.DB);
-  if (!budget || budget.state !== 'uninitialized' || input.legacy_baseline_bytes > budget.budget_bytes) {
+  if (!sameBudgetSnapshot(budget, old)
+    || input.legacy_baseline_bytes + old.reserved_bytes > old.budget_bytes) {
     throw new Error('PUBLICATION_CAPACITY_ACTIVATION_STALE');
   }
   const audit = env.DB.prepare(`INSERT INTO publication_budget_audit(
     audit_id,action,old_budget_bytes,new_budget_bytes,old_occupied_bytes,new_occupied_bytes,
     inventory_digest,actor,reason,ticket_ref,created_at_ms
-  ) VALUES(?,'activate_inventory',?,?,?,?,?,?,?,?,?)`).bind(
-    input.audit_id, budget.budget_bytes, budget.budget_bytes,
-    budget.legacy_baseline_bytes + budget.reserved_bytes,
-    input.legacy_baseline_bytes + budget.reserved_bytes,
+  ) SELECT ?,'activate_inventory',?,?,?,?,?,?,?,?,?
+      FROM publication_storage_budget b
+     WHERE b.singleton_id=? AND b.namespace=? AND b.budget_bytes=?
+       AND b.legacy_baseline_bytes=? AND b.reserved_bytes=? AND b.version=? AND b.state=?
+       AND b.legacy_inventory_digest IS ? AND b.legacy_inventory_object_count IS ?
+       AND b.legacy_inventory_at_ms IS ? AND b.updated_at_ms=?`).bind(
+    input.audit_id, old.budget_bytes, old.budget_bytes,
+    old.legacy_baseline_bytes + old.reserved_bytes,
+    input.legacy_baseline_bytes + old.reserved_bytes,
     input.inventory_digest, input.actor, input.reason, input.ticket_ref, input.now_ms,
+    old.singleton_id, old.namespace, old.budget_bytes, old.legacy_baseline_bytes,
+    old.reserved_bytes, old.version, old.state, old.legacy_inventory_digest,
+    old.legacy_inventory_object_count, old.legacy_inventory_at_ms, old.updated_at_ms,
   );
   const update = env.DB.prepare(`UPDATE publication_storage_budget
     SET legacy_baseline_bytes=?,state='active',legacy_inventory_digest=?,
         legacy_inventory_object_count=?,legacy_inventory_at_ms=?,version=version+1,updated_at_ms=?
-    WHERE singleton_id=1 AND state='uninitialized' AND version=?`).bind(
+    WHERE singleton_id=? AND namespace=? AND budget_bytes=? AND legacy_baseline_bytes=?
+      AND reserved_bytes=? AND version=? AND state=? AND legacy_inventory_digest IS ?
+      AND legacy_inventory_object_count IS ? AND legacy_inventory_at_ms IS ? AND updated_at_ms=?`).bind(
     input.legacy_baseline_bytes, input.inventory_digest, input.inventory_object_count,
-    input.inventory_at_ms, input.now_ms, budget.version,
+    input.inventory_at_ms, input.now_ms, old.singleton_id, old.namespace, old.budget_bytes,
+    old.legacy_baseline_bytes, old.reserved_bytes, old.version, old.state,
+    old.legacy_inventory_digest, old.legacy_inventory_object_count,
+    old.legacy_inventory_at_ms, old.updated_at_ms,
   );
   try {
     const results = await env.DB.batch([audit, update]);

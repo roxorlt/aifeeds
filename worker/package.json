@@ -4,9 +4,15 @@
   "private": true,
   "scripts": {
     "dev": "wrangler dev",
-    "test": "vitest run",
+    "test": "vitest run && node --test scripts/build-publication-inventory.test.mjs scripts/publication-gate-config.test.mjs scripts/publication-inventory-artifact.test.mjs",
     "predeploy": "bash ../scripts/predeploy-check.sh",
     "deploy": "wrangler deploy",
+    "deploy:publication:bootstrap": "wrangler deploy",
+    "deploy:publication:drain": "wrangler deploy --var PUBLICATION_CAPACITY_WARNING_DRAIN_ENABLED:1 --var PUBLICATION_CAPACITY_WARNING_PRODUCER_ENABLED:0 --var DAILY_PUBLICATION_RESERVATION_ENABLED:0 --var DAILY_PUBLICATION_PUT_ENABLED:0 --var DAILY_PUBLICATION_PROMOTION_ENABLED:0",
+    "deploy:publication:producer": "wrangler deploy --var PUBLICATION_CAPACITY_WARNING_DRAIN_ENABLED:1 --var PUBLICATION_CAPACITY_WARNING_PRODUCER_ENABLED:1 --var DAILY_PUBLICATION_RESERVATION_ENABLED:0 --var DAILY_PUBLICATION_PUT_ENABLED:0 --var DAILY_PUBLICATION_PROMOTION_ENABLED:0",
+    "deploy:publication:reservation": "wrangler deploy --var PUBLICATION_CAPACITY_WARNING_DRAIN_ENABLED:1 --var PUBLICATION_CAPACITY_WARNING_PRODUCER_ENABLED:1 --var DAILY_PUBLICATION_RESERVATION_ENABLED:1 --var DAILY_PUBLICATION_PUT_ENABLED:0 --var DAILY_PUBLICATION_PROMOTION_ENABLED:0",
+    "deploy:publication:put": "wrangler deploy --var PUBLICATION_CAPACITY_WARNING_DRAIN_ENABLED:1 --var PUBLICATION_CAPACITY_WARNING_PRODUCER_ENABLED:1 --var DAILY_PUBLICATION_RESERVATION_ENABLED:1 --var DAILY_PUBLICATION_PUT_ENABLED:1 --var DAILY_PUBLICATION_PROMOTION_ENABLED:0",
+    "deploy:publication:promotion": "wrangler deploy --var PUBLICATION_CAPACITY_WARNING_DRAIN_ENABLED:1 --var PUBLICATION_CAPACITY_WARNING_PRODUCER_ENABLED:1 --var DAILY_PUBLICATION_RESERVATION_ENABLED:1 --var DAILY_PUBLICATION_PUT_ENABLED:1 --var DAILY_PUBLICATION_PROMOTION_ENABLED:1",
     "db:init": "wrangler d1 execute xlist --file=schema.sql --remote",
     "db:init:local": "wrangler d1 execute xlist --file=schema.sql --local"
   },

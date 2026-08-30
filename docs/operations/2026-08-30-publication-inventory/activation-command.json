@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "kind": "publication-capacity-budget-activation-command",
+  "execution": "disabled",
+  "invoke": "activatePublicationCapacityBudget",
+  "precondition_status": "authoritative_read_required",
+  "required_authoritative_budget_snapshot": null,
+  "input": {
+    "audit_id": null,
+    "legacy_baseline_bytes": 740834456,
+    "inventory_digest": "5e9ca8c182f7109abc7093f5706d34c118024b21fe1f005eed0f91eb02f1cdee",
+    "inventory_object_count": 298,
+    "inventory_at_ms": 1788056520000,
+    "actor": "codex-aifeeds-publication-recovery",
+    "reason": "Activate the audited legacy R2 publication baseline.",
+    "ticket_ref": "aifeeds-publication-recovery-2026-08-30",
+    "now_ms": 1788056520000,
+    "old_budget_snapshot": null
+  }
+}

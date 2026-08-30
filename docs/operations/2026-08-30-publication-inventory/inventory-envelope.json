@@ -1,0 +1,2413 @@
+{
+  "schema_version": 1,
+  "kind": "r2-publication-inventory-envelope",
+  "canonicalization": "utf8-json-recursive-bytewise-key-sort-v1",
+  "object_set_sha256": "8e673930948cabb60720d6f7708294f6c1d4f5724d4d36f11130db5773fb3191",
+  "manifest_sha256": "5e9ca8c182f7109abc7093f5706d34c118024b21fe1f005eed0f91eb02f1cdee",
+  "manifest": {
+    "schema_version": 1,
+    "namespace": "daily-publications-v1",
+    "bucket_name": "xlist-readme-assets",
+    "prefixes": [
+      "daily/",
+      "daily-video/"
+    ],
+    "inventory_at_ms": 1788056520000,
+    "operator": "codex-aifeeds-publication-recovery",
+    "command_version": "aifeeds-r2-inventory-v1",
+    "object_count": 298,
+    "total_size_bytes": 740834456,
+    "objects": [
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-19/7c4256f71c6d4e76124c109c574860c01d90e7e378d75a07a34dfd40525fea66.jpg",
+        "size_bytes": 108147,
+        "etag": "9e5331f44fbb16458a6a398e5ff9c8bf",
+        "last_modified": "2026-07-14T08:38:02.879Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-19/e73cb9c599835ddd503a0ad88b2a25ac3d5cd23ad70ebc3551d80b2b47d21ab7.mp4",
+        "size_bytes": 11983175,
+        "etag": "8f5d42fd38a4f0ed43b4bb43ec95a317",
+        "last_modified": "2026-07-14T08:38:03.330Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-19/f71513cb4fcc23d642db698400c36eb3f491facdf40d2c00d0b6cdd5a306c102.vtt",
+        "size_bytes": 10413,
+        "etag": "d9b492665b63ba6a5897354b43959c2f",
+        "last_modified": "2026-07-14T08:38:02.271Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-20/0a2199dd9b061ea8d7b250bebacf98a0509b879971a7b9946216ad15c4672fc4.vtt",
+        "size_bytes": 6945,
+        "etag": "f3614e9f6b18784326eb63d3bda2c614",
+        "last_modified": "2026-07-14T08:38:14.404Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-20/dfe22d43529d10f8fe1d780309e45055f98128064ec101c6b74771b103d08490.mp4",
+        "size_bytes": 6984450,
+        "etag": "799bf2c24f00cb4fca0b6d7fc538b6c8",
+        "last_modified": "2026-07-14T08:38:15.179Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-20/fb7bcf5b53658093def505b13ed4f6c0726c800ca990d1be78548d3b2b808f30.jpg",
+        "size_bytes": 113364,
+        "etag": "76b0da4c73798616ac9172c01cf38d46",
+        "last_modified": "2026-07-14T08:38:14.454Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-21/049fef368b23bdec32f660b2aaf3c592a99a2cb92a21b4610dc33e6f5fc8d6b5.mp4",
+        "size_bytes": 6841288,
+        "etag": "ec181139b5a8dc1d249d9151011f11e8",
+        "last_modified": "2026-07-14T08:38:28.510Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-21/24ce38173c88c071b8ba87c2954c2686b3863b152de1edfddbcf1f3f1823edb7.jpg",
+        "size_bytes": 104134,
+        "etag": "15dba6b758d09fb27569b08145a65a0d",
+        "last_modified": "2026-07-14T08:38:26.727Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-21/dc51777fca0cf6764a2258a9dc43ec16caf6d9a39415128f88f6f67e8c1659ef.vtt",
+        "size_bytes": 2115,
+        "etag": "ea2f10733a743ee266d152772f521c02",
+        "last_modified": "2026-07-14T08:38:26.720Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-22/1862179517847538379dbc28d955ea64f3af67a8bba145b5f5b4ab6e6814fa0b.vtt",
+        "size_bytes": 10093,
+        "etag": "09dd01252d7e2dc1c45f9bc406ba099d",
+        "last_modified": "2026-07-14T08:47:53.027Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-22/422ab7e39e25329c3cabf24d5465b2b674fff51efce03c03940b55a3427009eb.jpg",
+        "size_bytes": 141470,
+        "etag": "2dea848855d844d5d996705480cf3923",
+        "last_modified": "2026-07-14T08:47:53.095Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-22/cb4379a6ee084269b607b714cf76c03b9fada9c2d1ac3f1e302b14188d627766.mp4",
+        "size_bytes": 10556729,
+        "etag": "4f1e7a0772b4ba71a7ee2a77170c37ef",
+        "last_modified": "2026-07-14T08:47:53.598Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-23/65d9c9ef14024ffe730130a70fab8177fb2c6f249485ee4a912b1baf8b237acc.jpg",
+        "size_bytes": 120604,
+        "etag": "0d411a1e2d3fabd7b3df536ff4f22ab8",
+        "last_modified": "2026-07-14T08:38:38.014Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-23/bea34ee58d9cbf9357462d671fefb8b0dbfb8449547b98a1310da4cfa873a75a.vtt",
+        "size_bytes": 5638,
+        "etag": "599c2543613f24f0a95e8f910bf8cab1",
+        "last_modified": "2026-07-14T08:38:37.860Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-23/bf5eb5427c0aed5a9ab2a93efad3e2a069a35bd286d9e61581fe55873fdcdf2a.mp4",
+        "size_bytes": 5268487,
+        "etag": "eb8aaba509e205bde39315753cc896d0",
+        "last_modified": "2026-07-14T08:38:38.557Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-24/2db7f152143cc3e4dea673fe37f44109cc93d6c0f0da849a608e4ae9d7565e57.mp4",
+        "size_bytes": 8387085,
+        "etag": "394111bbd359a9dc851b3a46902f411a",
+        "last_modified": "2026-07-14T08:38:52.345Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-24/44543f27755acac21152794350c4acecc67b1a0b921b1f5ce2761ab043f5bda6.vtt",
+        "size_bytes": 7748,
+        "etag": "e5287f23c6687755f7a500deeac944e3",
+        "last_modified": "2026-07-14T08:38:52.167Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-24/50765e9e9f58f0a251446f520f8e0ce486aa4269aedc7379cd2cf22446c6d34b.jpg",
+        "size_bytes": 221443,
+        "etag": "82e349749ef6d66d1e504e34fcb74357",
+        "last_modified": "2026-07-14T08:38:52.923Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-25/1fbaaac33cf30cf4d002a7c25e0a55281be9e1bb7d8b1c17f0b5b545cb8e86f0.mp4",
+        "size_bytes": 9410171,
+        "etag": "c9acd8e4479b6384201acce7e09542b3",
+        "last_modified": "2026-07-14T08:39:07.449Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-25/7bd6f61966767d04449065caedd695ef5d569331e58e051ea368922fea196694.jpg",
+        "size_bytes": 237211,
+        "etag": "cf9d24023111ac240fa5ae2a2c7979d6",
+        "last_modified": "2026-07-14T08:39:06.943Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-25/b3cd6e73e10f3873da09f2b7cb381a6f9a500a9b864795a76b379f50fbaaf79c.vtt",
+        "size_bytes": 9070,
+        "etag": "d75c4ae8be9022acd38c816a05f82414",
+        "last_modified": "2026-07-14T08:39:06.888Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-26/910b9887bb68b2857e4c9dfaba73549de19a087457b020d14d361edfc47757f6.vtt",
+        "size_bytes": 8836,
+        "etag": "5269dd6ac4ad99d0861439dbdf6ee9d5",
+        "last_modified": "2026-07-14T08:39:21.176Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-26/9d55d57f7ed9b3f7038a894980c29b37c739efb2744d31ad62e7c68fa8a3446b.jpg",
+        "size_bytes": 223008,
+        "etag": "b954cfaa9087651c3a2fde78ef1ba5d8",
+        "last_modified": "2026-07-14T08:39:21.555Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-26/f1406dfbc1c4b73081d091c4419ad2c94c4aea669c9ca40d2a91293ffe2ddcb6.mp4",
+        "size_bytes": 9374908,
+        "etag": "723e2d908796bca1eadcdab25d227744",
+        "last_modified": "2026-07-14T08:39:22.630Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-27/0b8054de2986b6b59ce8f0d561db5a8490cebcedf3e5a3d704f4a9f1cdd85a10.vtt",
+        "size_bytes": 5702,
+        "etag": "4a61da5155ecd270c40cbc76ab715575",
+        "last_modified": "2026-07-14T08:44:52.531Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-27/6324ddb31b8a5eeffedbec783df8050a4fe0f44aaf82678f4270973e33f13db9.mp4",
+        "size_bytes": 6757750,
+        "etag": "535c4841f4bfb252e25148bbf7635ca5",
+        "last_modified": "2026-07-14T08:44:53.211Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-27/e2f5f68cc6f6362feaa7d6758aef30df2327c627cc6f7ae647472217fc4719af.jpg",
+        "size_bytes": 229376,
+        "etag": "50231f6cf6b0e8570f8c51604d9863b4",
+        "last_modified": "2026-07-14T08:44:52.625Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-28/8e6eb8bb113842e4131813799ecd5a2154cf9a139a2745aba1597d20cf089182.vtt",
+        "size_bytes": 10355,
+        "etag": "47ce9bbec0d29efc4c97542f3d763c6e",
+        "last_modified": "2026-07-14T08:39:37.472Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-28/b8d5a65da64562f83b33e698b70c46c3f5fc91409ce33ab3af13a13a8e288afc.jpg",
+        "size_bytes": 229361,
+        "etag": "d92e4039777394f54cf9cad0b64f069c",
+        "last_modified": "2026-07-14T08:39:37.478Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-28/c8564b0a4bae4d70e0ab85864df5d02e46880c7a4ca3a5c62d2b502ba0e2ec44.mp4",
+        "size_bytes": 9920491,
+        "etag": "8d3ffa1565f737b833c935d7c4295ca7",
+        "last_modified": "2026-07-14T08:39:38.209Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-29/008ad2f5866c838323e3ea675ebddf0c1f96afb778993a7146b23283b6319f91.jpg",
+        "size_bytes": 262100,
+        "etag": "e9d92ac8f00982cdf14d30734143a42d",
+        "last_modified": "2026-07-14T08:39:51.307Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-29/74d04090384e139d6810bcbad2512959bea09040f8afdd29c6c67edfcb9f1b24.vtt",
+        "size_bytes": 8617,
+        "etag": "cda9caa20f3972f6cff9dbb91aff350e",
+        "last_modified": "2026-07-14T08:39:50.864Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-29/b9d0ca1f0d52f9df1a807b44a680ec33313b3e51fea5c2e509b095ed5a55a531.mp4",
+        "size_bytes": 8622708,
+        "etag": "6895451c5080b07e93466f15c598851c",
+        "last_modified": "2026-07-14T08:39:52.679Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-30/1f0b15c8e360126c8ed1f2ade6cb523f5929274f26e3b89c2a655b0359e34a47.jpg",
+        "size_bytes": 226359,
+        "etag": "f0f803c7ce069d2503dfa1ee77e0ae74",
+        "last_modified": "2026-07-14T08:40:03.578Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-30/22c1f00047f9942165df0faa2022ca5f1391bc16276486dccab736dda430afbe.vtt",
+        "size_bytes": 6752,
+        "etag": "37d603e85e62818d2d64cd12d838db0f",
+        "last_modified": "2026-07-14T08:40:03.471Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-06-30/9e530ce3fb0d0314446232f0e7484ed2cd2c4fcd96404c1f2b122c1012c3b745.mp4",
+        "size_bytes": 6152593,
+        "etag": "87360300e4502255e55824db969913be",
+        "last_modified": "2026-07-14T08:40:05.197Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-01/05660407ee16e376a081ba12ab1f268c83e52d78f8b23102748df3916a8fa7e1.jpg",
+        "size_bytes": 222365,
+        "etag": "c5447ae00079a05536a73601a9820e39",
+        "last_modified": "2026-07-14T08:40:20.694Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-01/d4c2617aa45fc3f76f39fe91b842cb093f72bf9780f74df23139c9c7e1345b2b.vtt",
+        "size_bytes": 9727,
+        "etag": "6a14b61a9894a18332e045573f19b096",
+        "last_modified": "2026-07-14T08:40:20.660Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-01/dfeb68ff38519c232f2e3cd9057a7e36d7d4df865746064003b069a74a6a6953.mp4",
+        "size_bytes": 10142881,
+        "etag": "88bc6080ce8c47268fdeadd42b526338",
+        "last_modified": "2026-07-14T08:40:21.453Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-02/6a04c3b05d1b1a1b482667aec94e670bb213178e71b991bce7620e01e9f705ef.mp4",
+        "size_bytes": 9431894,
+        "etag": "a2d7cc40db14afbbe815940332893891",
+        "last_modified": "2026-07-14T08:40:36.828Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-02/6f6cc4cb4773049cee06f9992c6f05dd4dc4ef055fc5b185dd77a89d81634d16.vtt",
+        "size_bytes": 9188,
+        "etag": "a13986d9a4a7a77dd8fc5e22028abd61",
+        "last_modified": "2026-07-14T08:40:34.962Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-02/727418c81dc5a9cc0712b55406967f3181ef17612df8617bd3eb2b2ea66531bd.jpg",
+        "size_bytes": 230559,
+        "etag": "be52d366dd8dfcf914bdc3b9a4a8dae6",
+        "last_modified": "2026-07-14T08:40:35.233Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-03/6434133eeb79257367669b9b75689d1fe12c1cde823d2e11eb0449f703e20171.mp4",
+        "size_bytes": 9374251,
+        "etag": "58d43c50a21b1db1e61e32f80a87d476",
+        "last_modified": "2026-07-14T08:40:51.727Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-03/cc475e0ca928d56fe2081bbcfeed43ef1facf882ca8cc16feac8ea33726dc0b4.jpg",
+        "size_bytes": 207053,
+        "etag": "c1ea1805b3679d7ccb67598b9283c820",
+        "last_modified": "2026-07-14T08:40:50.874Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-03/e3c23a97c3ce0c6b61d3f95d9535efa8398da974157d498f0c0555a07931aa9c.vtt",
+        "size_bytes": 9645,
+        "etag": "01122d00376e1b28d8547fdedf3ae056",
+        "last_modified": "2026-07-14T08:40:51.392Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-04/6306520a3b44a073e6bcfeeba5b82f8f10b6732a9da3188da0be0d57d39e0efc.jpg",
+        "size_bytes": 216851,
+        "etag": "0d43bfbe7927e2a70de12837c8350aa4",
+        "last_modified": "2026-07-14T08:41:04.012Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-04/a4b84422144d0602cf399c3706102fe0f2f04ee4c78901ef4a43bcc2e64b85a1.mp4",
+        "size_bytes": 8239408,
+        "etag": "1cd97b3fdac62282e32434ae990698b6",
+        "last_modified": "2026-07-14T08:41:04.595Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-04/a5fb1255a621e799882c751b0a3f181543e8bfebafa426179463bc03349aca66.vtt",
+        "size_bytes": 8616,
+        "etag": "86a38537e947dd92e1ae555e2f875158",
+        "last_modified": "2026-07-14T08:41:04.565Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-05/261ee0b30fbbd998ac203747852342bf7931bb6e0eb4d3acf6e2936120f47be4.mp4",
+        "size_bytes": 7666229,
+        "etag": "956e53d5b981c1a2daa87307aca67d2a",
+        "last_modified": "2026-07-14T08:41:16.593Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-05/78ed1932176aa0b9a0a6c726aaa3ddde48d751b7179bdf117c36b050b8482606.vtt",
+        "size_bytes": 7169,
+        "etag": "90ee8667e98d5a9474664ff8004f0ce4",
+        "last_modified": "2026-07-14T08:41:16.325Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-05/ee09fb1e3d32c59ea258eee8465cf827e92a0391f805186e0bf9062ddcd46da8.jpg",
+        "size_bytes": 212729,
+        "etag": "9a04a7cada47bad49d15454eb772a6b9",
+        "last_modified": "2026-07-14T08:41:16.454Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-06/012883fc4fa992cb63f9ff04c05ecc04d5d8f896253219e66ebd0173bed64c15.vtt",
+        "size_bytes": 16589,
+        "etag": "fa9708b15aaa6bc8927186d6421a67c9",
+        "last_modified": "2026-07-14T08:41:37.504Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-06/a643de18d28b08a4988e4fd6ea78badeda2b711bc5b1e30fb0121945d57e84d0.jpg",
+        "size_bytes": 214905,
+        "etag": "b0588bb8d41ac86dccc2e02e019341ac",
+        "last_modified": "2026-07-14T08:41:37.431Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-06/fd3edeab8bfb74646b92c097368cd880f5f252f8ea254c92bce5a61e8f28f945.mp4",
+        "size_bytes": 16060632,
+        "etag": "8b141a41f2ffe526150b5726044c9171",
+        "last_modified": "2026-07-14T08:41:38.721Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-07/867325ee325cc90f157825dd1ef235460ca6325d169352040bf77fc04d48b67c.jpg",
+        "size_bytes": 220741,
+        "etag": "8949e46e3f0797195ddd58f96b449ba8",
+        "last_modified": "2026-07-14T08:41:50.652Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-07/b8a9b7bda413668d345d87779539eb9ae3a1ca516f869a676ea27ac769f686bb.vtt",
+        "size_bytes": 8188,
+        "etag": "474f2b299a45f2f56526d4a73e5008ef",
+        "last_modified": "2026-07-14T08:41:50.589Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-07/cdbd874972dcb6e9f1f464c2916f074c67b0cedcda25e2872b2b9de2563ee35b.mp4",
+        "size_bytes": 8070250,
+        "etag": "62e5dc004bd8cada15cbf9848ef72e68",
+        "last_modified": "2026-07-14T08:41:51.821Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-08/47aa018c2932909be2dea802e8b12140f955ed09326426de20edf5771548da05.jpg",
+        "size_bytes": 256403,
+        "etag": "12bcaed553419e22df7c6d167072d1e9",
+        "last_modified": "2026-07-14T08:42:05.795Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-08/b673cc69a38d1793e893d021df810a12f76c31b722773c99769a470d75e3a45e.vtt",
+        "size_bytes": 8190,
+        "etag": "ee21432fc5da74f67aa829f4aae5a8f2",
+        "last_modified": "2026-07-14T08:42:05.721Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-08/e6d6705941a77e18a9e43fc5594d0f79379f9259a37e7aee49f1683422b5c4d3.mp4",
+        "size_bytes": 9218544,
+        "etag": "4615a0a6b8e69a4044f405dd70e91d2a",
+        "last_modified": "2026-07-14T08:42:06.324Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-09/4547b68b88d6c2fea17ca0a4dbc987d3642bc598924d485fb397edc161ed2ac7.mp4",
+        "size_bytes": 8328245,
+        "etag": "695ebbc65945674372243a11767977a2",
+        "last_modified": "2026-07-14T08:42:19.849Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-09/a0fa951441f1491bc8667568d94d8a1f7ee43657a43fc28c6945e8f73996d61f.vtt",
+        "size_bytes": 8368,
+        "etag": "ce7af56b03cb8c736dfaf81b4444aa5a",
+        "last_modified": "2026-07-14T08:42:19.975Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-09/f0f00884d467b180d6e20b165bd87896b6a1714c645ccac49f971489af4d3370.jpg",
+        "size_bytes": 215860,
+        "etag": "bc30a5550dd25405ee0bb0118a9945f0",
+        "last_modified": "2026-07-14T08:42:19.518Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-10/e0eb1003e46957894b0feb6d420cf023c576c5618a8c72384402660bd3202b20.mp4",
+        "size_bytes": 5467278,
+        "etag": "50fdaa4b316d833752279fd4c3b84fe9",
+        "last_modified": "2026-07-14T08:42:32.964Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-10/e2eff3ec8953f5af304055c5b10516a0ec92ea4800547d19815e647eab3394fc.jpg",
+        "size_bytes": 202064,
+        "etag": "3587024466d4a149a27c15c50dd6ea17",
+        "last_modified": "2026-07-14T08:42:29.501Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-10/f21aca4c3f4ba5c491550564c4c9af17eb2c82f222825508f6226dc18fe41907.vtt",
+        "size_bytes": 5462,
+        "etag": "1bfa089eb120b2c5e88b04e6878a0ade",
+        "last_modified": "2026-07-14T08:42:30.155Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-11/41746f0518b39d3c7ee89719a8ffe8f82e2bb18bfe24c72ca67d939a2e514bbe.jpg",
+        "size_bytes": 207106,
+        "etag": "b675a85c6d84e2a305cee95b9e127288",
+        "last_modified": "2026-07-14T08:42:41.421Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-11/5791ccdf5546cfe35bf022dcdb6fb35ebca6cba5d1416ed45b2c4040d931fc3b.vtt",
+        "size_bytes": 4425,
+        "etag": "d4af695ce8a432849252c4096c311c8d",
+        "last_modified": "2026-07-14T08:42:41.328Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-11/7b3544fe4928e941a79d06149e2068b184b1405d3ca14c75857eac065d994f8e.mp4",
+        "size_bytes": 4667092,
+        "etag": "d763c22149f60fb2f3565a469e9fd2b1",
+        "last_modified": "2026-07-14T08:42:43.250Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-12/4bbeecf391673424c5091ff5a089b21533b950f7578a1ec6ace562517134eed9.jpg",
+        "size_bytes": 221985,
+        "etag": "001c0eb25dade81a43cf50e424bf2afe",
+        "last_modified": "2026-07-14T08:42:55.523Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-12/b07836f535b75877f759132e0380a670e230cd03f310a45a6995f0290b77cff8.vtt",
+        "size_bytes": 7508,
+        "etag": "d9e2d469a3eb310859c71e50e661797e",
+        "last_modified": "2026-07-14T08:42:54.655Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-12/e168bd997d5beeb1ae59b5688b4d9acb6ff83fee11786f0efb7af597183313fd.mp4",
+        "size_bytes": 7501606,
+        "etag": "204003cf107b9d60f6fbb2a6dda50cbc",
+        "last_modified": "2026-07-14T08:42:55.395Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-13/1843168bb10cfaed620299012144bae1a94aecf4ac4675421007354b9bb60894.jpg",
+        "size_bytes": 215649,
+        "etag": "338f61c677ae27b210325fc8138bb4b0",
+        "last_modified": "2026-07-14T08:43:05.999Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-13/464607def5848c6be807328897f22a5a42167fcf091286d566b7f447c176f721.vtt",
+        "size_bytes": 4839,
+        "etag": "a245ac3d1d9982324775fd90c6c20edc",
+        "last_modified": "2026-07-14T08:43:05.125Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-13/e37601153b7079b3d22b8e421840474c5fce6a27dbae733844ee74464369c19b.mp4",
+        "size_bytes": 5111849,
+        "etag": "af218eb43e44d4c513a8f22e03d94939",
+        "last_modified": "2026-07-14T08:43:06.627Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-14/7c757f6ad560db2cfd90bd7aa564231b2d7a658318cfc2da04c0f4ceb0d8f526.jpg",
+        "size_bytes": 301660,
+        "etag": "642b7ebf7b6d076e3a5157f7b8491c6b",
+        "last_modified": "2026-07-14T08:29:49.166Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-14/b270906214b50b267658e9fe0dc6d6315be7f6b741853499734213a91863f53e.vtt",
+        "size_bytes": 11594,
+        "etag": "bf9e1f978d368f578f26cc9ba9eec256",
+        "last_modified": "2026-07-14T08:29:49.005Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-14/bb1da4b41f7994e32b54b64d3c55e86c67bc627500c50cb2e2b44612bf2997ab.mp4",
+        "size_bytes": 13076786,
+        "etag": "b6b4130c1633edac8f85cfab4923b292",
+        "last_modified": "2026-07-14T08:29:50.033Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-15/49781813aae481bad495b1ed9a3509a6b2a3f9be6434a37fbd9b3e7be76bffc8.jpg",
+        "size_bytes": 199766,
+        "etag": "5eaa430521bf7bca677168bd2c6753eb",
+        "last_modified": "2026-07-15T02:39:56.879Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-15/a310ef62ae09bf8c9ced10ed2612648e07ddf0a64ad524d0bec5371a33892197.vtt",
+        "size_bytes": 9345,
+        "etag": "ab9ae35ce2e3d10e47c888cf98865528",
+        "last_modified": "2026-07-15T02:39:56.908Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-15/a6febc2b4fadc3c74182d9070d2269a67d539187d08a9c927c62bfb108c23a51.mp4",
+        "size_bytes": 9136184,
+        "etag": "d9a68ceb79cffd44b66d55106c787084",
+        "last_modified": "2026-07-15T02:39:57.476Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-16/337a3cc0e7e2aebc14135de2b6e1150134d255428c0cff0c10362fe781b34e0f.vtt",
+        "size_bytes": 10671,
+        "etag": "0c18dfb151bb743cc689624712650fd2",
+        "last_modified": "2026-07-16T00:15:03.214Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-16/72bed48412a38a3f58480ea543cc055654c3aa4957fe5e7802bf21b689360f86.mp4",
+        "size_bytes": 11077509,
+        "etag": "e9ad4f3c080e2ba7b3700ff2c2d920d3",
+        "last_modified": "2026-07-16T00:15:05.404Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-16/c0ed248ea35c19bee0dcfbb06a8f3beaa43822f4d53e9517d4245bcc9592b951.jpg",
+        "size_bytes": 208795,
+        "etag": "3532901018ddc4877f187c4d21bca3ca",
+        "last_modified": "2026-07-16T00:15:03.249Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-17/4a66df48438539d2317bd7a54097efe67f2a1f8b2417298b255a9c88c63fa20d.jpg",
+        "size_bytes": 216952,
+        "etag": "bb864286596d36bc58bd6157096f6617",
+        "last_modified": "2026-07-17T00:12:44.792Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-17/c15bab7451c2327ddc5f17b8adcc0ff4df8e4b623ce217f1b44c0c7fce1ec4af.mp4",
+        "size_bytes": 11910122,
+        "etag": "f8d2d8ded53f51590bdc69e22a76a757",
+        "last_modified": "2026-07-17T01:13:48.026Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-17/ec816cce9e96fc4a461c9fb1996377549f36d6a157f23e1c61e2625ec0ea7451.vtt",
+        "size_bytes": 12681,
+        "etag": "f7a12d87f60481863651b6d0c57d5baa",
+        "last_modified": "2026-07-17T01:13:47.445Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-18/05994dcaabaa5bafb9e86d30f3a6a5be27404539f1bcf91c4c7cc074a7695d41.mp4",
+        "size_bytes": 12590439,
+        "etag": "31b3a38a6cd9fe0c54acb2c0be23f8f7",
+        "last_modified": "2026-07-18T00:13:36.185Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-18/1541eb6d897e63b6d36b739a66447297887f6b2e21dbbde5005b2229b97f264c.vtt",
+        "size_bytes": 12820,
+        "etag": "c39ca3e14f67e76aa58a9df357f958d7",
+        "last_modified": "2026-07-18T00:13:34.907Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-18/336fad42d308a882106106c8bb81f3c2565094152e58fc01b8b5a00d41c32525.jpg",
+        "size_bytes": 256195,
+        "etag": "fa34e7ed3578711a0fe82f1ab3ad5622",
+        "last_modified": "2026-07-18T00:13:35.093Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-19/807b7f998611751dd1326e2b72ac89b3e41383ee2a60b83fd7fb1bccc38a23c8.mp4",
+        "size_bytes": 13334828,
+        "etag": "aff54d01f4bb4002455c0ffda8754623",
+        "last_modified": "2026-07-19T00:17:02.466Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-19/ad4c035b6e2b5384d1751b5e7fc240763d5133e6c8dc59421298176fdeb09f69.vtt",
+        "size_bytes": 13927,
+        "etag": "53210a928b89969d208311ea3f6b7b0d",
+        "last_modified": "2026-07-19T00:17:00.967Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-19/c066c2467a17be86d3ce744a5e42e1a685bd605dcb4efd1f8301d0e7b77925fb.jpg",
+        "size_bytes": 197065,
+        "etag": "1002814781d089bd5c55abcabeb0eb77",
+        "last_modified": "2026-07-19T00:17:01.200Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-20/43b676a5f464eaa491244fb37e928d0724d2a572c2db74d00fb67aa804bb029c.jpg",
+        "size_bytes": 231374,
+        "etag": "32e2dcbd29689a26d3f39eb521fbbeae",
+        "last_modified": "2026-07-20T00:54:10.152Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-20/52fcfe9d653dba7a959e6f25b4e0d234bb5b03bc5ccf83a4522c20dc88f7c97a.vtt",
+        "size_bytes": 12599,
+        "etag": "a806aa1eee071a7279cf5c80aba305c8",
+        "last_modified": "2026-07-20T00:54:10.109Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-20/68b11685bd1e8ff8964b20260a0e6bea0756dac0c87138a487ffb36d02487efe.mp4",
+        "size_bytes": 12269377,
+        "etag": "46dd768410b16085cf2e6414ed4a9d8f",
+        "last_modified": "2026-07-20T00:54:10.639Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-21/2abe73f79ddbd6ee792b9f6d4b82331650ceb0b2a2186ccbeb8e73d55a954977.vtt",
+        "size_bytes": 23731,
+        "etag": "48704f6e1d50fe6cd5e078404453524a",
+        "last_modified": "2026-07-21T11:23:32.702Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-21/692dfef8ffb8a83fec524db74e19f42ddeddca6bc71284839feabec513a5cdf2.mp4",
+        "size_bytes": 20942694,
+        "etag": "d68d9d007413c71509b91e9b8eef444e",
+        "last_modified": "2026-07-21T11:23:33.837Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-21/8ca2c818fb564ad930eb565dadc21b61fdb0bd62402b4e75d72abadb093d911a.jpg",
+        "size_bytes": 239678,
+        "etag": "9a5179cc2ed5b66b49b0004939d61908",
+        "last_modified": "2026-07-21T11:23:32.654Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-22/2ee9401120c49e144a351883f820c31d5242d9bea97b5a6446a53c7caf4a6c14.vtt",
+        "size_bytes": 12716,
+        "etag": "71e7dd1b83d0b573c8fa414a6100f9d9",
+        "last_modified": "2026-07-22T00:13:09.613Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-22/b19f5af81185ea97978c977046b7340ceca8efa15563a28ec644da95353de748.mp4",
+        "size_bytes": 12133263,
+        "etag": "ae742f1e037556c194d59a7f3d290019",
+        "last_modified": "2026-07-22T00:13:10.556Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-22/d0c55615b135e32bfab9b0f5a529c42f8ef8fed5885bc416e9f2d6c875519da4.jpg",
+        "size_bytes": 203274,
+        "etag": "b30938e0947822bc8a9b4b9909ecde0e",
+        "last_modified": "2026-07-22T00:13:09.357Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-23/095e6d03961882dd8e14c87adfbb23b7bbc2696b7ba476b061e8c0a67e1f803a.mp4",
+        "size_bytes": 11385378,
+        "etag": "255c8aa0449cb7de81804169eb9c09f4",
+        "last_modified": "2026-07-23T00:17:08.302Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-23/40f32890229f6cca49693b888b343a291bce720d23e2daeeec2d527109d9bcc6.jpg",
+        "size_bytes": 197911,
+        "etag": "a7ecfd115f124d9ac6d0976418bb1c40",
+        "last_modified": "2026-07-23T00:17:07.804Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-23/792e9d9eba09bdabfb36874b874c171cc9ec92b59f1e04f80687e53f579eb316.vtt",
+        "size_bytes": 11037,
+        "etag": "b2757be86623ece5dc911fbd00750dd1",
+        "last_modified": "2026-07-23T00:17:07.828Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-24/47f9b75b38189cdfe5ef13bde23290820f400bbd365fd18d16165a6fb5813694.vtt",
+        "size_bytes": 10637,
+        "etag": "039d3fb3ec0816fc292fd6d1bf8bc531",
+        "last_modified": "2026-07-24T00:59:02.831Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-24/7c0686a5232f15981de4c6f696acca70826c6484f60adeda00b9ade8cfaecfe0.jpg",
+        "size_bytes": 235641,
+        "etag": "44f5ad8cb38b015d39af7faa38c4aff5",
+        "last_modified": "2026-07-24T00:59:03.011Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-24/8989a2840281c7eec5a11fdb55f198be220895e928337ed62abf43f360381023.mp4",
+        "size_bytes": 10961709,
+        "etag": "1cc23ebca5eb6f37139c24be94347846",
+        "last_modified": "2026-07-24T00:59:03.650Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-25/2cc6d7f8e75c48f5b0684830a6b6dc1e891362e7c7af3768795f62b8f4e66b1e.vtt",
+        "size_bytes": 9967,
+        "etag": "872aa8f252a88cf30fb87a0ba8be9285",
+        "last_modified": "2026-07-25T00:10:29.712Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-25/5ab716d956543c9b7b7bf06db5eaaaac8120ec7d74de5013e7269144f4a1fcd6.mp4",
+        "size_bytes": 10064622,
+        "etag": "b510e8198850420b14a60a7599786dfb",
+        "last_modified": "2026-07-25T00:10:30.530Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-25/809cf08ebbbb119bb8bfe7401e2fe64bd9c0fe300beaf30bd949ebdfa522b8b8.jpg",
+        "size_bytes": 232828,
+        "etag": "78dd85581066ef8736883166b32e73b4",
+        "last_modified": "2026-07-25T00:10:29.751Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-26/2f23425d636c1fa0a2cdc156b9893b1c54136d7c2260a2666e049898294e6d8a.jpg",
+        "size_bytes": 207982,
+        "etag": "c24a0589f9bce15f217ef893212b3a51",
+        "last_modified": "2026-07-26T08:00:40.697Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-26/b75864598f70fe8135e45b4139494e4dbc1f47ea9d18b3e643cdec890e026e8c.vtt",
+        "size_bytes": 11928,
+        "etag": "0d0223e02f85ecd0584adb1c529c2720",
+        "last_modified": "2026-07-26T08:00:40.714Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-26/f0f7ac86ff8df5c420672353f4bdf91ab017271b887dc3815fc653e1f3996f0b.mp4",
+        "size_bytes": 11943461,
+        "etag": "c814202de18742465d6edd8bb752fddc",
+        "last_modified": "2026-07-26T08:00:41.215Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-27/255ce17a5ac32a83454d87fc63b43b7b73ee6b69aa5f7b7492c83f6805916e03.jpg",
+        "size_bytes": 246945,
+        "etag": "f94484a6a2601fe70784c7081b85b704",
+        "last_modified": "2026-07-27T00:17:03.447Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-27/b4462fddf1168765be0970073f9068ef0a0aaa83607da2a72d18b9f4199c4084.vtt",
+        "size_bytes": 10317,
+        "etag": "8bded5ff03a618e4d0372ff5d5ee7574",
+        "last_modified": "2026-07-27T00:17:03.375Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-27/d0a6f83c78be139efb36cc6f5bf54a91146a8745bc306dbae4650ed48a612795.mp4",
+        "size_bytes": 10159898,
+        "etag": "6c1137c7fb1a34fb5875d670521f6bca",
+        "last_modified": "2026-07-27T00:17:04.738Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-28/21cda8dbb386ad6d34ae716e72dc348652a386dffae7654656cb1166752356d4.jpg",
+        "size_bytes": 266395,
+        "etag": "e1bea65e9db711ed52c1970ed101d9f7",
+        "last_modified": "2026-07-28T01:03:44.495Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-28/cc52893d752bb04a9d7abe838240785939a5bd6e8ca3c0c4042c0a243cd25f3f.mp4",
+        "size_bytes": 10336142,
+        "etag": "10aee0f9ca08e6ebe9bc87716396cbae",
+        "last_modified": "2026-07-28T01:03:45.192Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-28/e59fb5f5450d91bc928131525815c517e0bb105a6799bea00a05a7b35d08d23e.vtt",
+        "size_bytes": 10435,
+        "etag": "cc625c662968f46dc8c013f86cc3deba",
+        "last_modified": "2026-07-28T01:03:44.445Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-29/21b9267bc7079cd93e5b5ea6a50507edc2f2cb39793b9f1a3139d4e3c4719f40.jpg",
+        "size_bytes": 190483,
+        "etag": "eceb9208f94a712cf792039028585052",
+        "last_modified": "2026-07-29T00:10:03.647Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-29/c62cc3ee3fac332f17e038c4d62fd7c3fb5efab35aa0ed18f938347482c96d7e.vtt",
+        "size_bytes": 12009,
+        "etag": "1b96359a98da2ce73a3e7a9ed7bf3eb1",
+        "last_modified": "2026-07-29T00:10:03.590Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-29/f93ac2c696263d81fcef78a89eccf52f91c6898fbafd3dc9a1f39ae787710906.mp4",
+        "size_bytes": 11473444,
+        "etag": "4d3a4b38358cceb93a60c2065e80bddf",
+        "last_modified": "2026-07-29T00:10:04.211Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-30/5bd3b4e290c1cdb73626e7cfc13a18172034bc2fcaa4182d6f99bb15f8870ed6.vtt",
+        "size_bytes": 12059,
+        "etag": "decb3ea0f294c66739e57819cbbdd38a",
+        "last_modified": "2026-07-30T00:14:51.096Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-30/6c0dc4c66ac02c38baa15e86ebe5a4996de6c7043acdf7c545ec7ba1db259019.mp4",
+        "size_bytes": 11088767,
+        "etag": "ac8f0159e449cb1def736b000884a6c3",
+        "last_modified": "2026-07-30T00:14:53.332Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-30/be0ae807df1c6e167298f05e8ee4b7e0acbed33ea730a7ce2e1fd1d246c16505.jpg",
+        "size_bytes": 186236,
+        "etag": "c69ff7310b1b5ce9f8256bdaeb21dd5f",
+        "last_modified": "2026-07-30T00:14:51.109Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-31/420c53972afb41b74d84fc0a17629e455fec1d9b7062d3f6974f39dfc928562d.jpg",
+        "size_bytes": 199934,
+        "etag": "ebe3defb73cc7a197d15defe64ef91e3",
+        "last_modified": "2026-07-31T05:21:15.396Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-31/781868745fe68d699f562f2f63ebe96ac95845afda24767a3b5d2c1606dcce29.mp4",
+        "size_bytes": 10311435,
+        "etag": "6d8a0331097456fd7662d534d85f02bd",
+        "last_modified": "2026-07-31T05:21:15.817Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-07-31/8e636f2632bc36d43589fdb69e6b592efffd322bb3c263c29cb060cf75c0db3a.vtt",
+        "size_bytes": 10390,
+        "etag": "391315d85e44ab77bacfcea03f19a53f",
+        "last_modified": "2026-07-31T05:21:15.394Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-01/2edd275b15d66fd6ddb9c176805ec02e4c123dff635ab6f587c7684dd35bc9e4.mp4",
+        "size_bytes": 10215830,
+        "etag": "bf42f7c1c67a6d6f4251dd70b8c0f703",
+        "last_modified": "2026-08-01T00:17:19.006Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-01/63e4577fe5f8f41e9e5ed451be329eb93aecd096580097532d13e761a706cd71.jpg",
+        "size_bytes": 210404,
+        "etag": "d60fc7b7662d0103423d20a8ba2ae9cd",
+        "last_modified": "2026-08-01T00:17:18.639Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-01/f7a25eac3eef356ec62e05106b72fe06acb06b0c6c4706c706005403e3b9d449.vtt",
+        "size_bytes": 9433,
+        "etag": "3c450f1aca085ec5c64a4f3071923e19",
+        "last_modified": "2026-08-01T00:17:18.582Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-02/302f7ff4fbcdfd011b6d3ae47d44dbb9eb6ac0e5953a4649c6f57df370fb7d34.vtt",
+        "size_bytes": 12007,
+        "etag": "9949eefe32488f3a6dc37280326ad5a8",
+        "last_modified": "2026-08-02T00:14:52.213Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-02/3840147852c50926710774b6afca93a91658ba53c4b87adc1203e7e1ee8f0a15.jpg",
+        "size_bytes": 198377,
+        "etag": "c498120fbd2bb63fe60503f4870ec3ba",
+        "last_modified": "2026-08-02T00:14:53.119Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-02/42acec7f082a853a64a8c6992c86309cbd7cccd10b29cea9aeae271d293f99c7.mp4",
+        "size_bytes": 12071456,
+        "etag": "511728ee61bb7b8e20718e364f86d329",
+        "last_modified": "2026-08-02T00:14:53.718Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-03/3f4fb92d18d622b15acbd9074f74a8d6a1091105f51cd345afee897b8013bebd.mp4",
+        "size_bytes": 11119184,
+        "etag": "deb9d37540d1337cc2e9b939d9e1a72b",
+        "last_modified": "2026-08-03T01:00:11.766Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-03/4968a29edc37bbe2b1de62457364f08ff519c5b541478bc560e651090036462d.vtt",
+        "size_bytes": 11286,
+        "etag": "fa88a7568c89caa7fed1e3cf0b98f28d",
+        "last_modified": "2026-08-03T01:00:10.495Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-03/75610b572ad6b665831e1fee52a121b61e4e6bffbd6f01cb921fb2181e4bbd16.jpg",
+        "size_bytes": 237698,
+        "etag": "6cef2db1778e240f6137a24039160e7e",
+        "last_modified": "2026-08-03T01:00:11.398Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-04/22a04c2b16acfbd2d6127ed8b2b67eb0a0843f46c0addfd587c9755edd220504.vtt",
+        "size_bytes": 11919,
+        "etag": "443b471ecf91fd9c1aabaae3e3a03d59",
+        "last_modified": "2026-08-04T06:31:54.497Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-04/24b2175de8b97983834ce9193b84efd37b284034ed0bc4c9bd4a9a950dd581df.mp4",
+        "size_bytes": 11898013,
+        "etag": "1df259fe327ffe3435c14b3a34c73bde",
+        "last_modified": "2026-08-04T06:31:55.043Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-04/e39b8e505ac5e0acf1084fa97ec1f146fb1c3f6f3859373cee1e3aa87a5b74ab.jpg",
+        "size_bytes": 256456,
+        "etag": "8cf4f9821c9bea26f9d1cf57aa2a746d",
+        "last_modified": "2026-08-04T06:31:54.504Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-05/0b76ae9fce06d8bc14b5fc976e12b3aea299c8217be54ce7370e81673b9f6a7a.mp4",
+        "size_bytes": 10641398,
+        "etag": "fe5883fb9c521c2ff6adea427cfc81f8",
+        "last_modified": "2026-08-05T00:52:53.116Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-05/1af21aab32169c707b05ad7576e5b32e718889e8112f67a6193ef334e215fdbb.jpg",
+        "size_bytes": 213077,
+        "etag": "8385a083934253ce86dbf555607c40fe",
+        "last_modified": "2026-08-05T00:52:52.635Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-05/dac37d9fb29b42d50a9a3045a3a4913000a2e0570d235af2f5e92560c4a30664.vtt",
+        "size_bytes": 10979,
+        "etag": "d90a155f274a373c1e8da6837fcf29c8",
+        "last_modified": "2026-08-05T00:52:52.671Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-06/3b45d1b4efc98a914381a8768753f8d7523077242f9d7ade27b81f1d95551639.mp4",
+        "size_bytes": 10894864,
+        "etag": "6cc88656ff0fe274786c57ace0294e8d",
+        "last_modified": "2026-08-06T00:13:25.005Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-06/7577f73f4a7adb6201e09e603093fa2ddd92762fa9f5209abad9e7497c6688d2.vtt",
+        "size_bytes": 11121,
+        "etag": "d6b21c4b17ce18da9327bd585131c64d",
+        "last_modified": "2026-08-06T00:13:24.389Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-06/ab66c65df91618407837f4ba21e72696bf14461212d528f78f75d51ac58dfa80.jpg",
+        "size_bytes": 220974,
+        "etag": "425bec9ab477d3ac5a729bb894a8e613",
+        "last_modified": "2026-08-06T00:13:24.435Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-07/910409f02faa9491294b8dc40f9c702407b17f4f9782ab44103bb576e33018e6.mp4",
+        "size_bytes": 11407547,
+        "etag": "34a5142f1e8167d3d235b20e453d19c5",
+        "last_modified": "2026-08-07T00:11:37.016Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-07/c61bcb22a941ba815306e62b01e179cf26d1c2501f2b92285f7030471ce39d3a.jpg",
+        "size_bytes": 228459,
+        "etag": "e7f3cc88d99e4b7b213f1682cc20d954",
+        "last_modified": "2026-08-07T00:11:36.616Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-07/d5a9cd33d9d7cb0d12c638ee17b3331e068fc35a687ff841898f533d948929f9.vtt",
+        "size_bytes": 11412,
+        "etag": "1bd2c99798d914098c533e94e03a8614",
+        "last_modified": "2026-08-07T00:11:37.130Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-08/06b65a74fc88a3d32a1ab02aa579e6e51600dbcd494068a618b403548cefacc6.mp4",
+        "size_bytes": 11496156,
+        "etag": "8ef53b93de363fe939e0bcee59b1a088",
+        "last_modified": "2026-08-08T04:01:41.663Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-08/db1f03e8f408d376ab459d232a2f3a84077f88f331d44bb01658215ac1f834bf.jpg",
+        "size_bytes": 196199,
+        "etag": "b8615b7e5827d4b81282503dd927c306",
+        "last_modified": "2026-08-08T04:01:40.666Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-08/f3509b3a42cecae70c0ad9cb6ea27b784f183a3fb67a0310f0923a2fe927aa32.vtt",
+        "size_bytes": 11604,
+        "etag": "75f1ed97949d020baaa47d7bd3d0183f",
+        "last_modified": "2026-08-08T04:01:40.689Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-09/5714530b3f3e64e6f7304ed3b8ea6520a22e568f950ba889ad45960f286a49d2.vtt",
+        "size_bytes": 8776,
+        "etag": "5a3a4b15aba9933b123bb45fb9990bc1",
+        "last_modified": "2026-08-09T01:27:40.646Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-09/ed3c367c63c18bf429a3761f510d41f8e6e3adaad142f5b2ea4b84e22baf0ed5.jpg",
+        "size_bytes": 213149,
+        "etag": "3fe50c1be21c9103b2a4ac8293808910",
+        "last_modified": "2026-08-09T01:27:40.652Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-09/f42f09187b4ae56e8b5b6ca4e940742c219c85798142dea6b0b12613b875d10e.mp4",
+        "size_bytes": 9024755,
+        "etag": "12119062372c64593eb774df38451600",
+        "last_modified": "2026-08-09T01:27:41.707Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-10/83c82795d29d8fd7a2b2fe74f4e41f7be61878c372f9d23390abfa4c327f1f0f.vtt",
+        "size_bytes": 10854,
+        "etag": "99495ca3faff5e1a62fd520a6eaddd15",
+        "last_modified": "2026-08-10T00:17:16.823Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-10/ddffe26cd6b63c2a8360053cce0272ab3604aa39c9f0cbe2127bc53d126076d3.mp4",
+        "size_bytes": 10993126,
+        "etag": "05268e5f3a7ca66c869765d1f10479e6",
+        "last_modified": "2026-08-10T00:17:17.421Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-10/ea33a1adb03e19c9dfc71d49c0657933b44a142f082579d9812596f6b8a780a7.jpg",
+        "size_bytes": 233878,
+        "etag": "2ec041229c8809e4ff279651d37f6ed4",
+        "last_modified": "2026-08-10T00:17:17.013Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-11/1f59c0bf00589e2bf1d712be2282863a4ba9edbedc367f4d75dadc68931ce7c5.jpg",
+        "size_bytes": 195730,
+        "etag": "dfe34abf48c3db4bfb8f5679b239aa71",
+        "last_modified": "2026-08-11T00:42:54.843Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-11/edeadb44a0af18f49195d4fed78e645d54811ee76cce5c21e14f1a2a7af2c3db.vtt",
+        "size_bytes": 12670,
+        "etag": "6af07f90cb4054f42cb8edbad3ab20f4",
+        "last_modified": "2026-08-11T00:42:55.331Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-11/fc724ba534f0a33f8f4d4ba4ca4c2449a31bed51cc30e339379245f380a2c489.mp4",
+        "size_bytes": 11814688,
+        "etag": "b67f5ffdccce6f34a86425ff252963eb",
+        "last_modified": "2026-08-11T00:42:56.657Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-12/6ea401790e54ccc8444da1aa92199f4c7378d756e6c3c1ef29ba2f44e6abc602.jpg",
+        "size_bytes": 212791,
+        "etag": "f8b3ebf310c5dc7a86ac8ac09634c6e2",
+        "last_modified": "2026-08-12T00:47:23.797Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-12/78619c86e758ba95fce40dc5b25bece7c8467efd5e95a5f23163752715b40d0a.mp4",
+        "size_bytes": 11296594,
+        "etag": "3a12beac32ea505bfdd939ea4002068e",
+        "last_modified": "2026-08-12T00:47:24.513Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-12/cd03c37ddbd9709f7ad892519a3c83531135414eb447b69c7c9a66bb3a1a2cc1.vtt",
+        "size_bytes": 11526,
+        "etag": "1048fee29e51118ef97fbaf25a3be466",
+        "last_modified": "2026-08-12T00:47:23.671Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-13/370774dca5f30a23ee1ce21454c977c63fc710f1e3a990224ccfa6fdd8f20aab.mp4",
+        "size_bytes": 9705822,
+        "etag": "e9b7e76c1fb712bc26af64e9f6b14560",
+        "last_modified": "2026-08-13T01:45:03.021Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-13/60bc64eebddc95f1c78a139e928037025b72c4f04a63a02fb3f643e066c05500.jpg",
+        "size_bytes": 180619,
+        "etag": "c1ccdec354d4856af3b697fc0e16def4",
+        "last_modified": "2026-08-13T01:45:00.932Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-13/852d3bec17965c3068f3a2209d6599a6c960223de463d8b3be08e19bbbb08d5e.vtt",
+        "size_bytes": 10260,
+        "etag": "e0e37588af31fc08bf43872edba56670",
+        "last_modified": "2026-08-13T01:45:01.011Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-14/8dcbbc8fac6610b77ce8fe45bfdb6e084c4bc8a11b6551ae2ef9f444a3d36827.vtt",
+        "size_bytes": 14170,
+        "etag": "82b0f3038710bc4b2795eb1efe737dec",
+        "last_modified": "2026-08-18T04:17:31.136Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-14/b280816a129651584de30ee5e67fa80368895edb0971f0ce400cfa669c7d75e5.jpg",
+        "size_bytes": 253552,
+        "etag": "69432852f6ea0c75fccabb0d6b1adae8",
+        "last_modified": "2026-08-18T04:17:32.414Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-14/e16abfb80ffa2a077573c9ebe40ac4a71c31e08b4b5479764cf37de4f258a5cc.mp4",
+        "size_bytes": 11425034,
+        "etag": "2bcd887223fb5d1f9578e60d2549083e",
+        "last_modified": "2026-08-18T04:17:33.148Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-17/06f48d1fb4ea77dcda737bf310514f95106080729716e506fcd38e0f411891ca.jpg",
+        "size_bytes": 243682,
+        "etag": "0d05f646912c150da5db3e35ad4d5694",
+        "last_modified": "2026-08-17T07:31:27.525Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-17/13c45703d7685326245f91bc94c6d594ce2d6704ad87591b59e45e39a63c1e61.vtt",
+        "size_bytes": 12849,
+        "etag": "082cf806630c0a35e444f0723504742a",
+        "last_modified": "2026-08-17T08:54:40.700Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-17/42608700cd757d7ccd6393f9b9ae0ffaa37dfa4b3d81ce5b9d357bd961b67ebb.mp4",
+        "size_bytes": 9874007,
+        "etag": "201e43cbba59286c45d6b09371672c4a",
+        "last_modified": "2026-08-17T08:54:41.309Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-18/04de6dee604e2d945a14967e46a60fd299cb59f92d78528d2d705964907bb28e.jpg",
+        "size_bytes": 229386,
+        "etag": "69e85cf0e4ca8077a880351d8e6ebdd2",
+        "last_modified": "2026-08-18T08:16:35.114Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-18/1c8d935fa11f558a46d9e3dc2d928d53b9cb13a58dfcf239068c4c538fc8c72e.mp4",
+        "size_bytes": 11722522,
+        "etag": "f971799e69831d098edae8693e57c0e4",
+        "last_modified": "2026-08-18T08:16:36.133Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-18/335197ebddba22af5459cae441d0b56b4ac2f3cfcce18d0c82dc35cec815520c.vtt",
+        "size_bytes": 14842,
+        "etag": "5fbf7a6b87949b5f8270714559cba8ea",
+        "last_modified": "2026-08-18T08:16:34.597Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-19/03072fb248837af62af25033f614886d83e1ab87020f12cb98faf733d527580e.mp4",
+        "size_bytes": 11875175,
+        "etag": "89a6229426884fa54d18ae99d4be1790",
+        "last_modified": "2026-08-19T03:18:45.773Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-19/329710c5e696648e5cba7a0415f0e0cad6f634e6e710f31e478c1ed7e302a4ab.jpg",
+        "size_bytes": 214512,
+        "etag": "7b771a8bfd78c97fbfc3752d8aeee1b2",
+        "last_modified": "2026-08-19T03:18:45.098Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-19/645e04eea7c4c3e2b1c2b0be5c8fc36f535a828c7440ffe5a774f84f9e86161c.vtt",
+        "size_bytes": 14952,
+        "etag": "911ada882152c93fe5953f347ef3dc99",
+        "last_modified": "2026-08-19T03:18:45.009Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-20/13eae1db7fd2710b80021b5559ce0a01ec85622e24e18d59779bb44cc43c6f6e.vtt",
+        "size_bytes": 16621,
+        "etag": "a77f03acc1fe438f9a137885392413cb",
+        "last_modified": "2026-08-20T00:42:45.824Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-20/788b64c836d05a9ce487b68d504bf11ab3d4a711a7474a0884ebc7facab921d6.jpg",
+        "size_bytes": 211145,
+        "etag": "35705bf3217ae671b7f1e8912ec653d0",
+        "last_modified": "2026-08-20T00:34:19.659Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-20/c89de49547611241bdd8a44310d1984f18f716e63c976e64001a83cd2ef2afcd.mp4",
+        "size_bytes": 12593503,
+        "etag": "f09af408cc1a901ebaedd5272203b10d",
+        "last_modified": "2026-08-20T00:42:46.388Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-21/0ddc813f2af64186c7756622ae99330ccacfbb37bd321181f87a66c7b99265a4.vtt",
+        "size_bytes": 15970,
+        "etag": "861f27986253d6bac4100096f0773bf3",
+        "last_modified": "2026-08-21T00:28:21.735Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-21/8357a4a7a33a4a7430cef81e546c4d81a58638203764b053bbb114b7d2fa7cb3.mp4",
+        "size_bytes": 12384124,
+        "etag": "1eb620cac9ccde68363ecb9bfc334ec9",
+        "last_modified": "2026-08-21T00:36:18.087Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-21/fdce4b13725549819c2ff09730c4c995bc416b3960a48466d9aa31d5d57fe477.jpg",
+        "size_bytes": 224702,
+        "etag": "868fc3cd126a7432d964278d0a73bb6d",
+        "last_modified": "2026-08-21T00:28:21.674Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-22/281d5b3f9c2c29781effbf021d08bd64784962fab038940ea401fac36e92009e.vtt",
+        "size_bytes": 15227,
+        "etag": "2393ee7f978f49d1cfbbd738145c190c",
+        "last_modified": "2026-08-22T00:44:32.952Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-22/ab1449ad6af15204e2a1986ed36f99056a3f2e01a7ce2381a7fe693009a86dfd.jpg",
+        "size_bytes": 258113,
+        "etag": "19fd6c19a0412d3931323092f1182a01",
+        "last_modified": "2026-08-22T00:44:32.997Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-22/fe5350e72e91f86e2cc54828bfd8d1cf7706ff03caae7432de3d1a1b4b2cba7d.mp4",
+        "size_bytes": 11875795,
+        "etag": "c10c7ac103ccac76dd5ab421fbb85b41",
+        "last_modified": "2026-08-22T00:44:33.815Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-23/38895623770fd3a67fd4cb47f8975768c8e4b2e3556002be8fdf1a21d3a2f8c1.vtt",
+        "size_bytes": 14588,
+        "etag": "66ee5448aa465ed67581c1229c55866e",
+        "last_modified": "2026-08-23T01:11:19.562Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-23/c85145b7e654eb2a15ef0b2ae9af4a7f76b06130d3be5a6e258cf4781c73506e.jpg",
+        "size_bytes": 251685,
+        "etag": "9507130c8e3044be1e23ba0556d37978",
+        "last_modified": "2026-08-23T01:00:09.353Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-23/e28e7cdcf4d7ebf4ad06c6a3ff46b46c27adb7178aa814bf233b3c264cfd5ee9.mp4",
+        "size_bytes": 11140185,
+        "etag": "3ca1d9d0fd5a1065928c5e8856de5cb9",
+        "last_modified": "2026-08-23T01:11:19.963Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-24/1600ce80fb5100e2278b381e651b105cce1e5f698510c1447540362f896e41d9.jpg",
+        "size_bytes": 206712,
+        "etag": "44b279470540a34a46ac23eac5f149fc",
+        "last_modified": "2026-08-24T01:27:30.506Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-24/706059f6efef83c43302bee6f8a7b0ea278bd19ce2a4a71bf6b5c6e077cce4a8.vtt",
+        "size_bytes": 15084,
+        "etag": "8e9c199e0bffe91676d1df8835095017",
+        "last_modified": "2026-08-24T01:27:29.671Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-24/8d82c02849e79bc8e665e8199aa5c644f0473342f8b672cedb1b050cfa838fbf.mp4",
+        "size_bytes": 11741162,
+        "etag": "2b3d0718d315dfe4c42067ecedacb583",
+        "last_modified": "2026-08-24T01:39:26.318Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-25/266c65914ba2c9a7078bb302b986f88abe6974afca2341e084bd1cf8df91fc90.vtt",
+        "size_bytes": 4495,
+        "etag": "c35476c3cfbd3193c07df25e252a3895",
+        "last_modified": "2026-08-25T00:16:01.624Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-25/6e2561f4f7d397df8227d43be5bb703539fcb50bc8bba3f54cec6f361ab81635.jpg",
+        "size_bytes": 245780,
+        "etag": "03af23caba58b79fc192502ba7fbfb8f",
+        "last_modified": "2026-08-25T00:16:01.621Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-25/b1ab963125e6c6473885879b187fc6f462d79b4dd6300a271e4bc94053c00b75.mp4",
+        "size_bytes": 4849991,
+        "etag": "8b506ff7cd22317b69fe2f6a84e34d36",
+        "last_modified": "2026-08-25T00:16:01.825Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-26/02e37a7cd9bb1abd5113aad6f4680d6b7f38cc0a204b6f8f9bf6488fc3c17399.jpg",
+        "size_bytes": 227365,
+        "etag": "c4e5700248005f2920660f4736b12e3c",
+        "last_modified": "2026-08-26T00:53:06.875Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-26/262df5af38d87e4b10d0e771e37aa279f0d15d421711a0fa60c567c771ad1a1f.vtt",
+        "size_bytes": 9026,
+        "etag": "a86d6df70f094cbacbd76176113c16d6",
+        "last_modified": "2026-08-26T00:53:06.900Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-26/865f30c756a10368258b7f5d6415938c65ece901e525dc7527b92dc8149015c4.mp4",
+        "size_bytes": 7431952,
+        "etag": "533b8993d0535266cf18dd336025630e",
+        "last_modified": "2026-08-26T00:32:39.023Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-26/8e3dd7c895d043952e54d6a26c0b6144099788b4250c7428a8295991c94aa246.jpg",
+        "size_bytes": 218194,
+        "etag": "8d73e06b2efbcdba20f1a4704113f2c4",
+        "last_modified": "2026-08-26T00:59:38.731Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-26/963065c3768a36eede524f95bc08aab8760f31e976692c6f497ab7faa9c3e73b.mp4",
+        "size_bytes": 8025473,
+        "etag": "235faa0a9de90aabd9ecbebe85f65b7b",
+        "last_modified": "2026-08-26T00:53:07.212Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-26/97e43a2b7574031d7cfe225001ef29a47120d9608a1415ecf61ca650f26403a1.mp4",
+        "size_bytes": 7433739,
+        "etag": "03b699febe963015e69d6f75d459e794",
+        "last_modified": "2026-08-26T00:26:40.508Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-26/9c790a0217a02f8753da123254ff73191e2365930b6529e73a3e6fefd5b843be.jpg",
+        "size_bytes": 206605,
+        "etag": "8c52cd24cb8582749126a183a71bd439",
+        "last_modified": "2026-08-26T00:26:40.151Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-26/9d724d6eab4090788999ac43c10ebd806fa725ce89cd9cdd794cf71860407fad.mp4",
+        "size_bytes": 7950263,
+        "etag": "d9b4979cb1802c7e3dd81daca78fb543",
+        "last_modified": "2026-08-26T00:59:40.712Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-26/a2097e7fb9b9a414424d63afadd167d05437d9febbb6d5371d42281e00433259.vtt",
+        "size_bytes": 8171,
+        "etag": "21d147720a362d23078ed8d0525fa75e",
+        "last_modified": "2026-08-26T00:26:40.203Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-27/34deda5451f74afb09db0533701a84c6c7b862492d6c9f6fbd54f5bf8af06105.vtt",
+        "size_bytes": 8383,
+        "etag": "b0ebf8191695684b9baec24cf9111007",
+        "last_modified": "2026-08-27T00:17:03.187Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-27/866ca9bdfb059ca6b99509f793c34d85889e3cd1e36ccedd280f5f726ed4e307.mp4",
+        "size_bytes": 7861473,
+        "etag": "d914067b80a9c3e09ae5e263e291f172",
+        "last_modified": "2026-08-27T00:17:03.806Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily-video/",
+        "key": "daily-video/2026-08-27/c1a7331c3dd2840540e4e4200a365bc6de418adc9a29499282248a6d32c45d8b.jpg",
+        "size_bytes": 256154,
+        "etag": "48cce9d26345844063db75388f7b434f",
+        "last_modified": "2026-08-27T00:17:03.591Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-01.html",
+        "size_bytes": 89514,
+        "etag": "e5dc0469b7e2d18213ef9c159f21c3cf",
+        "last_modified": "2026-07-08T12:13:33.252Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-02.html",
+        "size_bytes": 90350,
+        "etag": "7fdc69dde9bfb2950e3076cd52ae7407",
+        "last_modified": "2026-07-08T12:13:35.913Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-03.html",
+        "size_bytes": 103048,
+        "etag": "570e49e61c3130d21dcd86df37d372ea",
+        "last_modified": "2026-07-08T12:13:38.972Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-04.html",
+        "size_bytes": 106487,
+        "etag": "61b482ec82efc5f1d81cf955f4a47d7e",
+        "last_modified": "2026-07-08T12:13:42.404Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-05.html",
+        "size_bytes": 114071,
+        "etag": "4505eed67030a4108b8f96c17acf76f4",
+        "last_modified": "2026-07-08T12:13:45.105Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-06.html",
+        "size_bytes": 114903,
+        "etag": "1eafefefcadca215eb349a767251549e",
+        "last_modified": "2026-07-08T12:13:47.890Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-07.html",
+        "size_bytes": 113202,
+        "etag": "a718fe16bd6f581630f027b0b129ad8f",
+        "last_modified": "2026-07-08T12:13:50.641Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-08.html",
+        "size_bytes": 90532,
+        "etag": "dca5e46d4c6728ca85ce4e52a4516ed5",
+        "last_modified": "2026-07-08T12:13:53.346Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-09.html",
+        "size_bytes": 96033,
+        "etag": "b4b4a46ffa763c76c2088e05706c3be0",
+        "last_modified": "2026-07-08T12:13:56.407Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-10.html",
+        "size_bytes": 93320,
+        "etag": "1a1290c0292280bec8e1c9976ef555ea",
+        "last_modified": "2026-07-08T12:13:59.086Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-11.html",
+        "size_bytes": 114374,
+        "etag": "f9759e9c7de45c2a011a67d86948d645",
+        "last_modified": "2026-07-08T12:14:01.971Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-12.html",
+        "size_bytes": 114384,
+        "etag": "6cfe4dd3101ad27b14aaf73ef4e4ad4e",
+        "last_modified": "2026-07-08T12:14:05.021Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-13.html",
+        "size_bytes": 113932,
+        "etag": "88f65c46644eb36d800c7d6982912f80",
+        "last_modified": "2026-07-08T12:14:07.671Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-14.html",
+        "size_bytes": 95806,
+        "etag": "c5bd84130aafe4c44dcbb79a368ed5e9",
+        "last_modified": "2026-07-08T12:14:10.174Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-15.html",
+        "size_bytes": 90624,
+        "etag": "f7bd964d7f494f77f8b989e45884e9da",
+        "last_modified": "2026-07-08T12:14:13.104Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-16.html",
+        "size_bytes": 92115,
+        "etag": "e0b8d2b1fd6a2e2dec495a735f1d876f",
+        "last_modified": "2026-07-08T12:14:16.400Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-17.html",
+        "size_bytes": 112471,
+        "etag": "99f1848e87c5b9b32600682816de5b7d",
+        "last_modified": "2026-07-08T12:14:19.109Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-18.html",
+        "size_bytes": 125121,
+        "etag": "39c588d5c33afdc3ca2751fa332337de",
+        "last_modified": "2026-07-08T12:14:24.292Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-19.html",
+        "size_bytes": 147287,
+        "etag": "d5d7d74b693bfe1becfe43ae529616c8",
+        "last_modified": "2026-07-14T08:38:04.348Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-20.html",
+        "size_bytes": 156860,
+        "etag": "c284e4cde51e63ad77e74a848b8188d0",
+        "last_modified": "2026-07-14T08:38:16.290Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-21.html",
+        "size_bytes": 135138,
+        "etag": "e8b6ce3adc7a2586e2337525b6fcead1",
+        "last_modified": "2026-07-14T08:38:29.823Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-22.html",
+        "size_bytes": 101998,
+        "etag": "5b7685d48cd295d32245022d5e2d4992",
+        "last_modified": "2026-07-14T08:47:55.259Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-23.html",
+        "size_bytes": 130037,
+        "etag": "3e8933495cef92a7cf9251f16b37d331",
+        "last_modified": "2026-07-14T08:38:40.350Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-24.html",
+        "size_bytes": 118515,
+        "etag": "a46225bcefc183a2f7e06dc8014cdb67",
+        "last_modified": "2026-07-14T08:38:53.901Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-25.html",
+        "size_bytes": 141165,
+        "etag": "4462ee10dc1f4f72d724b5f88d690b70",
+        "last_modified": "2026-07-14T08:39:08.495Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-26.html",
+        "size_bytes": 135299,
+        "etag": "a15a32ae67cc4d75d6032dd6b101f32b",
+        "last_modified": "2026-07-14T08:39:23.804Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-27.html",
+        "size_bytes": 145282,
+        "etag": "ee29cc225d360aa11346e0e0e1f01e48",
+        "last_modified": "2026-07-14T08:44:54.770Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-28.html",
+        "size_bytes": 138399,
+        "etag": "b9f56fe2ceb43f08aa10da7c9627b18b",
+        "last_modified": "2026-07-14T08:39:39.198Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-29.html",
+        "size_bytes": 125067,
+        "etag": "4ca23519bc1dbf95d5ad967a013a021b",
+        "last_modified": "2026-07-14T08:39:54.075Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-06-30.html",
+        "size_bytes": 127542,
+        "etag": "6012a9fd8f432f493e0629aed626f770",
+        "last_modified": "2026-07-14T08:40:07.024Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-01.html",
+        "size_bytes": 130228,
+        "etag": "245b72431837667501261349c211330b",
+        "last_modified": "2026-07-14T08:40:22.437Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-02.html",
+        "size_bytes": 129428,
+        "etag": "13a156fcbe6122284022b27da89cdee7",
+        "last_modified": "2026-07-14T08:40:37.883Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-03.html",
+        "size_bytes": 154294,
+        "etag": "60d9c1a09855c28da0432257833b56b9",
+        "last_modified": "2026-07-14T08:40:52.717Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-04.html",
+        "size_bytes": 132395,
+        "etag": "08017e49c08c7d28a00bec0f7a3e0ce1",
+        "last_modified": "2026-07-14T08:41:05.633Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-05.html",
+        "size_bytes": 119432,
+        "etag": "2c65dedf17091df1e59c55bc6bda6024",
+        "last_modified": "2026-07-14T08:41:17.626Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-06.html",
+        "size_bytes": 125940,
+        "etag": "18c65197eff4a43d696ebe42fe678481",
+        "last_modified": "2026-07-14T08:41:39.681Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-07.html",
+        "size_bytes": 121467,
+        "etag": "af9fb4b97b593d4113551b931034007f",
+        "last_modified": "2026-07-14T08:41:53.086Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-08.html",
+        "size_bytes": 107442,
+        "etag": "171fc198221e7874709b95b49a912e2a",
+        "last_modified": "2026-07-14T08:42:07.604Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-09.html",
+        "size_bytes": 103966,
+        "etag": "48eb752e900ae062d72654ddb7c9275f",
+        "last_modified": "2026-07-14T08:42:20.931Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-10.html",
+        "size_bytes": 104355,
+        "etag": "ca95839fe35d8f7dfc8976856a3f31b6",
+        "last_modified": "2026-07-14T08:42:34.011Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-11.html",
+        "size_bytes": 79583,
+        "etag": "46312b1206b93d9205fb3db460d633c2",
+        "last_modified": "2026-07-14T08:42:44.300Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-12.html",
+        "size_bytes": 79702,
+        "etag": "d0f608a064fc2fd426eb655662161874",
+        "last_modified": "2026-07-14T08:42:57.475Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-13.html",
+        "size_bytes": 72004,
+        "etag": "f8dbddd009630e24dcff1f0ca3f821f1",
+        "last_modified": "2026-07-14T08:43:07.953Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-14.html",
+        "size_bytes": 119518,
+        "etag": "aae55168020ae2c241fcf6ac656d7fbd",
+        "last_modified": "2026-07-15T02:50:41.020Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-15.html",
+        "size_bytes": 119323,
+        "etag": "191ccdea1067a4b5cc4b803bb5f169df",
+        "last_modified": "2026-07-16T00:03:16.819Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-16.html",
+        "size_bytes": 128869,
+        "etag": "8bb1ba2508dfdd79cead8e38401bb286",
+        "last_modified": "2026-07-17T00:03:13.321Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-17.html",
+        "size_bytes": 136561,
+        "etag": "026b2ba6b549fa4c53e6f3631d906ecc",
+        "last_modified": "2026-07-18T00:03:14.776Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-18.html",
+        "size_bytes": 148308,
+        "etag": "c7501145e91d44caee1c567df417e9fd",
+        "last_modified": "2026-07-19T00:03:37.294Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-19.html",
+        "size_bytes": 133223,
+        "etag": "b8594bc5ecda8ee59dddda51f5bbc824",
+        "last_modified": "2026-07-20T00:02:05.898Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-20.html",
+        "size_bytes": 126942,
+        "etag": "3156b2f6bab418152f616cc1b1a0285d",
+        "last_modified": "2026-07-21T00:03:01.483Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-21.html",
+        "size_bytes": 121843,
+        "etag": "d95c161ae22babf6654e1dcaab801126",
+        "last_modified": "2026-07-22T00:01:47.686Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-22.html",
+        "size_bytes": 148062,
+        "etag": "e328d7c3ef188e320e42e0d6cf034112",
+        "last_modified": "2026-07-23T00:01:54.781Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-23.html",
+        "size_bytes": 143487,
+        "etag": "4ad65c283d260c89935004eb5b095303",
+        "last_modified": "2026-07-24T01:02:11.461Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-24.html",
+        "size_bytes": 131236,
+        "etag": "21fcfee95b60f1cf92559fabca277cc3",
+        "last_modified": "2026-07-25T00:01:12.897Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-25.html",
+        "size_bytes": 143311,
+        "etag": "11cdacad08631e0fcdde86a0eb4c1b80",
+        "last_modified": "2026-07-26T08:02:56.945Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-26.html",
+        "size_bytes": 128261,
+        "etag": "728c7309ec59d4bc5bb020e634ef202e",
+        "last_modified": "2026-07-27T00:01:00.095Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-27.html",
+        "size_bytes": 131964,
+        "etag": "d97a203719c93ba17ef4d0490b5899e0",
+        "last_modified": "2026-07-28T01:05:14.394Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-28.html",
+        "size_bytes": 130865,
+        "etag": "78fdfefab28fd3707ae0755a9d05c5ab",
+        "last_modified": "2026-07-29T00:01:31.736Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-29.html",
+        "size_bytes": 134897,
+        "etag": "e19bd88460205201604289811b91ce13",
+        "last_modified": "2026-07-30T00:01:33.414Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-30.html",
+        "size_bytes": 143827,
+        "etag": "29aa93b3f5c9b541fd1b4bea6a85cf60",
+        "last_modified": "2026-07-31T05:06:57.928Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-07-31.html",
+        "size_bytes": 108362,
+        "etag": "aaafab77f1de06d75c64d858628cd25b",
+        "last_modified": "2026-08-01T00:01:12.045Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-01.html",
+        "size_bytes": 139299,
+        "etag": "b77eb6bb8d27e3f50bd9fc4f64d8c0f0",
+        "last_modified": "2026-08-02T00:01:32.465Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-02.html",
+        "size_bytes": 127927,
+        "etag": "78fc7885ece8b13d0f655118d8b58b6d",
+        "last_modified": "2026-08-03T00:47:30.523Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-03.html",
+        "size_bytes": 109600,
+        "etag": "3e893ca43a4d3f514ec38e8099f5d33a",
+        "last_modified": "2026-08-04T00:19:23.044Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-04.html",
+        "size_bytes": 105955,
+        "etag": "299487ca73404ed30504c48ee17244bc",
+        "last_modified": "2026-08-05T00:41:11.006Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-05.html",
+        "size_bytes": 123815,
+        "etag": "df31ea5ec73a0da5096798fc8dc5d606",
+        "last_modified": "2026-08-06T00:01:15.354Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-06.html",
+        "size_bytes": 123508,
+        "etag": "36efd66dc4ee04e052694e6791d0d5cf",
+        "last_modified": "2026-08-07T00:02:09.985Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-07.html",
+        "size_bytes": 107980,
+        "etag": "5a77ce41778f32655e2e05655be3723b",
+        "last_modified": "2026-08-08T03:51:54.865Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-08.html",
+        "size_bytes": 110335,
+        "etag": "52ecc4519c097454b4bbdfe8bf68b1e8",
+        "last_modified": "2026-08-09T01:19:58.533Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-09.html",
+        "size_bytes": 121825,
+        "etag": "5a3aabde41f7ed3714b109a4863c30a0",
+        "last_modified": "2026-08-10T00:06:46.718Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-10.html",
+        "size_bytes": 92695,
+        "etag": "a06ebc7da2ffdfecd5957c6c0ef55b55",
+        "last_modified": "2026-08-11T00:32:42.965Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-11.html",
+        "size_bytes": 104132,
+        "etag": "47d67884f186ec2c882c51f7f9c8fcb2",
+        "last_modified": "2026-08-12T00:38:07.720Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-12.html",
+        "size_bytes": 112111,
+        "etag": "5e0452e2164a2467410c02414bb55941",
+        "last_modified": "2026-08-13T01:28:36.499Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-13.html",
+        "size_bytes": 117888,
+        "etag": "8c1101b128cde0db53126f0292f57327",
+        "last_modified": "2026-08-14T00:08:04.297Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-14.html",
+        "size_bytes": 114217,
+        "etag": "01f43d62d1810b089a6ce138b3cb2c6b",
+        "last_modified": "2026-08-18T04:17:35.688Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-15.html",
+        "size_bytes": 147656,
+        "etag": "d01ff015157c680ec5286a358333afc7",
+        "last_modified": "2026-08-16T00:01:47.738Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-16.html",
+        "size_bytes": 137129,
+        "etag": "613f0df27947c5bec64f494a548836c6",
+        "last_modified": "2026-08-17T00:02:24.900Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-17.html",
+        "size_bytes": 115266,
+        "etag": "abe824abccf50a71e1a410d37e1f4d8f",
+        "last_modified": "2026-08-18T01:22:31.898Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-18.html",
+        "size_bytes": 103925,
+        "etag": "8639b7e24692356d8bda361551667c6b",
+        "last_modified": "2026-08-19T00:35:56.443Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-19.html",
+        "size_bytes": 107440,
+        "etag": "3be85061ca406624eed970c6909ffc12",
+        "last_modified": "2026-08-20T00:25:00.769Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-20.html",
+        "size_bytes": 116656,
+        "etag": "1dc6ee961eab376f6029dfc45f773f9e",
+        "last_modified": "2026-08-21T00:05:32.201Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-21.html",
+        "size_bytes": 118641,
+        "etag": "5c2fab08ca805414089bc828514140a3",
+        "last_modified": "2026-08-22T00:27:51.578Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-22.html",
+        "size_bytes": 121471,
+        "etag": "3bf542afbe781a90b45f9eca702ccb4e",
+        "last_modified": "2026-08-23T00:48:38.013Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-23.html",
+        "size_bytes": 119733,
+        "etag": "a76b9344459c2f173ca5148623a1f54d",
+        "last_modified": "2026-08-24T01:09:43.494Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-24.html",
+        "size_bytes": 114467,
+        "etag": "51c7d9909cbd0d7696f04e854fb90038",
+        "last_modified": "2026-08-25T00:02:06.267Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-25.html",
+        "size_bytes": 103494,
+        "etag": "03201410408682b412501824fe7d5a56",
+        "last_modified": "2026-08-26T00:44:52.143Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-26.html",
+        "size_bytes": 105556,
+        "etag": "7087afc4b9c6283952477e5f4d7a6adb",
+        "last_modified": "2026-08-27T00:03:05.748Z",
+        "storage_class": "Standard"
+      },
+      {
+        "prefix": "daily/",
+        "key": "daily/2026-08-27.html",
+        "size_bytes": 147236,
+        "etag": "b7c2f8d1be6d07621399a3dba283d8af",
+        "last_modified": "2026-08-27T00:17:04.779Z",
+        "storage_class": "Standard"
+      }
+    ]
+  },
+  "equivalence_witness": {
+    "schema_version": 1,
+    "kind": "independent-second-read",
+    "canonical_bytes_equal": true,
+    "object_set_sha256": "8e673930948cabb60720d6f7708294f6c1d4f5724d4d36f11130db5773fb3191"
+  }
+}

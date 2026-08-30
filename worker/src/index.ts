@@ -149,6 +149,10 @@ import {
   serializePublicationCapacityCronObservation,
 } from './ops/publication-capacity-outbox';
 import {
+  handlePublicationCapacityActivation,
+  PUBLICATION_CAPACITY_ACTIVATION_PATH,
+} from './ops/publication-capacity-activation-api';
+import {
   drainGithubPending,
   drainHfPending,
   getSourceReadiness,
@@ -806,6 +810,12 @@ export default {
       return (await handleCcSyncRoute(request, env))!;
     }
 
+    // This privileged mutation authenticates before method handling and never
+    // participates in the global credentialed CORS preflight.
+    if (request.method === 'OPTIONS' && path === PUBLICATION_CAPACITY_ACTIVATION_PATH) {
+      return handlePublicationCapacityActivation(request, env);
+    }
+
     // Physical daily publication/media objects are private on every host and
     // for every method. Public routes perform D1-head authorization and full
     // byte verification; the generic R2 gateway must never serve these keys.
@@ -907,6 +917,9 @@ export default {
       }
       if (path === '/api/digest/daily-news-leads' || path.startsWith('/api/digest/daily-news-leads/')) {
         return handleManualNewsLeadsApi(request, env, ctx);
+      }
+      if (path === PUBLICATION_CAPACITY_ACTIVATION_PATH) {
+        return handlePublicationCapacityActivation(request, env);
       }
 
       if (path === '/api/ingest' && request.method === 'POST') {
@@ -6118,6 +6131,7 @@ function isBlockedBot(ua: string): boolean {
 //      here breaks BE/OPS smoke tests without any security benefit.
 function isBotGateExempt(path: string, method: string): boolean {
   if (path === '/api/ingest' || path === '/api/track') return true;
+  if (path === PUBLICATION_CAPACITY_ACTIVATION_PATH) return true;
   // Dedicated server-to-server HMAC is the only gate for this namespace.
   // The exemption is prefix-scoped; handleCcSyncRoute still authenticates
   // health, unknown subpaths, and wrong methods before any other work.
