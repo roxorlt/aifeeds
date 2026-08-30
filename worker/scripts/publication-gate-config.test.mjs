@@ -27,12 +27,12 @@ function tableValues(source, wantedTable) {
   return values;
 }
 
-test('bootstrap production config keeps every publication gate explicitly disabled', async () => {
+test('production config persists every publication gate explicitly enabled', async () => {
   const source = await readFile(new URL('../wrangler.toml', import.meta.url), 'utf8');
   const production = tableValues(source, 'vars');
 
-  for (const gate of GATES) assert.equal(production.get(gate), '0', gate);
-  const positions = GATES.map((gate) => source.indexOf(`${gate} = "0"`));
+  for (const gate of GATES) assert.equal(production.get(gate), '1', gate);
+  const positions = GATES.map((gate) => source.indexOf(`${gate} = "1"`));
   assert.deepEqual([...positions].sort((left, right) => left - right), positions);
 });
 
@@ -65,5 +65,4 @@ test('runbook and package scripts enforce bootstrap then cumulative live rollout
   assert.match(runbook, /Phase 2[^\n]*authoritative activation and cumulative live rollout/i);
   assert.match(runbook, /Phase 3[^\n]*independent follow-up config commit\/PR/i);
   assert.match(runbook, /never edit wrangler\.toml\s+between live rollout\s+steps/i);
-  assert.match(runbook, /current bootstrap candidate[^\n]*must keep all five gates at "0"/i);
 });

@@ -65,16 +65,14 @@ CF_ACCESS_TEAM_DOMAIN = "https://aifeeds.cloudflareaccess.com"
 # 4 个小宇宙中文播客,经 Codex 在 HK VPS 自托管的 token-gated RSSHub(rss.ai-feeds.com)。
 # token 走 wrangler secret put RSSHUB_TOKEN;staging 也设、共用同一实例验证。
 RSSHUB_BASE = "https://rss.ai-feeds.com"
-# Publication bootstrap is safe to deploy before inventory activation: all
-# production gates remain explicitly disabled. Operators later perform the
-# cumulative live rollout through the reviewed package scripts. Only a separate
-# follow-up config PR may persist all five as "1" after every stage is verified.
+# The reviewed follow-up config persists all production publication gates as
+# enabled after the cumulative live rollout and its stage-by-stage verification.
 # env.staging.vars intentionally omits these non-inheritable gates.
-PUBLICATION_CAPACITY_WARNING_DRAIN_ENABLED = "0"
-PUBLICATION_CAPACITY_WARNING_PRODUCER_ENABLED = "0"
-DAILY_PUBLICATION_RESERVATION_ENABLED = "0"
-DAILY_PUBLICATION_PUT_ENABLED = "0"
-DAILY_PUBLICATION_PROMOTION_ENABLED = "0"
+PUBLICATION_CAPACITY_WARNING_DRAIN_ENABLED = "1"
+PUBLICATION_CAPACITY_WARNING_PRODUCER_ENABLED = "1"
+DAILY_PUBLICATION_RESERVATION_ENABLED = "1"
+DAILY_PUBLICATION_PUT_ENABLED = "1"
+DAILY_PUBLICATION_PROMOTION_ENABLED = "1"
 
 [triggers]
 crons = ["*/5 * * * *"]
