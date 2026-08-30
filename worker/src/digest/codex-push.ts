@@ -368,27 +368,63 @@ async function markDailyStagePushed(
   revision: number,
   contentHash: string,
 ): Promise<void> {
-  const current = await getDailyStageState(env, date, stage);
-  if (!current || current.revision !== revision || current.content_hash !== contentHash) {
-    throw new Error(`stage_state_changed_during_push:${stage}`);
-  }
-  await persistDailyStageState(env, date, { ...current, pushed_at: Date.now(), last_error: '' });
+  const pushedAt = Date.now();
+  const result = await env.DB.prepare(
+    `UPDATE digest_pool SET
+       items_meta = json_set(items_meta, '$.pushed_at', ?, '$.last_error', ''),
+       generated_at = ?
+     WHERE slot_key = ? AND source = ? AND density = ?
+       AND json_valid(items_meta) = 1
+       AND json_extract(items_meta, '$.stage') = ?
+       AND CAST(json_extract(items_meta, '$.revision') AS INTEGER) = ?
+       AND json_extract(items_meta, '$.content_hash') = ?`,
+  ).bind(
+    pushedAt,
+    pushedAt,
+    `${date}-08`,
+    stageStateSource(stage),
+    'meta',
+    stage,
+    revision,
+    contentHash,
+  ).run();
+  if (Number(result.meta?.changes || 0) !== 1) throw new Error(`stage_state_changed_during_push:${stage}`);
 }
 
 async function recordDailyStageAttempt(
   env: Env,
   date: string,
   stage: DailyCodexStage,
+  revision: number,
+  contentHash: string,
   error = '',
 ): Promise<void> {
-  const current = await getDailyStageState(env, date, stage);
-  if (!current) return;
-  await persistDailyStageState(env, date, {
-    ...current,
-    attempt_count: Math.min(999, Number(current.attempt_count || 0) + 1),
-    last_attempt_at: Date.now(),
-    last_error: error.slice(0, 200),
-  });
+  const attemptedAt = Date.now();
+  await env.DB.prepare(
+    `UPDATE digest_pool SET
+       items_meta = json_set(
+         items_meta,
+         '$.attempt_count', min(999, max(0, COALESCE(CAST(json_extract(items_meta, '$.attempt_count') AS INTEGER), 0)) + 1),
+         '$.last_attempt_at', ?,
+         '$.last_error', ?
+       ),
+       generated_at = ?
+     WHERE slot_key = ? AND source = ? AND density = ?
+       AND json_valid(items_meta) = 1
+       AND json_extract(items_meta, '$.stage') = ?
+       AND CAST(json_extract(items_meta, '$.revision') AS INTEGER) = ?
+       AND json_extract(items_meta, '$.content_hash') = ?`,
+  ).bind(
+    attemptedAt,
+    error.slice(0, 200),
+    attemptedAt,
+    `${date}-08`,
+    stageStateSource(stage),
+    'meta',
+    stage,
+    revision,
+    contentHash,
+  ).run();
 }
 
 async function buildCodexSections(
@@ -767,15 +803,20 @@ export async function pushDailyStageToCodex(
   }
 
   let posted: { response: Response; payload: StagedDailyCodexPayload };
+  const attemptState: { payload: StagedDailyCodexPayload | null } = { payload: null };
   try {
     posted = await postDailyPayload(
       endpoint,
       env.X_CARD_SHARED_TOKEN,
-      async () => buildStagedDailyCodexPayload(env, stage, {
-        date: dateOverride,
-        persistRevision: true,
-        ...(options.origin ? { origin: options.origin } : {}),
-      }),
+      async () => {
+        const payload = await buildStagedDailyCodexPayload(env, stage, {
+          date: dateOverride,
+          persistRevision: true,
+          ...(options.origin ? { origin: options.origin } : {}),
+        });
+        attemptState.payload = payload;
+        return payload;
+      },
       async (payload) => {
         if (stage === 'editorial' || stage === 'finalize') {
           await assertCurrentEditorialNewsReviewSnapshot(env, payload.date, payload.digest);
@@ -795,7 +836,12 @@ export async function pushDailyStageToCodex(
     const message = raw.includes('empty_stage:') || raw.includes('stale_editorial_')
       ? raw
       : `network: ${raw}`;
-    await recordDailyStageAttempt(env, dateOverride || bjtDateStr(), stage, message).catch(() => {});
+    const attemptedPayload = attemptState.payload;
+    if (attemptedPayload) {
+      await recordDailyStageAttempt(
+        env, attemptedPayload.date, stage, attemptedPayload.revision, attemptedPayload.content_hash, message,
+      ).catch(() => {});
+    }
     await pushDeerAlert(env, '分批日报推 Codex 失败', `${stage}: ${message}`).catch(() => {});
     return { ok: false, stage, error: message };
   }
@@ -804,7 +850,9 @@ export async function pushDailyStageToCodex(
   if (!response.ok) {
     const text = (await response.text().catch(() => '')).slice(0, 200);
     const error = `http_${response.status}: ${text}`;
-    await recordDailyStageAttempt(env, payload.date, stage, error).catch(() => {});
+    await recordDailyStageAttempt(
+      env, payload.date, stage, payload.revision, payload.content_hash, error,
+    ).catch(() => {});
     await pushDeerAlert(env, '分批日报推 Codex 失败', `${payload.render_key}: ${error}`).catch(() => {});
     return {
       ok: false, stage, revision: payload.revision, content_hash: payload.content_hash,
@@ -816,7 +864,9 @@ export async function pushDailyStageToCodex(
     id?: string; status?: string; receipt?: unknown;
   };
   if (!exactStagedReceipt(payload, data.receipt)) {
-    await recordDailyStageAttempt(env, payload.date, stage, 'receipt_mismatch').catch(() => {});
+    await recordDailyStageAttempt(
+      env, payload.date, stage, payload.revision, payload.content_hash, 'receipt_mismatch',
+    ).catch(() => {});
     return {
       ok: false, stage, revision: payload.revision, content_hash: payload.content_hash,
       render_key: payload.render_key, total_items: total, error: 'receipt_mismatch',
@@ -824,11 +874,13 @@ export async function pushDailyStageToCodex(
   }
 
   try {
-    await recordDailyStageAttempt(env, payload.date, stage);
+    await recordDailyStageAttempt(env, payload.date, stage, payload.revision, payload.content_hash);
     await markDailyStagePushed(env, payload.date, stage, payload.revision, payload.content_hash);
   } catch (error) {
     const message = String(error).slice(0, 200);
-    await recordDailyStageAttempt(env, payload.date, stage, message).catch(() => {});
+    await recordDailyStageAttempt(
+      env, payload.date, stage, payload.revision, payload.content_hash, message,
+    ).catch(() => {});
     await pushDeerAlert(env, '分批日报状态落库失败', `${payload.render_key}: ${message}`).catch(() => {});
     return {
       ok: false, stage, revision: payload.revision, content_hash: payload.content_hash,

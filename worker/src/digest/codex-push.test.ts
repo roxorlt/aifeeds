@@ -67,6 +67,7 @@ function makeEnv() {
   const pools = new Map<string, PoolRow>();
   const rows = new Map<string, RenderRow>();
   const deletedIds = new Set<string>();
+  let beforeStageMutation: ((mutation: { sql: string; binds: unknown[] }) => void) | null = null;
   let now = 1_000;
 
   const key = (slot: string, source: string, density: string) => `${slot}|${source}|${density}`;
@@ -108,14 +109,49 @@ function makeEnv() {
         },
         async run() {
           if (/INSERT INTO digest_pool/i.test(sql)) {
+            beforeStageMutation?.({ sql, binds: [...binds] });
             const [slot, source, density, itemIds, itemsMeta, generatedAt] = binds;
             pools.set(key(String(slot), String(source), String(density)), {
               item_ids: String(itemIds),
               items_meta: itemsMeta == null ? null : String(itemsMeta),
               generated_at: Number(generatedAt),
             });
+            return { success: true, meta: { changes: 1 } };
           }
-          return { success: true };
+          if (/UPDATE digest_pool/i.test(sql)) {
+            beforeStageMutation?.({ sql, binds: [...binds] });
+            const pushed = sql.includes("'$.pushed_at'");
+            const [value, errorOrGeneratedAt, generatedAtOrSlot, slotOrSource, sourceOrDensity,
+              densityOrStage, stageOrRevision, revisionOrHash, maybeHash] = binds;
+            const generatedAt = pushed ? Number(errorOrGeneratedAt) : Number(generatedAtOrSlot);
+            const slot = String(pushed ? generatedAtOrSlot : slotOrSource);
+            const source = String(pushed ? slotOrSource : sourceOrDensity);
+            const density = String(pushed ? sourceOrDensity : densityOrStage);
+            const stage = String(pushed ? densityOrStage : stageOrRevision);
+            const revision = Number(pushed ? stageOrRevision : revisionOrHash);
+            const contentHash = String(pushed ? revisionOrHash : maybeHash);
+            const row = pools.get(key(slot, source, density));
+            const current = row?.items_meta ? JSON.parse(row.items_meta) as Record<string, unknown> : null;
+            if (!row || !current || current.stage !== stage
+              || Number(current.revision) !== revision || current.content_hash !== contentHash) {
+              return { success: true, meta: { changes: 0 } };
+            }
+            const next = pushed
+              ? { ...current, pushed_at: Number(value), last_error: '' }
+              : {
+                ...current,
+                attempt_count: Math.min(999, Math.max(0, Number(current.attempt_count || 0)) + 1),
+                last_attempt_at: Number(value),
+                last_error: String(errorOrGeneratedAt),
+              };
+            pools.set(key(slot, source, density), {
+              ...row,
+              items_meta: JSON.stringify(next),
+              generated_at: generatedAt,
+            });
+            return { success: true, meta: { changes: 1 } };
+          }
+          return { success: true, meta: { changes: 0 } };
         },
       };
       return stmt;
@@ -132,6 +168,7 @@ function makeEnv() {
     rows,
     deletedIds,
     setPool,
+    setBeforeStageMutation(hook: typeof beforeStageMutation) { beforeStageMutation = hook; },
   };
 }
 
@@ -621,6 +658,85 @@ describe('daily Codex payload v2', () => {
     });
     expect(identities[1]).toEqual(identities[0]);
     expect((await getDailyStageState(env, '2026-07-21', 'editorial'))?.pushed_at).toEqual(expect.any(Number));
+  });
+
+  test('DRD-002 stale success metadata cannot overwrite a newer staged revision', async () => {
+    const { env, setPool, pools, setBeforeStageMutation } = makeEnv();
+    seedAll(setPool);
+    Object.assign(env as object, {
+      API_BASE: 'https://staging-api.ai-feeds.com',
+      X_CARD_SHARED_TOKEN: 'test-token',
+      DAILY_PUSH_STAGING_ENDPOINT: 'https://staging-render.example.test/aifeeds/api/daily/ingest',
+    });
+    const original = await buildStagedDailyCodexPayload(env, 'foundation', {
+      date: '2026-07-21', persistRevision: true,
+    });
+    const stateKey = '2026-07-21-08|_codex_stage_foundation|meta';
+    const newerHash = `sha256:${'9'.repeat(64)}`;
+    let interleaved = false;
+    setBeforeStageMutation(({ sql, binds }) => {
+      const proposed = /INSERT INTO digest_pool/i.test(sql) && typeof binds[4] === 'string'
+        ? JSON.parse(binds[4]) as Record<string, unknown>
+        : null;
+      if (interleaved || !(sql.includes("'$.pushed_at'") || proposed?.pushed_at)) return;
+      interleaved = true;
+      const row = pools.get(stateKey)!;
+      const current = JSON.parse(row.items_meta!) as Record<string, unknown>;
+      const { pushed_at: _pushedAt, ...withoutPushed } = current;
+      row.items_meta = JSON.stringify({
+        ...withoutPushed, revision: original.revision + 1, content_hash: newerHash,
+      });
+    });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(exactReceiptResponse);
+
+    const result = await pushDailyStageToCodex(env, 'foundation', '2026-07-21');
+    const current = await getDailyStageState(env, '2026-07-21', 'foundation');
+
+    expect(interleaved).toBe(true);
+    expect(result).toMatchObject({ ok: false, stage: 'foundation', error: expect.stringContaining('stage_state_changed') });
+    expect(current).toMatchObject({ revision: original.revision + 1, content_hash: newerHash });
+    expect(current?.pushed_at).toBeUndefined();
+  });
+
+  test('DRD-002 stale failure observation cannot overwrite a newer staged revision', async () => {
+    const { env, setPool, pools, setBeforeStageMutation } = makeEnv();
+    seedAll(setPool);
+    Object.assign(env as object, {
+      API_BASE: 'https://staging-api.ai-feeds.com',
+      X_CARD_SHARED_TOKEN: 'test-token',
+      DAILY_PUSH_STAGING_ENDPOINT: 'https://staging-render.example.test/aifeeds/api/daily/ingest',
+    });
+    const original = await buildStagedDailyCodexPayload(env, 'foundation', {
+      date: '2026-07-21', persistRevision: true,
+    });
+    const stateKey = '2026-07-21-08|_codex_stage_foundation|meta';
+    const newerHash = `sha256:${'8'.repeat(64)}`;
+    let interleaved = false;
+    setBeforeStageMutation(({ sql, binds }) => {
+      const proposed = /INSERT INTO digest_pool/i.test(sql) && typeof binds[4] === 'string'
+        ? JSON.parse(binds[4]) as Record<string, unknown>
+        : null;
+      if (interleaved || !(sql.includes("'$.attempt_count'") || proposed?.last_error === 'receipt_mismatch')) return;
+      interleaved = true;
+      const row = pools.get(stateKey)!;
+      const current = JSON.parse(row.items_meta!) as Record<string, unknown>;
+      row.items_meta = JSON.stringify({
+        ...current, revision: original.revision + 1, content_hash: newerHash, last_error: '',
+      });
+    });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      receipt: {
+        date: '2026-07-21', batch_id: 'daily-2026-07-21-normal', stage: 'foundation',
+        revision: original.revision, content_hash: original.content_hash, render_key: 'wrong-render-key',
+      },
+    }), { status: 202, headers: { 'content-type': 'application/json' } }));
+
+    const result = await pushDailyStageToCodex(env, 'foundation', '2026-07-21');
+    const current = await getDailyStageState(env, '2026-07-21', 'foundation');
+
+    expect(interleaved).toBe(true);
+    expect(result).toMatchObject({ ok: false, stage: 'foundation', error: 'receipt_mismatch' });
+    expect(current).toMatchObject({ revision: original.revision + 1, content_hash: newerHash, last_error: '' });
   });
 
   test('does not push finalize until all three input stages have successful push markers', async () => {

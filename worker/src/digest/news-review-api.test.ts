@@ -59,6 +59,13 @@ const batch = {
   notified_at: 1,
   notification_hash: 'nr-20260730-abcdef123456',
   superseded_by: null,
+  human_reviewed: false,
+  batch_revision: 1,
+  supersedes_batch_id: null,
+  revision_origin: 'scheduled_freeze',
+  lineage_id: '2026-07-30',
+  is_current: true,
+  candidate_generation: 1,
   created_at: 1,
   expires_at: Date.parse('2026-07-30T16:00:00Z'),
 } as const;
@@ -120,16 +127,27 @@ describe('daily news review API', () => {
     const reviewedBatch = {
       ...batch,
       applied_selected_ids: ['news-6', 'news-2', 'news-7'],
+      selection_hash: 'selection-hash-current',
       edit_revision: 2,
       publish_status: 'published',
     };
     vi.mocked(getNewsReviewBatch).mockResolvedValue(reviewedBatch as never);
+    vi.mocked(getActiveNewsReviewBatch).mockResolvedValue(reviewedBatch as never);
     vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
       batch: reviewedBatch, changed: false, dropped_ids: [],
     } as never);
     vi.mocked(getPublishedNewsReviewSelection).mockResolvedValue(reviewedBatch.applied_selected_ids);
     vi.mocked(getDailyStageState).mockResolvedValue({
       stage: 'editorial', revision: 7, content_hash: `sha256:${'a'.repeat(64)}`, pushed_at: 123,
+      snapshot: {
+        meta: {
+          news_review: {
+            batch_id: reviewedBatch.batch_id,
+            selection_hash: reviewedBatch.selection_hash,
+            selected_ids: reviewedBatch.applied_selected_ids,
+          },
+        },
+      },
     } as never);
     const response = await handleDailyNewsReviewApi(request('GET'), env(), Date.parse('2026-07-30T08:00:00Z'));
     const payload = await response.json<Record<string, unknown>>();
@@ -152,9 +170,19 @@ describe('daily news review API', () => {
       ...batch, applied_selected_ids: ['news-1'], selection_hash: 'selection-hash', edit_revision: 3,
     };
     vi.mocked(getNewsReviewBatch).mockResolvedValue(reviewedBatch as never);
+    vi.mocked(getActiveNewsReviewBatch).mockResolvedValue(reviewedBatch as never);
     vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({ batch: reviewedBatch, changed: false, dropped_ids: [] } as never);
     vi.mocked(getDailyStageState).mockImplementation(async (_env, _date, stage) => stage === 'editorial'
-      ? { stage, revision: 4, content_hash: `sha256:${'a'.repeat(64)}`, pushed_at: 1 }
+      ? {
+        stage, revision: 4, content_hash: `sha256:${'a'.repeat(64)}`, pushed_at: 1,
+        snapshot: {
+          meta: { news_review: {
+            batch_id: reviewedBatch.batch_id,
+            selection_hash: reviewedBatch.selection_hash,
+            selected_ids: reviewedBatch.applied_selected_ids,
+          } },
+        },
+      } as never
       : {
         stage, revision: 2, content_hash: `sha256:${'b'.repeat(64)}`, pushed_at: 2,
         final_manifest: {
@@ -177,7 +205,16 @@ describe('daily news review API', () => {
     });
 
     vi.mocked(getDailyStageState).mockImplementation(async (_env, _date, stage) => stage === 'editorial'
-      ? { stage, revision: 5, content_hash: `sha256:${'f'.repeat(64)}`, pushed_at: 3 } as never
+      ? {
+        stage, revision: 5, content_hash: `sha256:${'f'.repeat(64)}`, pushed_at: 3,
+        snapshot: {
+          meta: { news_review: {
+            batch_id: reviewedBatch.batch_id,
+            selection_hash: reviewedBatch.selection_hash,
+            selected_ids: reviewedBatch.applied_selected_ids,
+          } },
+        },
+      } as never
       : {
         stage, revision: 2, content_hash: `sha256:${'b'.repeat(64)}`, pushed_at: 2,
         final_manifest: {
@@ -187,6 +224,53 @@ describe('daily news review API', () => {
     const stale = await handleDailyNewsReviewApi(request('GET'), env(), Date.parse('2026-07-30T08:00:00Z'));
     await expect(stale.json()).resolves.toMatchObject({
       generation_target: { editorial_revision: 5, finalize_revision: null, finalize_content_hash: '' },
+    });
+  });
+
+  test('DRD-001 GET hides old persisted editorial and finalize during the new-selection crash window', async () => {
+    const pending = {
+      ...batch,
+      applied_selected_ids: ['news-6', 'news-2', 'news-7'],
+      selection_hash: 'selection-hash-new',
+      edit_revision: 3,
+      publish_status: 'pending',
+    };
+    vi.mocked(getNewsReviewBatch).mockResolvedValue(pending as never);
+    vi.mocked(getActiveNewsReviewBatch).mockResolvedValue(pending as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
+      batch: pending, changed: false, dropped_ids: [],
+    } as never);
+    vi.mocked(getDailyStageState).mockImplementation(async (_env, _date, stage) => stage === 'editorial'
+      ? {
+        stage, revision: 4, content_hash: `sha256:${'a'.repeat(64)}`, pushed_at: 1,
+        snapshot: {
+          meta: { news_review: {
+            batch_id: pending.batch_id,
+            selection_hash: 'selection-hash-old',
+            selected_ids: ['news-1', 'news-2'],
+          } },
+        },
+      } as never
+      : {
+        stage, revision: 2, content_hash: `sha256:${'b'.repeat(64)}`, pushed_at: 2,
+        final_manifest: {
+          stage_revisions: { editorial: { revision: 4, content_hash: `sha256:${'a'.repeat(64)}` } },
+        },
+      } as never);
+
+    const response = await handleDailyNewsReviewApi(
+      request('GET'), env(), Date.parse('2026-07-30T08:00:00Z'),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      generation_target: {
+        review_revision: 3,
+        editorial_revision: null,
+        editorial_content_hash: '',
+        finalize_revision: null,
+        finalize_content_hash: '',
+      },
     });
   });
 
@@ -565,6 +649,54 @@ describe('daily news review API', () => {
     expect(markNewsReviewPublished).toHaveBeenCalledWith(
       expect.anything(), '2026-07-30', pending.batch_id, pending.selection_hash,
     );
+  });
+
+  test('DRD-003 sanitization exceptions persist a bounded error for the exact pending batch', async () => {
+    const pending = {
+      ...batch, applied_selected_ids: batch.default_selected_ids, selection_hash: 'selection-hash',
+      edit_revision: 3, publish_status: 'pending',
+    };
+    vi.mocked(getActiveNewsReviewBatch).mockResolvedValue(pending as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockRejectedValue(
+      new Error(`sanitize exploded ${'x'.repeat(700)}`),
+    );
+
+    const result = await reconcileDailyNewsReviewPublication(
+      env(), '2026-07-30', Date.parse('2026-07-30T08:00:00Z'),
+    );
+
+    expect(result).toMatchObject({ ok: false, stage: 'sanitize' });
+    expect(markNewsReviewPending).toHaveBeenCalledTimes(1);
+    const call = vi.mocked(markNewsReviewPending).mock.calls[0];
+    expect(call.slice(1, 4)).toEqual(['2026-07-30', pending.batch_id, pending.selection_hash]);
+    expect(String(call[4])).toContain('sanitize exploded');
+    expect(String(call[4])).toHaveLength(500);
+    expect(markNewsReviewPublished).not.toHaveBeenCalled();
+  });
+
+  test('DRD-003 papers lookup exceptions persist a bounded error for the exact pending batch', async () => {
+    const pending = {
+      ...batch, applied_selected_ids: batch.default_selected_ids, selection_hash: 'selection-hash',
+      edit_revision: 3, publish_status: 'pending',
+    };
+    vi.mocked(getActiveNewsReviewBatch).mockResolvedValue(pending as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({ batch: pending, changed: false, dropped_ids: [] } as never);
+    vi.mocked(pushDailyStageToCodex).mockResolvedValue({
+      ok: true, stage: 'editorial', revision: 4, content_hash: `sha256:${'a'.repeat(64)}`,
+    } as never);
+    vi.mocked(getDailyStageState).mockRejectedValue(new Error(`papers lookup exploded ${'y'.repeat(700)}`));
+
+    const result = await reconcileDailyNewsReviewPublication(
+      env(), '2026-07-30', Date.parse('2026-07-30T08:00:00Z'),
+    );
+
+    expect(result).toMatchObject({ ok: false, stage: 'papers' });
+    expect(markNewsReviewPending).toHaveBeenCalledTimes(1);
+    const call = vi.mocked(markNewsReviewPending).mock.calls[0];
+    expect(call.slice(1, 4)).toEqual(['2026-07-30', pending.batch_id, pending.selection_hash]);
+    expect(String(call[4])).toContain('papers lookup exploded');
+    expect(String(call[4])).toHaveLength(500);
+    expect(markNewsReviewPublished).not.toHaveBeenCalled();
   });
 
   test('G03 reconciler is bounded to the current BJT date', async () => {
