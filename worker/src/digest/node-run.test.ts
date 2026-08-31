@@ -297,6 +297,32 @@ describe('staged 08:00 node run', () => {
     );
   });
 
+  test('preserves staged push error priority after the daily page step exhausts retries', async () => {
+    vi.mocked(getDailyStageState).mockResolvedValue(null);
+    vi.mocked(pushDailyStageToCodex).mockResolvedValue({ ok: false, error: 'hk unavailable' } as never);
+    vi.mocked(runDailyPagePhase).mockResolvedValue({
+      date: '2026-07-21', error: 'Error: D1 storage timeout',
+    });
+    const step = makeStep();
+    const env = makeEnv({ DAILY_PAGE_ENABLED: '1' });
+
+    await expect(runDigestNodeWorkflow(
+      env,
+      { slotHourBjt: 8, date: '2026-07-21', dailyStage: 'papers' },
+      step as never,
+    )).rejects.toThrow('daily_stage_push_failed:foundation:hk unavailable');
+
+    expect(runDailyPagePhase).toHaveBeenCalledWith(env, '2026-07-21');
+    expect(step.do).toHaveBeenCalledWith(
+      'generate-daily-page',
+      {
+        retries: { limit: 2, delay: '5 seconds', backoff: 'exponential' },
+        timeout: '5 minutes',
+      },
+      expect.any(Function),
+    );
+  });
+
   test('keeps legacy v1 push failure non-blocking for rollback compatibility', async () => {
     vi.mocked(pushDailyToCodex).mockResolvedValue({ ok: false, error: 'legacy endpoint down' });
     const env = makeEnv({ DAILY_STAGED_PUSH_ENABLED: '0', DAILY_PAGE_ENABLED: '1' });
