@@ -235,7 +235,11 @@ async function runDigestNodeWorkflowCore(
   }
 
   if (slotHourBjt === 8 && env.DAILY_PAGE_ENABLED === '1') {
-    await step.do('generate-daily-page', RETRY, async () => runDailyPagePhase(env, date));
+    await step.do('generate-daily-page', RETRY, async () => {
+      const result = await runDailyPagePhase(env, date);
+      if (result.error !== undefined) throw new Error(result.error);
+      return result;
+    });
   }
 
   if (stagedPushError) throw stagedPushError;
