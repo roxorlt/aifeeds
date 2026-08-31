@@ -13,6 +13,8 @@ const publicationMocks = vi.hoisted(() => ({
   htmlByDate: new Map<string, string>(),
   finalAuthorization: vi.fn(async (..._args: any[]) => undefined),
   releaseSetAuthorization: vi.fn(async (..._args: any[]) => undefined),
+  strictCurrentLoader: vi.fn(async (..._args: any[]) => null as any),
+  pageRebuildCurrentLoader: vi.fn(async (..._args: any[]) => null as any),
 }));
 
 vi.mock('./news-source-policy', () => ({
@@ -45,8 +47,8 @@ vi.mock('./publication-storage', () => ({
 }));
 
 vi.mock('./publication-release', () => ({
-  loadCurrentDailyReleaseForBuild: vi.fn(async (_env: unknown, date: string) =>
-    publicationMocks.currentByDate.get(date) || null),
+  loadCurrentDailyReleaseForBuild: publicationMocks.strictCurrentLoader,
+  loadCurrentDailyReleaseForPageRebuild: publicationMocks.pageRebuildCurrentLoader,
   listAuthorizedDailyReleaseSummaries: vi.fn(async () =>
     [...publicationMocks.currentByDate.values()].map((release: any) => ({
       date: release.head.date,
@@ -217,6 +219,12 @@ describe('generateDailyPage', () => {
     publicationMocks.htmlByDate.clear();
     publicationMocks.finalAuthorization.mockReset();
     publicationMocks.finalAuthorization.mockResolvedValue(undefined);
+    publicationMocks.strictCurrentLoader.mockReset();
+    publicationMocks.strictCurrentLoader.mockImplementation(async (_env: unknown, date: string) =>
+      publicationMocks.currentByDate.get(date) || null);
+    publicationMocks.pageRebuildCurrentLoader.mockReset();
+    publicationMocks.pageRebuildCurrentLoader.mockImplementation(async (_env: unknown, date: string) =>
+      publicationMocks.currentByDate.get(date) || null);
     vi.mocked(selectTopForSource).mockReset();
     vi.mocked(selectTopForSource).mockResolvedValue([]);
   });
@@ -285,6 +293,30 @@ describe('generateDailyPage', () => {
     expect(ld['@graph'].find((node: any) => node['@type'] === 'VideoObject')).toMatchObject({
       name: '视频标题', duration: 'PT1M1S',
     });
+  });
+
+  test('stale outward authorization does not block the dedicated page rebuild baseline', async () => {
+    setSelection({ x: ['x_list:1'] });
+    const rowsById = new Map([['x_list:1', mkRow('x_list:1', 1)]]);
+    const db = makeStatefulDb({ rowsById });
+    const r2 = makeR2();
+    publicationMocks.currentByDate.set('2026-07-04', {
+      head: {
+        date: '2026-07-04', release_generation: 2,
+        page_publication_id: 'p'.repeat(64), video_publication_id: null,
+        video_mode: 'none', page_manifest_digest: 'q'.repeat(64),
+        video_manifest_digest: null, promoted_at_ms: 1,
+      },
+      page_metadata: { title: 'stale page' }, video: null,
+    });
+    publicationMocks.strictCurrentLoader.mockRejectedValue(
+      new Error('PUBLICATION_FORMAL_AUTHORIZATION_STALE'),
+    );
+
+    await expect(generateDailyPage(makeEnv(db, r2), '2026-07-04'))
+      .resolves.toMatchObject({ skipped: false, itemCount: 1 });
+    expect(publicationMocks.pageRebuildCurrentLoader).toHaveBeenCalledTimes(1);
+    expect(publicationMocks.strictCurrentLoader).not.toHaveBeenCalled();
   });
 
   test('存在前日 → 前日页面被重渲染,其 HTML 含指向本日的链接', async () => {

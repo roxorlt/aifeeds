@@ -12,6 +12,8 @@ const publicationMocks = vi.hoisted(() => ({
     registryIdentity: 'official-v1',
     manualProofNonce: 'proof-v1',
     batchRevision: 1,
+    pageFormalSnapshot: 'formal-v1',
+    liveFormalSnapshot: 'formal-v1',
   },
 }));
 
@@ -34,7 +36,14 @@ vi.mock('./publication-storage', () => ({
 }));
 
 vi.mock('./publication-release', () => ({
-  loadCurrentDailyReleaseForBuild: vi.fn(async () => publicationMocks.current),
+  loadCurrentDailyReleaseForBuild: vi.fn(async () => {
+    if (publicationMocks.current
+      && publicationMocks.authorizationState.pageFormalSnapshot
+        !== publicationMocks.authorizationState.liveFormalSnapshot) {
+      throw new Error('PUBLICATION_FORMAL_AUTHORIZATION_STALE');
+    }
+    return publicationMocks.current;
+  }),
   readAuthorizedDailyPage: vi.fn(async () => {
     if (!publicationMocks.current) throw new Error('not found');
     return { bytes: new TextEncoder().encode(publicationMocks.pageHtml), release_generation: 1, metadata: {} };
@@ -109,6 +118,8 @@ beforeEach(() => {
   publicationMocks.authorizationState.registryIdentity = 'official-v1';
   publicationMocks.authorizationState.manualProofNonce = 'proof-v1';
   publicationMocks.authorizationState.batchRevision = 1;
+  publicationMocks.authorizationState.pageFormalSnapshot = 'formal-v1';
+  publicationMocks.authorizationState.liveFormalSnapshot = 'formal-v1';
   publicationMocks.finalAuthorization.mockReset();
   publicationMocks.finalAuthorization.mockImplementation(async (_env, _date, expected) => {
     const current = publicationMocks.current?.head;
@@ -359,6 +370,26 @@ describe('daily video content-addressed persistence', () => {
     expect(events.filter((event) => event.kind === 'put')).toHaveLength(0);
     expect(events.filter((event) => event.kind === 'upsert')).toHaveLength(0);
     expect(db.row).toBeNull();
+  });
+
+  test('upload rejects a stale page until a fresh authorized replacement becomes current', async () => {
+    const events: Event[] = [];
+    const r2 = makeR2(events);
+    seedDailyPage(r2);
+    publicationMocks.authorizationState.liveFormalSnapshot = 'formal-v2';
+
+    const stale = await handleDailyVideoUpload(
+      request(uploadForm()), makeEnv(makeDb(events), r2) as never,
+    );
+    expect(stale.status).toBe(500);
+    expect(publicationMocks.materialized).toHaveLength(0);
+
+    publicationMocks.authorizationState.pageFormalSnapshot = 'formal-v2';
+    const repaired = await handleDailyVideoUpload(
+      request(uploadForm()), makeEnv(makeDb(events), r2) as never,
+    );
+    expect(repaired.status).toBe(201);
+    expect(publicationMocks.materialized.map((entry) => entry.type)).toEqual(['video', 'page']);
   });
 
   test('multipart upload publishes immutable virtual keys and upserts complete D1 metadata', async () => {

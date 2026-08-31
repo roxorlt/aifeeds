@@ -8,6 +8,8 @@ import { authorizeFormalNewsSet } from './news-source-policy';
 import { FEED_REGISTRY } from '../feeds/registry';
 import {
   assertCurrentDailyReleaseSetAuthorization,
+  loadCurrentDailyReleaseForBuild,
+  loadCurrentDailyReleaseForPageRebuild,
   materializeAppendOnlyPublication,
   listAuthorizedDailyReleaseSummaries,
   projectAuthorizedDailyPageCompatibility,
@@ -199,6 +201,177 @@ describe('append-only daily release state machine', () => {
     expect(new TextDecoder().decode(outward.bytes)).toBe('<html>authorized</html>');
     expect(outward.release_generation).toBe(1);
     expect('delete' in r2.bucket).toBe(false);
+  });
+
+  test('strict loading rejects stale formal authorization while page rebuild recovers the exact bound video', async () => {
+    const fixture = releaseDb();
+    const r2 = r2Bucket();
+    const itemId = 'blog:openai:stale-page-with-video';
+    seedScheduledFormalItem(fixture.sqlite, 'blog:openai', itemId);
+    const authorization = await authorizeFormalNewsSet(
+      { DB: fixture.DB } as never, '2026-08-31', [itemId], 'stale_page_video_reservation',
+    );
+    const videoBytes = { mp4: new Uint8Array([1]), poster: new Uint8Array([2]) };
+    const video = await reserveAppendOnlyPublication({ DB: fixture.DB } as never, {
+      publication_date: '2026-08-31', publication_type: 'video', business_revision_id: '1'.repeat(64),
+      objects: [
+        { object_role: 'mp4', mime: 'video/mp4', bytes: videoBytes.mp4 },
+        { object_role: 'poster', mime: 'image/jpeg', bytes: videoBytes.poster },
+      ],
+      metadata: { title: 'bound video', description: 'kept', duration_millis: 1_000 },
+      release_binding: { base_release_generation: 0 },
+    });
+    const html = new TextEncoder().encode('<html>stale authorized page</html>');
+    const page = await reserveAppendOnlyPublication({ DB: fixture.DB } as never, {
+      publication_date: '2026-08-31', publication_type: 'page', business_revision_id: '2'.repeat(64),
+      objects: [{ object_role: 'html', mime: 'text/html; charset=utf-8', bytes: html }],
+      metadata: { title: 'stale page', item_count: 1 },
+      formal_news_item_ids: [itemId],
+      formal_guard_expected: JSON.parse(authorization.final_guard!.expected_json) as unknown[],
+      release_binding: {
+        video_mode: 'joint_new', base_release_generation: 0,
+        bound_video_publication_id: video.reservation.publication_id,
+        bound_video_digest: video.reservation.manifest.manifest_digest,
+      },
+    });
+    await materializeAppendOnlyPublication(
+      { DB: fixture.DB, READMES: r2.bucket } as never, video.reservation, videoBytes,
+    );
+    await materializeAppendOnlyPublication(
+      { DB: fixture.DB, READMES: r2.bucket } as never, page.reservation, { html },
+    );
+    const release = await promoteDailyRelease(
+      { DB: fixture.DB, READMES: r2.bucket } as never, page.reservation.publication_id,
+    );
+    fixture.sqlite.prepare(
+      "UPDATE sources SET config=json_set(config,'$.enabled',json('false')) WHERE id='blog:openai'",
+    ).run();
+
+    await expect(loadCurrentDailyReleaseForBuild(
+      { DB: fixture.DB, READMES: r2.bucket } as never, '2026-08-31',
+    )).rejects.toThrow('PUBLICATION_FORMAL_AUTHORIZATION_STALE');
+    await expect(loadCurrentDailyReleaseForPageRebuild(
+      { DB: fixture.DB, READMES: r2.bucket } as never, '2026-08-31',
+    )).resolves.toMatchObject({
+      head: {
+        release_generation: release.release_generation,
+        page_publication_id: page.reservation.publication_id,
+        video_publication_id: video.reservation.publication_id,
+        video_manifest_digest: video.reservation.manifest.manifest_digest,
+      },
+      video: { title: 'bound video', mp4_size: 1, poster_size: 1 },
+    });
+  });
+
+  test.each([
+    ['incomplete page object state', (sqlite: DatabaseSync) => {
+      sqlite.prepare("UPDATE append_only_publication_objects SET state='put_verified' WHERE object_role='html'").run();
+    }],
+    ['mismatched page manifest binding', (sqlite: DatabaseSync) => {
+      sqlite.exec('DROP TRIGGER daily_release_head_update_guard');
+      sqlite.prepare("UPDATE daily_release_heads SET page_manifest_digest=?").run('f'.repeat(64));
+    }],
+  ])('page rebuild rejects an exact-head baseline with %s', async (_label, mutate) => {
+    const fixture = releaseDb();
+    const r2 = r2Bucket();
+    const itemId = 'blog:openai:incomplete-rebuild';
+    seedScheduledFormalItem(fixture.sqlite, 'blog:openai', itemId);
+    await publishScheduledPage(fixture, r2, {
+      date: '2026-08-31', itemId, revision: '3'.repeat(64),
+    });
+    mutate(fixture.sqlite);
+
+    await expect(loadCurrentDailyReleaseForPageRebuild(
+      { DB: fixture.DB, READMES: r2.bucket } as never, '2026-08-31',
+    )).rejects.toThrow('PUBLICATION_RELEASE_INCOMPLETE');
+  });
+
+  test('stale page rebuild uses normal reservation, PUT, and promotion for a fresh authorized replacement', async () => {
+    const fixture = releaseDb();
+    const r2 = r2Bucket();
+    const itemId = 'blog:openai:repairable-stale-page';
+    seedScheduledFormalItem(fixture.sqlite, 'blog:openai', itemId);
+    const initial = await publishScheduledPage(fixture, r2, {
+      date: '2026-08-31', itemId, revision: '4'.repeat(64),
+    });
+    fixture.sqlite.prepare(
+      "UPDATE sources SET config=json_set(config,'$.enabled',json('false')) WHERE id='blog:openai'",
+    ).run();
+    const baseline = await loadCurrentDailyReleaseForPageRebuild(
+      { DB: fixture.DB, READMES: r2.bucket } as never, '2026-08-31',
+    );
+    expect(baseline?.head.page_publication_id).toBe(initial.page.reservation.publication_id);
+    const freshAuthorization = await authorizeFormalNewsSet(
+      { DB: fixture.DB } as never, '2026-08-31', [], 'fresh_page_repair_reservation',
+    );
+    const freshHtml = new TextEncoder().encode('<html>fresh authorized replacement</html>');
+    const replacement = await reserveAppendOnlyPublication({ DB: fixture.DB } as never, {
+      publication_date: '2026-08-31', publication_type: 'page', business_revision_id: '5'.repeat(64),
+      objects: [{ object_role: 'html', mime: 'text/html; charset=utf-8', bytes: freshHtml }],
+      metadata: { title: 'fresh page', item_count: 0 }, formal_news_item_ids: [],
+      formal_guard_expected: JSON.parse(freshAuthorization.final_guard!.expected_json) as unknown[],
+      release_binding: {
+        video_mode: 'none', base_release_generation: baseline!.head.release_generation,
+        base_page_publication_id: baseline!.head.page_publication_id,
+        base_video_publication_id: null, base_video_digest: null,
+      },
+    });
+    await materializeAppendOnlyPublication(
+      { DB: fixture.DB, READMES: r2.bucket } as never, replacement.reservation, { html: freshHtml },
+    );
+    const repaired = await promoteDailyRelease(
+      { DB: fixture.DB, READMES: r2.bucket } as never, replacement.reservation.publication_id,
+    );
+
+    expect(repaired).toMatchObject({ status: 'published', release_generation: 2 });
+    await expect(loadCurrentDailyReleaseForBuild(
+      { DB: fixture.DB, READMES: r2.bucket } as never, '2026-08-31',
+    )).resolves.toMatchObject({ head: { page_publication_id: replacement.reservation.publication_id } });
+  });
+
+  test('stale rebuild promotion fails closed when another replacement advances the head first', async () => {
+    const fixture = releaseDb();
+    const r2 = r2Bucket();
+    const itemId = 'blog:openai:repair-race';
+    seedScheduledFormalItem(fixture.sqlite, 'blog:openai', itemId);
+    await publishScheduledPage(fixture, r2, {
+      date: '2026-08-31', itemId, revision: '6'.repeat(64),
+    });
+    fixture.sqlite.prepare(
+      "UPDATE sources SET config=json_set(config,'$.enabled',json('false')) WHERE id='blog:openai'",
+    ).run();
+    const baseline = (await loadCurrentDailyReleaseForPageRebuild(
+      { DB: fixture.DB, READMES: r2.bucket } as never, '2026-08-31',
+    ))!;
+    const authorization = await authorizeFormalNewsSet(
+      { DB: fixture.DB } as never, '2026-08-31', [], 'repair_race_reservation',
+    );
+    const contenders = [];
+    for (const [revision, text] of [['7'.repeat(64), 'winner'], ['8'.repeat(64), 'loser']] as const) {
+      const html = new TextEncoder().encode(text);
+      const page = await reserveAppendOnlyPublication({ DB: fixture.DB } as never, {
+        publication_date: '2026-08-31', publication_type: 'page', business_revision_id: revision,
+        objects: [{ object_role: 'html', mime: 'text/html; charset=utf-8', bytes: html }],
+        formal_news_item_ids: [],
+        formal_guard_expected: JSON.parse(authorization.final_guard!.expected_json) as unknown[],
+        release_binding: {
+          video_mode: 'none', base_release_generation: baseline.head.release_generation,
+          base_page_publication_id: baseline.head.page_publication_id,
+          base_video_publication_id: null, base_video_digest: null,
+        },
+      });
+      await materializeAppendOnlyPublication(
+        { DB: fixture.DB, READMES: r2.bucket } as never, page.reservation, { html },
+      );
+      contenders.push(page.reservation);
+    }
+
+    await promoteDailyRelease(
+      { DB: fixture.DB, READMES: r2.bucket } as never, contenders[0].publication_id,
+    );
+    await expect(promoteDailyRelease(
+      { DB: fixture.DB, READMES: r2.bucket } as never, contenders[1].publication_id,
+    )).rejects.toThrow('PUBLICATION_BASE_RELEASE_STALE');
   });
 
   test('replays an exact committed head after a crash before publication finalization', async () => {

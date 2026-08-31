@@ -709,6 +709,46 @@ async function finalOutwardGuard(
   if (Number(result?.ok || 0) !== 1) throw new Error('PUBLICATION_OUTWARD_AUTHORIZATION_STALE');
 }
 
+async function finalPageRebuildBaselineGuard(
+  env: PublicationReleaseEnv,
+  head: ReleaseHeadRow,
+): Promise<void> {
+  const result = await env.DB.prepare(
+    `/* daily_release:page_rebuild_baseline_guard */ SELECT 1 AS ok
+       FROM daily_release_heads h
+       JOIN append_only_publications p ON p.publication_id=h.page_publication_id
+      WHERE h.date=? AND h.release_generation=? AND h.page_publication_id=?
+        AND h.video_publication_id IS ? AND h.video_mode=?
+        AND h.page_manifest_digest=? AND h.video_manifest_digest IS ?
+        AND p.publication_date=h.date AND p.publication_type='page'
+        AND p.state='published' AND p.manifest_digest=h.page_manifest_digest
+        AND p.video_mode=h.video_mode
+        AND p.bound_video_publication_id IS h.video_publication_id
+        AND p.bound_video_digest IS h.video_manifest_digest
+        AND NOT EXISTS (SELECT 1 FROM append_only_publication_objects po
+          WHERE po.publication_id=p.publication_id AND po.state<>'publication_bound')
+        AND (
+          (h.video_mode='none' AND h.video_publication_id IS NULL
+            AND h.video_manifest_digest IS NULL)
+          OR
+          (h.video_mode IN ('reuse_current','joint_new')
+            AND h.video_publication_id IS NOT NULL AND h.video_manifest_digest IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM append_only_publications v
+               WHERE v.publication_id=h.video_publication_id
+                 AND v.publication_date=h.date AND v.publication_type='video'
+                 AND v.state='published' AND v.manifest_digest=h.video_manifest_digest
+                 AND NOT EXISTS (SELECT 1 FROM append_only_publication_objects vo
+                   WHERE vo.publication_id=v.publication_id AND vo.state<>'publication_bound')))
+        )`,
+  ).bind(
+    head.date, head.release_generation, head.page_publication_id,
+    head.video_publication_id, head.video_mode, head.page_manifest_digest,
+    head.video_manifest_digest,
+  ).first<{ ok: number }>();
+  if (Number(result?.ok || 0) !== 1) throw new Error('PUBLICATION_RELEASE_INCOMPLETE');
+}
+
 export async function readAuthorizedDailyPage(
   env: PublicationReleaseEnv,
   date: string,
@@ -823,6 +863,21 @@ export async function loadCurrentDailyReleaseForBuild(
     review_batch: reviewBatch,
     video,
   };
+}
+
+export async function loadCurrentDailyReleaseForPageRebuild(
+  env: PublicationReleaseEnv,
+  date: string,
+): Promise<{ head: ReleaseHeadRow; video: DailyVideoRow | null } | null> {
+  const head = await loadHead(env.DB, date);
+  if (!head) return null;
+  await loadPublicationGraph(env.DB, head.page_publication_id);
+  if (!await completeHead(env.DB, head)) throw new Error('PUBLICATION_RELEASE_INCOMPLETE');
+  const video = head.video_publication_id
+    ? videoRowFromGraph(head, await loadPublicationGraph(env.DB, head.video_publication_id))
+    : null;
+  await finalPageRebuildBaselineGuard(env, head);
+  return { head, video };
 }
 
 export async function readAuthorizedDailyVideo(
