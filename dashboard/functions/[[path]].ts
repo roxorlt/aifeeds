@@ -4,7 +4,7 @@ import {
   type HomeRuntimeEnv,
 } from "./home-runtime";
 import { renderWaterfall } from "./render-waterfall";
-import { maybeProxyStagingSeoRequest } from "./seo-proxy";
+import { maybeProxySeoRequest } from "./seo-proxy";
 
 type PagesContext = Readonly<{
   request: Request;
@@ -17,7 +17,7 @@ type EdgeCacheGlobal = Readonly<{
 }>;
 
 export async function onRequest(context: PagesContext): Promise<Response> {
-  const seoResponse = await maybeProxyStagingSeoRequest(context.request);
+  const seoResponse = await maybeProxySeoRequest(context.request);
   if (seoResponse) return seoResponse;
   const cache = (globalThis as EdgeCacheGlobal).caches?.default;
   return handleHomeRuntime(context.request, context.env, {
