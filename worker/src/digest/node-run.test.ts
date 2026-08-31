@@ -105,6 +105,9 @@ describe('staged 08:00 node run', () => {
     vi.mocked(rebuildDigestPoolSubject).mockResolvedValue('标题');
     vi.mocked(pushDailyStageToCodex).mockResolvedValue({ ok: true } as never);
     vi.mocked(pushDailyToCodex).mockResolvedValue({ ok: true } as never);
+    vi.mocked(runDailyPagePhase).mockResolvedValue({
+      date: '2026-07-21', skipped: false, itemCount: 5,
+    });
     vi.mocked(freezeNewsReviewBatchFromPool).mockResolvedValue({
       created: true,
       superseded_batch_id: null,
@@ -152,6 +155,51 @@ describe('staged 08:00 node run', () => {
     expect(pushDailyStageToCodex).toHaveBeenCalledTimes(2);
     expect(vi.mocked(pushDailyStageToCodex).mock.calls.map((call) => call[1])).toEqual(['papers', 'finalize']);
     expect(pushDailyToCodex).not.toHaveBeenCalled();
+  });
+
+  test('rejects a failed daily page result from the existing retryable Workflow step', async () => {
+    vi.mocked(runDailyPagePhase).mockResolvedValue({
+      date: '2026-07-21', error: 'Error: D1 storage timeout',
+    });
+    const step = makeStep();
+    const env = makeEnv({
+      DAILY_STAGED_PUSH_ENABLED: '0',
+      DAILY_PUSH_ENABLED: '0',
+      DAILY_PAGE_ENABLED: '1',
+    });
+
+    await expect(runDigestNodeWorkflow(
+      env,
+      { slotHourBjt: 8, date: '2026-07-21' },
+      step as never,
+    )).rejects.toThrow('Error: D1 storage timeout');
+
+    expect(step.do).toHaveBeenCalledWith(
+      'generate-daily-page',
+      {
+        retries: { limit: 2, delay: '5 seconds', backoff: 'exponential' },
+        timeout: '5 minutes',
+      },
+      expect.any(Function),
+    );
+  });
+
+  test.each([
+    ['success', { date: '2026-07-21', skipped: false, itemCount: 5 }],
+    ['skipped', { date: '2026-07-21', skipped: true, itemCount: 0 }],
+  ])('keeps a %s daily page result non-blocking', async (_kind, result) => {
+    vi.mocked(runDailyPagePhase).mockResolvedValue(result);
+    const env = makeEnv({
+      DAILY_STAGED_PUSH_ENABLED: '0',
+      DAILY_PUSH_ENABLED: '0',
+      DAILY_PAGE_ENABLED: '1',
+    });
+
+    await expect(runDigestNodeWorkflow(
+      env,
+      { slotHourBjt: 8, date: '2026-07-21' },
+      makeStep() as never,
+    )).resolves.toMatchObject({ slotKey: '2026-07-21-08', subs: 0 });
   });
 
   test('08:00 scheduled finalize surfaces a stale locked manual editorial snapshot and retries fail closed', async () => {
@@ -246,6 +294,32 @@ describe('staged 08:00 node run', () => {
       env,
       '分批日报 Workflow 失败',
       expect.stringContaining('2026-07-21 papers'),
+    );
+  });
+
+  test('preserves staged push error priority after the daily page step exhausts retries', async () => {
+    vi.mocked(getDailyStageState).mockResolvedValue(null);
+    vi.mocked(pushDailyStageToCodex).mockResolvedValue({ ok: false, error: 'hk unavailable' } as never);
+    vi.mocked(runDailyPagePhase).mockResolvedValue({
+      date: '2026-07-21', error: 'Error: D1 storage timeout',
+    });
+    const step = makeStep();
+    const env = makeEnv({ DAILY_PAGE_ENABLED: '1' });
+
+    await expect(runDigestNodeWorkflow(
+      env,
+      { slotHourBjt: 8, date: '2026-07-21', dailyStage: 'papers' },
+      step as never,
+    )).rejects.toThrow('daily_stage_push_failed:foundation:hk unavailable');
+
+    expect(runDailyPagePhase).toHaveBeenCalledWith(env, '2026-07-21');
+    expect(step.do).toHaveBeenCalledWith(
+      'generate-daily-page',
+      {
+        retries: { limit: 2, delay: '5 seconds', backoff: 'exponential' },
+        timeout: '5 minutes',
+      },
+      expect.any(Function),
     );
   });
 

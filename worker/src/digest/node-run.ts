@@ -234,11 +234,21 @@ async function runDigestNodeWorkflowCore(
     }
   }
 
+  let dailyPageError: unknown = null;
   if (slotHourBjt === 8 && env.DAILY_PAGE_ENABLED === '1') {
-    await step.do('generate-daily-page', RETRY, async () => runDailyPagePhase(env, date));
+    try {
+      await step.do('generate-daily-page', RETRY, async () => {
+        const result = await runDailyPagePhase(env, date);
+        if (result.error !== undefined) throw new Error(result.error);
+        return result;
+      });
+    } catch (error) {
+      dailyPageError = error;
+    }
   }
 
   if (stagedPushError) throw stagedPushError;
+  if (dailyPageError) throw dailyPageError;
 
   return { slotKey: sk, subs: subIds.length, ...(stagedEight ? { dailyStage: 'papers' } : {}) };
 }
