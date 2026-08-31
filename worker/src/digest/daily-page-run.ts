@@ -14,7 +14,7 @@ import { reserveAppendOnlyPublication } from './publication-storage';
 import {
   assertCurrentDailyReleaseAuthorization,
   assertCurrentDailyReleaseSetAuthorization,
-  loadCurrentDailyReleaseForBuild,
+  loadCurrentDailyReleaseForPageRebuild,
   materializeAppendOnlyPublication,
   projectAuthorizedDailyPageCompatibility,
   promoteDailyRelease,
@@ -56,7 +56,7 @@ async function persistPage(
   assertPublicationGates(env);
   if (!env.READMES) throw new Error('daily_publication_r2_missing');
   const itemCount = countItems(data);
-  const current = await loadCurrentDailyReleaseForBuild(env, data.date);
+  const current = await loadCurrentDailyReleaseForPageRebuild(env, data.date);
   const video = current?.video || null;
   const html = renderDailyPageHtml(data, env, video);
   const bytes = new TextEncoder().encode(html);
