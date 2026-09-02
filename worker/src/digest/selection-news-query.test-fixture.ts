@@ -66,6 +66,20 @@ export class SqliteD1 {
     return prepared;
   }
 
+  /** D1 的 batch 语义:整批在一个事务里按序执行,任一条失败整批回滚。 */
+  async batch(statements: Array<{ run(): Promise<unknown> }>): Promise<unknown[]> {
+    this.sqlite.exec('BEGIN');
+    try {
+      const results: unknown[] = [];
+      for (const statement of statements) results.push(await statement.run());
+      this.sqlite.exec('COMMIT');
+      return results;
+    } catch (error) {
+      this.sqlite.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   /** 直接跑 EXPLAIN QUERY PLAN,返回逐行 detail。 */
   plan(sql: string, ...binds: unknown[]): string[] {
     return (this.sqlite.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...(binds as SQLInputValue[])) as Array<{ detail: string }>)
@@ -139,7 +153,9 @@ export function insertItem(db: SqliteD1, input: ItemInput): void {
     input.title ?? 'fixture title',
     input.content ?? 'fixture body',
     input.contentTranslated ?? null,
-    input.publishedAt ?? input.scrapedAt,
+    // 同 isRelevant:`??` 会把显式传入的 null(源站没给发布时间)顶成 scrapedAt,
+    // 「无 published_at」那一格就永远测不到。
+    input.publishedAt === undefined ? input.scrapedAt : input.publishedAt,
     input.scrapedAt,
     // `?? 1` 会把显式传入的 null(未判定)也顶成 1,矩阵里「is_relevant 为 NULL」那格就测不到了。
     input.isRelevant === undefined ? 1 : input.isRelevant,

@@ -779,3 +779,61 @@ describe('daily news review API', () => {
     expect(markNewsReviewPublished).not.toHaveBeenCalled();
   });
 });
+
+// 审核候选携带源站发布时间(2026-09-02):HK 面板拿的就是这个响应。
+// 这里钉「原样透传」—— candidates 只按 item_id 过滤,不做白名单式字段重组,
+// 所以序列化端补上的字段不需要 API 侧同步改动。
+describe('审核候选的 published_at 透传', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getPublishedNewsReviewSelection).mockResolvedValue([] as never);
+    vi.mocked(authorizeFormalNewsSet).mockImplementation(async (_env, _date, ids) => ({
+      allowed_ids: [...ids],
+      decisions: ids.map((id) => ({ item_id: id, allowed: true, code: 'ALLOW_SCHEDULED_FORMAL' as const })),
+    }));
+  });
+
+  test('GET 响应逐字节透传候选的 published_at(有值 / 缺失 / null 三种形态)', async () => {
+    const withPublished = {
+      ...batch,
+      candidates: [
+        // 定时候选:ISO 原值。
+        { item_id: 'news-1', title: '标题1', summary: '摘要1', source: '来源', score: 10, published_at: '2026-09-02T00:30:00.000Z' },
+        // 源站没给发布时间:字段整个缺失。
+        { item_id: 'news-2', title: '标题2', summary: '摘要2', source: '来源', score: 9 },
+        // 人工补录 source-support 签名快照:item_projection 里可能就是 null,原样透传。
+        { item_id: 'blog:manual:lead-1', title: '标题3', summary: '摘要3', source: '手工补录', score: null, published_at: null, origin: 'manual_lead', lead_id: 'lead-1' },
+      ],
+      candidate_ids: ['news-1', 'news-2', 'blog:manual:lead-1'],
+      default_selected_ids: ['news-1'],
+    };
+    vi.mocked(getNewsReviewBatch).mockResolvedValue(withPublished as never);
+    vi.mocked(getActiveNewsReviewBatch).mockResolvedValue(withPublished as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
+      batch: withPublished, changed: false, dropped_ids: [],
+    } as never);
+
+    const response = await handleDailyNewsReviewApi(
+      request('GET'), env(), Date.parse('2026-07-30T08:00:00Z'),
+    );
+    const body = await response.json() as { candidates: Array<Record<string, unknown>> };
+
+    expect(response.status).toBe(200);
+    // 候选数组是同一批对象,字段一个不少也一个不多。
+    expect(body.candidates).toEqual(withPublished.candidates);
+    expect(body.candidates[0].published_at).toBe('2026-09-02T00:30:00.000Z');
+    expect('published_at' in body.candidates[1]).toBe(false);
+    expect(body.candidates[2].published_at).toBeNull();
+  });
+
+  test('变异验证:白名单式重组候选会把 published_at 吃掉', async () => {
+    const candidates = [
+      { item_id: 'news-1', title: '标题1', summary: '摘要1', source: '来源', score: 10, published_at: '2026-09-02T00:30:00.000Z' },
+    ];
+    // 变异体 = 若 API 改成挑字段重组响应(而不是原样透传),字段就丢了。
+    const rebuilt = candidates.map(({ item_id, title, summary, source, score }) =>
+      ({ item_id, title, summary, source, score }));
+    expect(rebuilt[0]).not.toHaveProperty('published_at');
+    expect(candidates[0]).toHaveProperty('published_at');
+  });
+});
