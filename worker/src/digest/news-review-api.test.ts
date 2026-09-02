@@ -837,3 +837,48 @@ describe('审核候选的 published_at 透传', () => {
     expect(candidates[0]).toHaveProperty('published_at');
   });
 });
+
+// 事件级历史去重(2026-09-02):候选带上事件首见时间 / 是否推送过。
+// HK 面板拿的就是这个响应 —— 这里钉「原样透传」,序列化端补的字段无需 API 侧同步改动。
+describe('审核候选的事件历史字段透传', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getPublishedNewsReviewSelection).mockResolvedValue([] as never);
+    vi.mocked(authorizeFormalNewsSet).mockImplementation(async (_env, _date, ids) => ({
+      allowed_ids: [...ids],
+      decisions: ids.map((id) => ({ item_id: id, allowed: true, code: 'ALLOW_SCHEDULED_FORMAL' as const })),
+    }));
+  });
+
+  test('GET 响应逐字节透传 event_first_seen_at / event_previously_pushed(含缺失形态)', async () => {
+    const withHistory = {
+      ...batch,
+      candidates: [
+        {
+          item_id: 'news-1', title: '标题1', summary: '摘要1', source: '来源', score: 10,
+          event_first_seen_at: '2026-08-14T03:00:00.000Z', event_previously_pushed: true,
+        },
+        // 事件首见就在候选窗内 → 两个字段都省略。
+        { item_id: 'news-2', title: '标题2', summary: '摘要2', source: '来源', score: 9 },
+      ],
+      candidate_ids: ['news-1', 'news-2'],
+      default_selected_ids: ['news-2'],
+    };
+    vi.mocked(getNewsReviewBatch).mockResolvedValue(withHistory as never);
+    vi.mocked(getActiveNewsReviewBatch).mockResolvedValue(withHistory as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
+      batch: withHistory, changed: false, dropped_ids: [],
+    } as never);
+
+    const response = await handleDailyNewsReviewApi(
+      request('GET'), env(), Date.parse('2026-07-30T08:00:00Z'),
+    );
+    const body = await response.json() as { candidates: Array<Record<string, unknown>> };
+
+    expect(response.status).toBe(200);
+    expect(body.candidates).toEqual(withHistory.candidates);
+    expect(body.candidates[0].event_first_seen_at).toBe('2026-08-14T03:00:00.000Z');
+    expect(body.candidates[0].event_previously_pushed).toBe(true);
+    expect('event_first_seen_at' in body.candidates[1]).toBe(false);
+  });
+});

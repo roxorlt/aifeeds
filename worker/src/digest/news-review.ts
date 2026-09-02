@@ -46,6 +46,20 @@ export interface NewsReviewCandidate {
    * 消费端按「可能缺失、也可能是 null」处理即可。
    */
   published_at?: string | null;
+  /**
+   * 同事件在库内 30 天历史里的最早出现时间(ISO 原值透传)。
+   *
+   * 审核页只有标题/摘要/来源/评分时,owner 分不清「今天的新事件」和「一个月前的旧事件
+   * 被一篇新文章带回来」——9/2 的 Gemini 3.7 Flash / Qwen3.8-Max 就是这么混进头部的。
+   *
+   * 取值口径:来自选品审计(buildNewsSelectionAudit)的 event_first_seen_at,
+   * 只有**定时候选**才有。人工补录候选不跑事件历史判定,两个字段一律省略;
+   * source-support 那条更是签名快照(canonical_digest / hmac_sha256 覆盖 item_projection),
+   * 形状不能动。消费端按「可能缺失」处理。
+   */
+  event_first_seen_at?: string;
+  /** 该事件是否进过 30 天内的推送账本 / 人审发布集合。缺失 = 未判定(人工补录候选)。 */
+  event_previously_pushed?: boolean;
   event_key?: string;
   origin?: 'manual_lead';
   lead_id?: string;
@@ -853,6 +867,9 @@ interface NewsReviewPoolMetaCandidate {
   adjusted_score?: number;
   // 选品审计里本来就有(buildNewsSelectionAudit 写入);item 行读不到时兜底用。
   published_at?: string;
+  // 事件级历史去重的判定结果,由 buildNewsSelectionAudit 写进 digest_pool 的 items_meta。
+  event_first_seen_at?: string;
+  event_previously_pushed?: boolean;
 }
 
 interface NewsReviewItemRow {
@@ -1416,6 +1433,10 @@ export async function freezeNewsReviewBatchFromPool(
       score: typeof audit?.adjusted_score === 'number' ? audit.adjusted_score : null,
       ...(item?.url ? { url: item.url } : {}),
       ...(publishedAt ? { published_at: publishedAt } : {}),
+      // 事件首见时间 / 是否推送过:直接取选品审计的判定结果,冻结时不重复查库。
+      ...(audit?.event_first_seen_at ? { event_first_seen_at: audit.event_first_seen_at } : {}),
+      ...(typeof audit?.event_previously_pushed === 'boolean'
+        ? { event_previously_pushed: audit.event_previously_pushed } : {}),
     };
   });
   let freezeDefaults = defaultIds.filter((itemId) => scheduledCandidateIds.includes(itemId)).slice(0, 5);

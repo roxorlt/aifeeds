@@ -71,6 +71,42 @@ const NEWS_CANDIDATE_DISCOVERY_CAP = 5000;
 // 取 300 是为了让单条语句的 CPU 峰值可控(300 × registry 41 行 × 授权谓词)。
 const NEWS_AUTHORIZATION_BATCH_SIZE = 300;
 
+// ── 事件级历史去重(2026-09-02:一个月前的旧事件借新文章回流)────────────────────
+// 缺陷实证:9/2 候选头部混进两条一个月前的旧事件 —— Gemini 3.7 Flash(库内首见 8/14,
+// 9/1 一篇合集稿又提了一遍)与 Qwen3.8-Max(首发 8/3,9/2 一篇「登顶 CodeArena」后续稿)。
+//
+// 根因不是「只跟上一次推送比」——`fetchPreviousPushedNewsCandidates` 的账本窗口本来就是
+// 30 天、且覆盖窗口内全部推送。真正的漏洞有三个,叠加起来让旧事件畅通无阻:
+//   ① `suppressCrossDayRepeatedNewsEvents` 对官方源开了一道**没有时间上限**的天窗:
+//      `if (officialSourceWeight(item) > 0) return true;`。它本意是「昨天媒体报过、今天
+//      官方发声时允许换成官方口径」,但没限定事件年龄 —— blog:google / blog:qwen 都在
+//      officialSourceNames 里,于是官方源一个月后的后续稿/合集稿永远拿免死金牌。
+//      owner 举的两个例子**都**是这一条。
+//   ② 账本只记「机器选出的 top5/top3」(digest_pool),人审换上来的条目从不回写账本;
+//   ③ 账本比对要把历史 item 重新过一遍**今天的**授权谓词(fetchNewsCandidatesByIds),
+//      信源改名/停用/软删都会让一个月前推过的条目静默消失。
+//
+// 修复思路:不再只跟「推送账本」比,而是跟**库内 30 天的真实历史**比 —— 事件首见超过
+// NEWS_EVENT_STALE_AFTER_DAYS 天就不算新闻了,与它是不是官方源、有没有推过无关。
+//
+// 为什么复用现成的 `eventTokens` + `sameNewsEvent` 而不落一列事件 key:
+// 该匹配器是**成对模糊判定**(结构化指纹快路径 + token 兜底),而且**不满足传递性**
+// (preview↔released 会连,但两者都不与第三个 stage=unknown 的条目连),因此不存在
+// 「每条候选唯一确定的事件 key」可以入库做等值匹配。仓里唯一的标量 key
+// `deriveAutomaticManualEventIdentityV1` 是给人工补录冲突检测用的 fail-closed 派生,
+// 要求 confidence≥0.8 + 产品在白名单里,绝大多数 feed 指纹得不到 key —— 拿它做历史去重
+// 会在大多数候选上静默失效。所以:**不新造 key、不加列、不加 migration**,
+// 改成把有上限的历史行拉进内存跟候选做成对比对。
+const NEWS_EVENT_HISTORY_LOOKBACK_DAYS = 30;
+// 事件首见距今超过这个天数即视为「旧事件」。做成常量便于调整。
+const NEWS_EVENT_STALE_AFTER_DAYS = 3;
+// 旧事件但从未推送过 → 保留但降权。数值只用于审计可读性;
+// 「不得进前列」的硬保证由 compareScoredNewsCandidate 的降权档位提供,不依赖这个数字。
+const NEWS_EVENT_STALE_UNPUSHED_PENALTY = 40;
+// 历史行安全阀。生产 blog/podcast ≈44 条/天,30 天 ≈1300 条;4000 留了 ~3x 冗余。
+// 命中即打 warn 并保留最近的 4000 条 —— 保证这条热路径的内存与 CPU 都有确定上限。
+const NEWS_EVENT_HISTORY_CAP = 4000;
+
 /**
  * 行业要闻候选时间窗边界(items.scraped_at 的原始存储格式,可直接对裸列做字典序比较)。
  *
@@ -422,6 +458,212 @@ async function selectNewsByScore(env: Env, limit: number, options: SelectTopOpti
   return (await selectNewsByScoreWithAudit(env, limit, options)).ids;
 }
 
+/** 历史行:只取事件比对真正需要的字段,不把整个 extra blob 拉进 Worker。 */
+interface NewsEventHistoryDbRow {
+  id: string;
+  title: string | null;
+  published_at: string | null;
+  scraped_at: string | null;
+  title_zh: string | null;
+  ai_summary_zh: string | null;
+  ai_category: string | null;
+  source_company: string | null;
+  event_fingerprint: string | null;
+}
+
+export interface NewsEventHistoryEntry extends NewsCandidateForScoring {
+  /** 该历史条目自身的时间锚点(published_at 优先,回落 scraped_at)。 */
+  seenAt: string;
+}
+
+/**
+ * 拉取 [now-30d, 候选窗起点) 的库内历史。
+ *
+ * **刻意只取比候选窗更老的行**:候选窗是 3 天、判旧阈值也是 3 天,所以窗内的行不可能
+ * 把任何事件变「旧」;把它们排除掉既不影响结论,又直接省掉一大块 I/O 与比对。
+ *
+ * 查询形状遵守 PR #237 立下的守则:单表、纯索引、不 JOIN、不带 `deleted_at`
+ * (那是 idx_items_deleted 的诱饵),裸列比较让 idx_items_source_scraped
+ * (source_type, scraped_at DESC) 可用,并带 LIMIT 安全阀。
+ */
+export async function loadNewsEventHistory(
+  env: Env,
+  window: NewsCandidateWindow,
+  lookbackDays: number = NEWS_EVENT_HISTORY_LOOKBACK_DAYS,
+): Promise<NewsEventHistoryEntry[]> {
+  const until = window.since;
+  const untilMs = Date.parse(until);
+  if (!Number.isFinite(untilMs)) return [];
+  const since = new Date(untilMs - (lookbackDays - NEWS_CANDIDATE_WINDOW_DAYS) * 86400_000).toISOString();
+  const sql = `/* news_selection:event_history */
+    SELECT i.id, i.title, i.published_at, i.scraped_at,
+           json_extract(i.extra,'$.title_zh')          AS title_zh,
+           json_extract(i.extra,'$.ai_summary_zh')     AS ai_summary_zh,
+           json_extract(i.extra,'$.ai_category')       AS ai_category,
+           json_extract(i.extra,'$.source_company')    AS source_company,
+           json_extract(i.extra,'$.event_fingerprint') AS event_fingerprint
+      FROM items i
+     WHERE i.source_type IN ('blog','podcast')
+       AND i.is_relevant = 1
+       AND i.scraped_at >= ?
+       AND i.scraped_at < ?
+     ORDER BY i.scraped_at DESC
+     LIMIT ?`;
+  const rows = await env.DB.prepare(sql)
+    .bind(since, until, NEWS_EVENT_HISTORY_CAP)
+    .all<NewsEventHistoryDbRow>();
+  const results = rows.results || [];
+  if (results.length >= NEWS_EVENT_HISTORY_CAP) {
+    console.warn(
+      `[news-selection] event history hit cap ${NEWS_EVENT_HISTORY_CAP}`
+      + ` (since=${since} until=${until}); older history was dropped`,
+    );
+  }
+  return results.map(newsEventHistoryEntryFromDbRow);
+}
+
+function newsEventHistoryEntryFromDbRow(row: NewsEventHistoryDbRow): NewsEventHistoryEntry {
+  // event_fingerprint 在 SQL 里被 json_extract 成字符串;object 形态需要再解析一次。
+  // 人工补录条目在同一路径下存的是 'mnev1:<hash>' 字符串,parse 失败即视为无指纹,
+  // 与 normalizeNewsEventFingerprint 对非 object 的处理一致(退到 token 兜底)。
+  let fingerprint: unknown = null;
+  if (row.event_fingerprint) {
+    try {
+      fingerprint = JSON.parse(row.event_fingerprint);
+    } catch {
+      fingerprint = null;
+    }
+  }
+  return {
+    id: row.id,
+    title: String(row.title || ''),
+    titleZh: String(row.title_zh || ''),
+    sourceType: 'blog',
+    sourceKey: '',
+    sourceCompany: String(row.source_company || ''),
+    aiCategory: String(row.ai_category || ''),
+    publishedAt: String(row.published_at || ''),
+    aiSummaryZh: String(row.ai_summary_zh || ''),
+    content: '',
+    contentTranslated: '',
+    transcriptTier: '',
+    selectable: true,
+    eventFingerprint: normalizeNewsEventFingerprint(fingerprint),
+    seenAt: String(row.published_at || row.scraped_at || ''),
+  };
+}
+
+/**
+ * 「历史上已推送过」的 item id 集合(30 天窗口)。
+ *
+ * 取两个来源的并集,因为单看任何一个都会漏:
+ * - `digest_pool`(source='news')只记**机器选出**的 top5/top3;人审换上来的条目从不回写这里;
+ * - `daily_news_review_batches.applied_selected_ids` 才是**人审真正发布**的集合。
+ *
+ * 只查 id、不重新跑授权谓词 —— 这是刻意的:`fetchNewsCandidatesByIds` 会把历史条目再过一遍
+ * **今天的**registry/sources 授权,信源改名/停用/软删都会让一个月前推过的条目静默消失,
+ * 从而把「推过」误判成「没推过」。判定「有没有推过」只需要 id,不需要它今天还授权通过。
+ */
+export async function loadPushedNewsItemIds(
+  env: Env,
+  nowMs: number = Date.now(),
+  lookbackDays: number = NEWS_EVENT_HISTORY_LOOKBACK_DAYS,
+): Promise<Set<string>> {
+  const startOfTodayBjtMs =
+    Math.floor((nowMs + 8 * 3600_000) / 86400_000) * 86400_000 - 8 * 3600_000;
+  const lookbackFromMs = startOfTodayBjtMs - lookbackDays * 86400_000;
+  const fromDate = new Date(lookbackFromMs).toISOString().slice(0, 10);
+  const toDate = new Date(startOfTodayBjtMs).toISOString().slice(0, 10);
+  const rows = await env.DB.prepare(
+    `/* news_selection:pushed_ledger_ids */
+     SELECT DISTINCT je.value AS id
+       FROM digest_pool dp, json_each(COALESCE(dp.item_ids,'[]')) je
+      WHERE dp.source = 'news' AND dp.generated_at >= ? AND dp.generated_at < ?
+      UNION
+     SELECT DISTINCT je.value AS id
+       FROM daily_news_review_batches b, json_each(COALESCE(b.applied_selected_ids,'[]')) je
+      WHERE b.applied_selected_ids IS NOT NULL
+        AND b.review_date >= ? AND b.review_date < ?`,
+  ).bind(lookbackFromMs, startOfTodayBjtMs, fromDate, toDate).all<{ id: string }>();
+  return new Set((rows.results || [])
+    .map((row) => row.id)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0));
+}
+
+export type NewsEventHistoryDecision = 'fresh' | 'demoted' | 'dropped';
+
+export interface NewsEventHistoryPolicyOptions {
+  staleAfterDays?: number;
+  nowMs?: number;
+}
+
+/**
+ * 事件级历史去重的**纯判定**(无 I/O,便于逐格测试)。
+ *
+ * - 事件首见 > staleAfterDays 天 **且** 历史上已推送过 → 剔除;
+ * - 首见 > staleAfterDays 天 **但从未推送过** → 保留但降权(且强制排在未降权候选之后);
+ * - 首见 ≤ staleAfterDays 天(= 在历史里找不到同事件的更老条目)→ 原样不动。
+ *
+ * 匹配复用 `eventTokens` + `sameNewsEvent`,与 `foldNewsEventsForDigest` /
+ * `suppressCrossDayRepeatedNewsEvents` 同一套语义,不另造一套判同标准。
+ */
+export function applyNewsEventHistoryPolicy(
+  scored: ScoredNewsCandidate[],
+  history: readonly NewsEventHistoryEntry[],
+  pushedIds: ReadonlySet<string>,
+  options: NewsEventHistoryPolicyOptions = {},
+): ScoredNewsCandidate[] {
+  if (!scored.length) return scored;
+  const staleAfterDays = options.staleAfterDays ?? NEWS_EVENT_STALE_AFTER_DAYS;
+  const historyProfiles = history.map((entry) => ({ entry, profile: eventTokens(entry) }));
+  const kept: ScoredNewsCandidate[] = [];
+  for (const item of scored) {
+    const profile = eventTokens(item);
+    let firstSeenAt = '';
+    let previouslyPushed = pushedIds.has(item.id);
+    let matched = false;
+    let strongMatch = false;
+    for (const candidateHistory of historyProfiles) {
+      const strength = newsEventMatchStrength(profile, candidateHistory.profile);
+      if (strength === 'none') continue;
+      matched = true;
+      if (strength === 'structured') strongMatch = true;
+      if (pushedIds.has(candidateHistory.entry.id)) previouslyPushed = true;
+      const seenAt = candidateHistory.entry.seenAt;
+      if (seenAt && (!firstSeenAt || seenAt < firstSeenAt)) firstSeenAt = seenAt;
+    }
+    if (!matched) {
+      // 历史里没有更老的同事件条目 → 事件首见就在候选窗内,现状不变。
+      kept.push({ ...item, eventPreviouslyPushed: previouslyPushed });
+      continue;
+    }
+    if (previouslyPushed && strongMatch) {
+      // 旧事件 + 推送过 + 结构化指纹判同 = 借尸还魂,剔除。审计里仍留一条带原因的记录。
+      kept.push({
+        ...item,
+        eventFirstSeenAt: firstSeenAt,
+        eventPreviouslyPushed: true,
+        eventHistoryDecision: 'dropped',
+        eventHistoryReason:
+          `事件首见 ${firstSeenAt.slice(0, 10)}(>${staleAfterDays} 天)且已推送过,判为旧事件回流`,
+      });
+      continue;
+    }
+    kept.push({
+      ...item,
+      adjustedScore: item.adjustedScore - NEWS_EVENT_STALE_UNPUSHED_PENALTY,
+      eventFirstSeenAt: firstSeenAt,
+      eventPreviouslyPushed: previouslyPushed,
+      eventHistoryDecision: 'demoted',
+      eventHistoryReason: previouslyPushed
+        ? `事件首见 ${firstSeenAt.slice(0, 10)}(>${staleAfterDays} 天)且已推送过,但仅 token 兜底判同,`
+          + '为避免误杀新版本只降权不剔除'
+        : `事件首见 ${firstSeenAt.slice(0, 10)}(>${staleAfterDays} 天)但从未推送过,保留并降权`,
+    });
+  }
+  return kept.sort(compareScoredNewsCandidate);
+}
+
 export async function selectNewsByScoreWithAudit(
   env: Env,
   limit: number,
@@ -437,10 +679,22 @@ export async function selectNewsByScoreWithAudit(
   const eventDeduped = options.strictCrossDayEventDedup
     ? suppressCrossDayRepeatedNewsEvents(scored, await fetchPreviousPushedNewsCandidates(env))
     : scored;
-  const reviewed = options.editorialReview
-    ? await applyNewsEditorialReviewIfEnabled(env, eventDeduped)
+  // 事件级历史去重(2026-09-02)。挂在与跨天去重同一个开关下:
+  // 这两条是同一类「跨周期不要重复」的语义,而 daily-api 实时路径刻意走更宽松的
+  // excludeStalePushes,不该为每次 API 请求付一次 30 天历史查询的代价。
+  const historyFiltered = options.strictCrossDayEventDedup
+    ? applyNewsEventHistoryPolicy(
+      eventDeduped,
+      await loadNewsEventHistory(env, window),
+      await loadPushedNewsItemIds(env),
+    )
     : eventDeduped;
-  const ids = foldNewsEventsForDigest(reviewed).slice(0, limit).map((r) => r.id);
+  const reviewed = options.editorialReview
+    ? await applyNewsEditorialReviewIfEnabled(env, historyFiltered)
+    : historyFiltered;
+  // 判为 dropped 的旧事件不进榜单,但仍留在审计里(带首见日期与原因),便于复盘。
+  const selectable = reviewed.filter((item) => item.eventHistoryDecision !== 'dropped');
+  const ids = foldNewsEventsForDigest(selectable).slice(0, limit).map((r) => r.id);
   return {
     ids,
     audit: buildNewsSelectionAudit(reviewed.slice(0, Math.max(limit, 30)), ids),
@@ -482,6 +736,12 @@ export interface ScoredNewsCandidate extends NewsCandidateForScoring {
   relatedSourceCompanies: string[];
   editorialAdjustment?: number;
   editorialReason?: string;
+  /** 同事件在库内 30 天历史里的最早出现时间(ISO);没有更老的同事件条目时不设。 */
+  eventFirstSeenAt?: string;
+  /** 该事件(本条或历史同事件条目)是否进过 30 天内的推送账本 / 人审发布集合。 */
+  eventPreviouslyPushed?: boolean;
+  eventHistoryDecision?: NewsEventHistoryDecision;
+  eventHistoryReason?: string;
 }
 
 export interface NewsSelectionAudit {
@@ -508,6 +768,12 @@ export interface NewsSelectionAuditEntry {
   editorial_adjustment?: number;
   editorial_reason?: string;
   event_fingerprint?: NewsEventFingerprint;
+  /** 同事件在库内 30 天历史里的最早出现时间(ISO)。 */
+  event_first_seen_at?: string;
+  event_previously_pushed?: boolean;
+  /** 'dropped' = 旧事件回流被剔除;'demoted' = 旧事件但没推过,降权。 */
+  event_history_decision?: NewsEventHistoryDecision;
+  event_history_reason?: string;
 }
 
 export interface NewsEventFingerprint {
@@ -711,6 +977,11 @@ export function buildNewsSelectionAudit(scored: ScoredNewsCandidate[], selectedI
       ...(typeof item.editorialAdjustment === 'number' ? { editorial_adjustment: item.editorialAdjustment } : {}),
       ...(item.editorialReason ? { editorial_reason: item.editorialReason } : {}),
       ...(item.eventFingerprint ? { event_fingerprint: item.eventFingerprint } : {}),
+      ...(item.eventFirstSeenAt ? { event_first_seen_at: item.eventFirstSeenAt } : {}),
+      ...(typeof item.eventPreviouslyPushed === 'boolean'
+        ? { event_previously_pushed: item.eventPreviouslyPushed } : {}),
+      ...(item.eventHistoryDecision ? { event_history_decision: item.eventHistoryDecision } : {}),
+      ...(item.eventHistoryReason ? { event_history_reason: item.eventHistoryReason } : {}),
     })),
   };
 }
@@ -835,6 +1106,10 @@ export function suppressCrossDayRepeatedNewsEvents<T extends NewsCandidateForSco
 }
 
 function compareScoredNewsCandidate(a: ScoredNewsCandidate, b: ScoredNewsCandidate): number {
+  // 被历史去重降权的旧事件强制排在所有未降权候选之后 —— 「不得进前列」是硬保证,
+  // 不依赖 NEWS_EVENT_STALE_UNPUSHED_PENALTY 这个数字够不够大。
+  const demotedDiff = Number(a.eventHistoryDecision === 'demoted') - Number(b.eventHistoryDecision === 'demoted');
+  if (demotedDiff !== 0) return demotedDiff;
   return b.adjustedScore - a.adjustedScore
     || a.sourceRank - b.sourceRank
     || parseDateMs(b.publishedAt) - parseDateMs(a.publishedAt)
@@ -1353,6 +1628,31 @@ function sameNewsEvent(left: TokenProfile, right: TokenProfile): boolean {
   if (sharedOrgs.size && sharedTopics.size && [...sharedDistinctive].some((token) => token.length >= 6 || /\d/.test(token))) return true;
   if (shared.size >= 3 && sharedDistinctive.size >= 2 && sharedTopics.size) return true;
   return false;
+}
+
+/**
+ * 同事件判定的**强度**,给「剔除 vs 降权」分级用。
+ *
+ * `sameNewsEvent` 的 token 兜底相当粗:没有结构化指纹时,「Gemini 4.0 Ultra 发布」与
+ * 「Gemini 3.7 Flash 发布」共享 google/gemini/model 等 token 就会被判成同事件。
+ * 折叠(foldNewsEventsForDigest)里这只是合并展示,代价有限;但历史去重里「剔除」是
+ * 破坏性动作 —— 误杀一条真正的新模型发布,比放过一条旧事件回流更糟。
+ *
+ * 所以:**破坏性动作要强信号,软动作才容忍模糊信号**。
+ * - `structured`:双边结构化指纹显式判同(sameStructuredEventFingerprint === true),
+ *   或 preview↔released 的同一 primaryObjectIdentity 生命周期对 → 允许剔除;
+ * - `fuzzy`:只有 token 兜底判同 → 只降权,不剔除;
+ * - `none`:不是同事件。
+ *
+ * 完全复用既有判定函数,不另写一套判同标准。
+ */
+type NewsEventMatchStrength = 'none' | 'fuzzy' | 'structured';
+
+function newsEventMatchStrength(left: TokenProfile, right: TokenProfile): NewsEventMatchStrength {
+  if (!sameNewsEvent(left, right)) return 'none';
+  if (sameStructuredReleaseLifecycle(left, right)) return 'structured';
+  if (sameStructuredEventFingerprint(left.fingerprint, right.fingerprint) === true) return 'structured';
+  return 'fuzzy';
 }
 
 function sameStructuredReleaseLifecycle(left: TokenProfile, right: TokenProfile): boolean {
