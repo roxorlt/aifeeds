@@ -421,6 +421,8 @@ export interface ManualReviewCandidate {
   source: string;
   score: number | null;
   url?: string;
+  /** 源站发布时间(ISO 原值透传)。口径与取值来源见 news-review.ts 的 NewsReviewCandidate。 */
+  published_at?: string | null;
   event_key?: string;
   origin?: 'manual_lead';
   lead_id?: string;

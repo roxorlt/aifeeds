@@ -2509,6 +2509,10 @@ export async function confirmManualNewsLeadCandidate(
     source: primaryEvidence?.publisher || '手工补录',
     score: assessment.score,
     ...(primaryEvidence?.url || lead.input_url ? { url: primaryEvidence?.url || lead.input_url } : {}),
+    // 源站发布时间原值透传,空值省略字段。取值表达式必须与 news-review.ts 的
+    // verifiedManualCandidateSnapshot(legacy 分支)逐字一致 —— 那是同一条候选被
+    // sanitize 重建时的读取口径,不一致会让每次 sanitize 都看到 drift 而空转 bump 版本。
+    ...(primaryEvidence?.published_at ? { published_at: primaryEvidence.published_at } : {}),
     event_key: assessment.event_key,
     origin: 'manual_lead' as const,
     lead_id: lead.id,

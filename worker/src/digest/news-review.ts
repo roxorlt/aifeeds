@@ -29,6 +29,23 @@ export interface NewsReviewCandidate {
   source: string;
   score: number | null;
   url?: string;
+  /**
+   * 源站发布时间(ISO 原值透传,不做任何格式化 / 时区换算)。
+   *
+   * 加它的原因(2026-09-02):审核页只有标题/摘要/来源/评分,owner 没法判断候选的新旧,
+   * 把北京时间凌晨发布的 Gemini 3.7 误当成旧闻。上游 `selectNewsByScoreWithAudit` 的
+   * SELECT 一直取着 `i.published_at`,只是批次冻结序列化时丢掉了。
+   *
+   * 三条产出路径的取值口径(**故意不统一成同一种空值表示**):
+   * - 定时候选(freezeNewsReviewBatchFromPool):取 items.published_at,空值时**省略该字段**;
+   * - 人工补录 · legacy assessment 分支:取主证据的 published_at,空值时同样省略;
+   * - 人工补录 · source-support 分支:`{...payload.item_projection}` 里本来就带
+   *   `published_at: string | null`,一直原样进了 candidates_json。那是**签名快照**
+   *   (canonical_digest / hmac_sha256 覆盖),必须逐字透传,不能为了「统一成省略」去改写它。
+   *
+   * 消费端按「可能缺失、也可能是 null」处理即可。
+   */
+  published_at?: string | null;
   event_key?: string;
   origin?: 'manual_lead';
   lead_id?: string;
@@ -834,6 +851,8 @@ interface NewsReviewPoolMetaCandidate {
   title_zh?: string;
   source_company?: string;
   adjusted_score?: number;
+  // 选品审计里本来就有(buildNewsSelectionAudit 写入);item 行读不到时兜底用。
+  published_at?: string;
 }
 
 interface NewsReviewItemRow {
@@ -844,6 +863,7 @@ interface NewsReviewItemRow {
   content: string | null;
   content_translated: string | null;
   url: string | null;
+  published_at: string | null;
   extra: string | null;
 }
 
@@ -898,6 +918,9 @@ async function verifiedManualCandidateSnapshot(
   const verified = await loadVerifiedManualCandidateProof(env, row.id);
   if (!verified) return null;
   if (verified.policy_version === MANUAL_NEWS_SOURCE_SUPPORT_POLICY) {
+    // ⚠️ 这里逐字透传签名快照(canonical_digest / hmac_sha256 覆盖 item_projection),
+    // 其中本来就带 `published_at: string | null` —— 一直进着 candidates_json。
+    // 不要为了跟其它两条路径「统一成空值省略」去改写它,那会动到被签名的形状。
     return {
       lead_id: row.id,
       verification: verified.record,
@@ -921,6 +944,8 @@ async function verifiedManualCandidateSnapshot(
       source: compactReviewText(primaryEvidence?.publisher || '手工补录', 40),
       score: assessment.score,
       ...(primaryEvidence?.url || row.input_url ? { url: primaryEvidence?.url || row.input_url } : {}),
+      // 与定时候选同一口径:主证据的源站发布时间原值透传,空值省略字段。
+      ...(primaryEvidence?.published_at ? { published_at: primaryEvidence.published_at } : {}),
       event_key: assessment.event_key,
       origin: 'manual_lead',
       lead_id: row.id,
@@ -1357,7 +1382,7 @@ export async function freezeNewsReviewBatchFromPool(
   const auditById = new Map(auditRows.map((candidate) => [String(candidate.id || ''), candidate]));
   const placeholders = candidateIds.map(() => '?').join(',');
   const itemResult = await env.DB.prepare(
-    `SELECT id, source_id, source_ref, title, content, content_translated, url, extra
+    `SELECT id, source_id, source_ref, title, content, content_translated, url, published_at, extra
      FROM items WHERE id IN (${placeholders})`,
   ).bind(...candidateIds).all<NewsReviewItemRow>();
   const itemById = new Map((itemResult.results || []).map((row) => [row.id, row]));
@@ -1380,6 +1405,9 @@ export async function freezeNewsReviewBatchFromPool(
       extra.ai_summary_zh || extra.summary_zh || item?.content_translated || item?.content || '',
       180,
     );
+    // 源站发布时间原值透传(不格式化、不换算时区、不用 scraped_at 冒充);
+    // items 行读不到时退回选品审计里的同名字段;两者都空则省略该字段。
+    const publishedAt = item?.published_at || audit?.published_at || '';
     return {
       item_id: itemId,
       title,
@@ -1387,6 +1415,7 @@ export async function freezeNewsReviewBatchFromPool(
       source: compactReviewText(audit?.source_company || extra.source_company || '', 40),
       score: typeof audit?.adjusted_score === 'number' ? audit.adjusted_score : null,
       ...(item?.url ? { url: item.url } : {}),
+      ...(publishedAt ? { published_at: publishedAt } : {}),
     };
   });
   let freezeDefaults = defaultIds.filter((itemId) => scheduledCandidateIds.includes(itemId)).slice(0, 5);

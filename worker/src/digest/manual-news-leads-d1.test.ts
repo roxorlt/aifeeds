@@ -595,7 +595,10 @@ function installSourceSupportAutomaticPool(
       JSON.stringify(extra),
     );
     return {
+      // published_at 跟在 url 之后 —— 与 freezeNewsReviewBatchFromPool 里候选字面量的
+      // 展开顺序逐字对应,这两处黄金串比较是逐字节的。
       item_id: itemId, title, summary, source: feed.name, score: 100 - index, url,
+      published_at: '2026-08-28T00:00:00.000Z',
     };
   });
   state.db.sqlite.prepare(`INSERT INTO digest_pool (
