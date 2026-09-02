@@ -79,13 +79,25 @@ describe('selectTopForSource asOfDate 锚点', () => {
     expect(c.binds).toEqual(['x_list', 20]);
   });
 
-  test('news 默认不传 asOfDate:窗口用 now,无日期 bind', async () => {
+  // news 走两阶段(2026-09-02 D1 CPU 事故修复):caps[0] = 阶段一候选发现(纯 items 查询,
+  // 时间边界改为 JS 算好的裸串绑参,列上不再套 datetime() —— 否则时间索引永久失效)。
+  test('news 默认不传 asOfDate:阶段一窗口下界为 now-3day 的裸串绑参,无上界', async () => {
+    const before = Date.now();
     const caps = await capture('news');
+    const after = Date.now();
     const c = caps[0];
-    expect(c.sql).toContain("AND datetime(i.scraped_at) >= datetime('now','-3 day')");
+    expect(c.sql).toContain('news_selection:candidate_discovery');
+    expect(c.sql).toContain('i.scraped_at >= ?');
+    expect(c.sql).not.toContain('i.scraped_at < ?');
+    expect(c.sql).not.toContain('datetime(i.scraped_at)');
     expect(c.sql).not.toContain("'+1 day'");
-    expect(c.binds).toHaveLength(1);
-    expect(JSON.parse(String(c.binds[0]))).toEqual(expect.any(Array));
+    // binds = [since, cap]
+    expect(c.binds).toHaveLength(2);
+    const since = Date.parse(String(c.binds[0]));
+    expect(String(c.binds[0])).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/);
+    expect(since).toBeGreaterThanOrEqual(before - 3 * 86400_000 - 1000);
+    expect(since).toBeLessThanOrEqual(after - 3 * 86400_000);
+    expect(typeof c.binds[1]).toBe('number');
   });
 
   // ── asOfDate 锚点路径 ──
@@ -110,16 +122,26 @@ describe('selectTopForSource asOfDate 锚点', () => {
     expect(c.binds).toEqual(['hf_paper', '2026-07-01', '2026-07-01', 20]);
   });
 
-  test('news 传 asOfDate:窗口锚到该日晨自然跑窗口 + 日期 bind', async () => {
+  test('news 传 asOfDate:阶段一窗口锚到该日晨自然跑窗口(上界 = 当日 0 点 UTC,不加一天)', async () => {
     const caps = await capture('news', { asOfDate: '2026-07-01' });
     const c = caps[0];
-    expect(c.sql).toContain("datetime(i.scraped_at) >= datetime((SELECT as_of FROM bounds), '-3 day')");
-    expect(c.sql).toContain('datetime(i.scraped_at) < datetime((SELECT as_of FROM bounds))');
+    expect(c.sql).toContain('news_selection:candidate_discovery');
+    expect(c.sql).toContain('i.scraped_at >= ? AND i.scraped_at < ?');
+    expect(c.sql).not.toContain('datetime(i.scraped_at)');
     expect(c.sql).not.toContain("'+1 day'");
     expect(c.sql).not.toContain("datetime('now'");
-    expect(c.binds).toHaveLength(2);
-    expect(JSON.parse(String(c.binds[0]))).toEqual(expect.any(Array));
-    expect(c.binds[1]).toBe('2026-07-01');
+    // binds = [since, until, cap];上界恰为 datetime('2026-07-01') = 该日 0 点 UTC。
+    expect(c.binds).toHaveLength(3);
+    expect(c.binds[0]).toBe('2026-06-28T00:00:00.000Z');
+    expect(c.binds[1]).toBe('2026-07-01T00:00:00.000Z');
+    expect(typeof c.binds[2]).toBe('number');
+  });
+
+  test('news 非法 asOfDate 与事故前同样 fail closed(选不出任何候选)', async () => {
+    const caps = await capture('news', { asOfDate: 'not-a-date' });
+    const c = caps[0];
+    expect(c.binds[0]).toBe('9999-12-31T23:59:59.999Z');
+    expect(c.binds[1]).toBe('9999-12-31T23:59:59.999Z');
   });
 
   // ── 语义级不变式:anchored(D) 必须等于 D 日晨自然跑窗口 ──
@@ -132,26 +154,31 @@ describe('selectTopForSource asOfDate 锚点', () => {
     const cases: Array<[DigestSource, number]> = [
       ['gh', 1],
       ['hf-paper', 3],
-      ['news', 3],
     ];
     for (const [source, windowDays] of cases) {
       const anchoredCaps = await capture(source, { asOfDate: '2026-07-01' });
       const defaultCaps = await capture(source);
-      // news 走 selectNewsByScore(主查询 = caps[0]);其余源单条查询 = caps[last]。
-      const anchoredSql = source === 'news' ? anchoredCaps[0].sql : anchoredCaps[anchoredCaps.length - 1].sql;
-      const defaultSql = source === 'news' ? defaultCaps[0].sql : defaultCaps[defaultCaps.length - 1].sql;
-      const timeExprTail = source === 'gh'
-        ? ')'
-        : source === 'news'
-          ? 'datetime(i.scraped_at)'
-          : 'datetime(scraped_at)';
-      const anchoredDateExpr = source === 'news' ? '(SELECT as_of FROM bounds)' : '?';
+      const anchoredSql = anchoredCaps[anchoredCaps.length - 1].sql;
+      const defaultSql = defaultCaps[defaultCaps.length - 1].sql;
+      const timeExprTail = source === 'gh' ? ')' : 'datetime(scraped_at)';
       // 上界恰为 datetime(?),绝不带 '+1 day'
-      expect(anchoredSql).toContain(`${timeExprTail} < datetime(${anchoredDateExpr})`);
+      expect(anchoredSql).toContain(`${timeExprTail} < datetime(?)`);
       expect(anchoredSql).not.toContain("'+1 day'");
       // 下界偏移 '-N day' 锚定路径与默认路径逐字一致(仅锚点由 ? / 'now' 不同)
-      expect(anchoredSql).toContain(`${timeExprTail} >= datetime(${anchoredDateExpr}, '-${windowDays} day')`);
+      expect(anchoredSql).toContain(`${timeExprTail} >= datetime(?, '-${windowDays} day')`);
       expect(defaultSql).toContain(`${timeExprTail} >= datetime('now','-${windowDays} day')`);
+    }
+  });
+
+  // news 的时间窗从 SQL 表达式改成 JS 算好的绑参(两阶段拆分),同一个不变式改为直接
+  // 断言边界值本身 —— 比断言 SQL 文本更强:上界必须恰好是 D 日 0 点 UTC(不加一天),
+  // 下界必须恰好回退 3 天。加一天会让历史页回填整体错位一天。
+  test('news anchored(D) ≡ D 日晨自然跑窗口:上界恰为当日 0 点 UTC、下界恰回退 3 天', async () => {
+    for (const date of ['2026-07-01', '2026-01-01', '2026-03-01', '2026-12-31']) {
+      const caps = await capture('news', { asOfDate: date });
+      const [since, until] = caps[0].binds as [string, string];
+      expect(until).toBe(`${date}T00:00:00.000Z`);
+      expect(Date.parse(until) - Date.parse(since)).toBe(3 * 86400_000);
     }
   });
 });

@@ -13,7 +13,7 @@
 import type { Env } from '../index';
 import {
   buildFormalNewsRegistryJson,
-  FORMAL_NEWS_REGISTRY_CTE,
+  FORMAL_NEWS_REGISTRY_CTE_MATERIALIZED,
   formalNewsScheduledSqlPredicate,
 } from './news-source-policy';
 import { scoreFeedNewsItemForOrdering } from '../feeds/ranking';
@@ -52,6 +52,187 @@ export const GITHUB_CANDIDATE_TIME_EXPR = `COALESCE(
 const EXACT_ITEM_DEDUP_LOOKBACK_DAYS = 5;
 const EVENT_DEDUP_LOOKBACK_DAYS = 30;
 const D1_ID_BATCH_SIZE = 80;
+
+// ── 行业要闻候选发现的时间窗与规模上限(2026-09-02 D1 CPU 超限事故修复)────────────
+// 事故:8/27 起「正式信源授权」JOIN 直接嵌在候选发现大查询里,registry 是无索引 CTE、
+// 连接键是 json_extract(extra,'$.feed_id') 套 CASE(不可索引),而时间窗写成
+// datetime(i.scraped_at) >= ...(列被函数包住 → 时间索引永久失效)。规划器只剩
+// idx_items_deleted 这种几乎无选择性的索引可用(96,370 行里 96,369 行 deleted_at IS NULL),
+// 于是每天 07:50 的行业要闻批次都在做数百万行扫描 + 每行多次 JSON 解析,9/2 撞穿 D1 CPU 限额。
+// 修复:拆成「阶段一纯索引候选发现」+「阶段二 id 驱动授权」。
+//
+// NEWS_CANDIDATE_WINDOW_DAYS 与事故前的 '-3 day' 逐字对应,不做任何放宽/收紧。
+const NEWS_CANDIDATE_WINDOW_DAYS = 3;
+// 阶段一一次最多带出的候选条数(安全阀,不是业务上限)。生产 3 天窗口实测量级是几百条,
+// 5000 留了 ~35x 冗余;命中即说明上游异常(如某源灌库),此时按 scraped_at DESC 保留最新的
+// 5000 条并打 warn 日志 —— 保证阶段二的驱动集合永远有上限,不会再退化成全表规模的 JOIN。
+const NEWS_CANDIDATE_DISCOVERY_CAP = 5000;
+// 阶段二每批喂进 json_each(?) 的候选 id 数。整批只占 1 个绑参,不受 D1 绑参个数上限约束;
+// 取 300 是为了让单条语句的 CPU 峰值可控(300 × registry 41 行 × 授权谓词)。
+const NEWS_AUTHORIZATION_BATCH_SIZE = 300;
+
+/**
+ * 行业要闻候选时间窗边界(items.scraped_at 的原始存储格式,可直接对裸列做字典序比较)。
+ *
+ * 为什么可以裸比较:items.scraped_at 对 blog/podcast 两个 source_type 的全部写入方
+ * (worker/src/blog.ts、worker/src/podcast.ts 的 `new Date().toISOString()`,以及
+ * worker/src/digest/manual-news-leads-store.ts 的 `new Date(now).toISOString()`)
+ * 都是定宽 24 字符的 `YYYY-MM-DDTHH:MM:SS.sssZ`,同格式定宽 UTC 串的字典序 ≡ 时序。
+ * (跨源格式不一致的是 x_list 那批空格分隔串,而阶段一已经把 source_type 限死在
+ * blog/podcast,不会碰到它们。)
+ *
+ * 语义与事故前逐字节等价:
+ * - 默认分支 `datetime(i.scraped_at) >= datetime('now','-3 day')`:datetime() 两边都截到秒,
+ *   所以下界取「当前时刻向下取整到秒再减 3 天」,毫秒位固定 .000 → 边界秒内的行两种写法同进同出。
+ * - asOf 分支 `>= datetime(D,'-3 day') AND < datetime(D)`:datetime('YYYY-MM-DD') = 该日 00:00:00 UTC,
+ *   故下界 = D-3 日 00:00:00.000Z、上界 = D 日 00:00:00.000Z。上界严格小于、且**绝不加 '+1 day'**
+ *   (加了会把整窗后移一天,历史页回填整体错位 —— 见 selection-asof.test.ts 的不变式测试)。
+ * - D 非法(不是 YYYY-MM-DD)时事故前的行为是 `datetime('garbage')` → NULL → 比较为 NULL → 选不出任何行。
+ *   这里用一个不可能被满足的边界复刻同样的「fail closed 返回空集」,不新增抛错路径。
+ */
+export interface NewsCandidateWindow {
+  since: string;
+  until?: string;
+}
+
+const IMPOSSIBLE_WINDOW_BOUND = '9999-12-31T23:59:59.999Z';
+
+export function newsCandidateWindow(
+  asOfDate: string | undefined,
+  nowMs: number = Date.now(),
+): NewsCandidateWindow {
+  if (asOfDate === undefined) {
+    // datetime('now') 截到秒 → 下界同样先把 now 向下取整到秒再回退,毫秒位恒为 .000。
+    const flooredNowMs = Math.floor(nowMs / 1000) * 1000;
+    return { since: new Date(flooredNowMs - NEWS_CANDIDATE_WINDOW_DAYS * 86400_000).toISOString() };
+  }
+  const anchorMs = /^\d{4}-\d{2}-\d{2}$/.test(asOfDate) ? Date.parse(`${asOfDate}T00:00:00.000Z`) : NaN;
+  if (!Number.isFinite(anchorMs)) {
+    return { since: IMPOSSIBLE_WINDOW_BOUND, until: IMPOSSIBLE_WINDOW_BOUND };
+  }
+  return {
+    since: new Date(anchorMs - NEWS_CANDIDATE_WINDOW_DAYS * 86400_000).toISOString(),
+    until: new Date(anchorMs).toISOString(),
+  };
+}
+
+function newsWindowSqlPredicate(window: NewsCandidateWindow): string {
+  return window.until
+    ? 'i.scraped_at >= ? AND i.scraped_at < ?'
+    : 'i.scraped_at >= ?';
+}
+
+function newsWindowBinds(window: NewsCandidateWindow): string[] {
+  return window.until ? [window.since, window.until] : [window.since];
+}
+
+/**
+ * 事故前大查询里「非授权」的那部分谓词,逐字保留(只把裸 title 显式限定成 i.title,
+ * 避免阶段二三表 JOIN 下的列名歧义 —— 语义不变)。阶段一、阶段二各用一次:
+ * 阶段一用它把候选集合缩到索引可服务的规模,阶段二再连同授权谓词一起复核,
+ * 于是「阶段二 = 事故前原查询 ∩ 阶段一候选 id 集合」,只要候选集合是原结果的超集,
+ * 两阶段合起来的结果集与原查询逐行相同。
+ */
+function newsCandidateBaseSqlPredicate(window: NewsCandidateWindow): string {
+  const cat = `json_extract(i.extra,'$.ai_category')`;
+  const tzh = `json_extract(i.extra,'$.title_zh')`;
+  return `i.source_type IN ('blog','podcast')
+      AND i.is_relevant = 1
+      AND ${newsWindowSqlPredicate(window)}
+      -- 噪音过滤①:slow-news / "没什么大事" 填充帖(如 smol.ai 的 "[AINews] not much
+      -- happened today")。措辞很特定,按原标题英文匹配(对中文重写鲁棒),几乎不误伤真新闻。
+      AND lower(COALESCE(i.title,'')) NOT LIKE '%not much happened%'
+      AND lower(COALESCE(i.title,'')) NOT LIKE '%nothing happened%'
+      AND lower(COALESCE(i.title,'')) NOT LIKE '%slow news%'
+      AND COALESCE(${tzh},'') NOT LIKE '%没什么大事%'
+      -- 噪音过滤②:纯活动门票/促销广告(如 "[Exclusive] $250 off AI Engineer tix")。
+      -- 限定在 ai_category='other' 内匹配,保护被正确分类(model-release/product/...)的真新闻。
+      AND NOT (
+        ${cat} = 'other' AND (
+          (lower(COALESCE(i.title,'')) LIKE '% off %' AND (lower(COALESCE(i.title,'')) LIKE '%tix%' OR lower(COALESCE(i.title,'')) LIKE '%ticket%'))
+          OR lower(COALESCE(i.title,'')) LIKE '%early bird%'
+          OR lower(COALESCE(i.title,'')) LIKE '%promo code%'
+          OR lower(COALESCE(i.title,'')) LIKE '%register now%'
+          OR COALESCE(${tzh},'') LIKE '%门票%'
+          OR COALESCE(${tzh},'') LIKE '%早鸟%'
+          OR COALESCE(${tzh},'') LIKE '%报名%'
+          OR COALESCE(${tzh},'') LIKE '%优惠码%'
+        )
+      )`;
+}
+
+/**
+ * 阶段一:纯索引驱动的候选发现。**刻意不 JOIN registry / sources,也刻意不带
+ * `deleted_at IS NULL`** —— 后者是 idx_items_deleted 的诱饵(96,370 行里 96,369 行满足),
+ * 正是 9/2 事故里规划器选错索引的直接原因;它属于授权谓词,由阶段二强制。
+ * 结果按 scraped_at DESC 截断,保证阶段二驱动集合有确定上限。
+ */
+export async function discoverNewsCandidateIds(
+  env: Env,
+  window: NewsCandidateWindow,
+): Promise<string[]> {
+  const sql = `/* news_selection:candidate_discovery */
+    SELECT i.id
+      FROM items i
+     WHERE ${newsCandidateBaseSqlPredicate(window)}
+     ORDER BY i.scraped_at DESC
+     LIMIT ?`;
+  const rows = await env.DB.prepare(sql)
+    .bind(...newsWindowBinds(window), NEWS_CANDIDATE_DISCOVERY_CAP)
+    .all<{ id: string }>();
+  const ids = (rows.results || []).map((r) => r.id);
+  if (ids.length >= NEWS_CANDIDATE_DISCOVERY_CAP) {
+    console.warn(
+      `[news-selection] candidate discovery hit cap ${NEWS_CANDIDATE_DISCOVERY_CAP}`
+      + ` (window since=${window.since}${window.until ? ` until=${window.until}` : ''});`
+      + ' older candidates were dropped — check upstream ingest volume',
+    );
+  }
+  return ids;
+}
+
+/**
+ * 阶段二:授权。授权谓词(formalNewsScheduledSqlPredicate + registry/sources JOIN)
+ * 与事故前逐字相同,只是驱动集合换成 `json_each(候选ids)` 按主键探 items —— 规划器因此
+ * 走 `SEARCH i USING INDEX sqlite_autoindex_items_1 (id=?)`,而不是拿 registry 当外层扫全表。
+ *
+ * 两处规划器约束(都只影响执行顺序,不影响结果集):
+ * - registry CTE 用 MATERIALIZED 变体,免得每条候选都重新展开一次 json_each;
+ * - 三个 JOIN 全写成 CROSS JOIN。SQLite 把 CROSS JOIN 当作「禁止重排这两张表」的指令
+ *   (语义与 INNER JOIN 完全相同),把循环顺序钉死成 候选id → items(主键) → registry(id)
+ *   → sources(主键)。不钉的话规划器会在某些统计下改成「registry 当外层 → 扫 items」,
+ *   那正是 9/2 事故那条大查询的形状 —— 见 selection-news-query-budget.test.ts 的计划断言。
+ */
+export async function authorizeNewsCandidateRows(
+  env: Env,
+  ids: readonly string[],
+  window: NewsCandidateWindow,
+): Promise<NewsCandidateDbRow[]> {
+  if (!ids.length) return [];
+  const sql = `/* news_selection:candidate_authorization */
+    WITH ${FORMAL_NEWS_REGISTRY_CTE_MATERIALIZED},
+    requested AS (SELECT value AS id FROM json_each(?))
+    SELECT i.id, i.title, i.source_type, i.content, i.content_translated, i.extra, i.published_at
+      FROM requested q
+      CROSS JOIN items i ON i.id=q.id
+      CROSS JOIN registry r ON r.id=json_extract(
+        CASE WHEN i.extra IS NOT NULL AND json_valid(i.extra)=1 THEN i.extra ELSE '{}' END,
+        '$.feed_id')
+      CROSS JOIN sources s ON s.id=r.id
+     WHERE ${newsCandidateBaseSqlPredicate(window)}
+       AND ${formalNewsScheduledSqlPredicate('i', 'r', 's')}`;
+  const registryJson = buildFormalNewsRegistryJson();
+  const windowBinds = newsWindowBinds(window);
+  const rows: NewsCandidateDbRow[] = [];
+  for (let start = 0; start < ids.length; start += NEWS_AUTHORIZATION_BATCH_SIZE) {
+    const batch = ids.slice(start, start + NEWS_AUTHORIZATION_BATCH_SIZE);
+    const result = await env.DB.prepare(sql)
+      .bind(registryJson, JSON.stringify(batch), ...windowBinds)
+      .all<NewsCandidateDbRow>();
+    rows.push(...(result.results || []));
+  }
+  return rows;
+}
 export interface SelectTopOptions {
   // node-run / 邮件 / Codex 快照使用:过滤前几天已经推过的同事件媒体重复。
   // daily-api 实时模式不启用,它只做日内事件折叠 + 自己的宽松 stale 去重。
@@ -246,52 +427,12 @@ export async function selectNewsByScoreWithAudit(
   limit: number,
   options: SelectTopOptions = {},
 ): Promise<{ ids: string[]; audit: NewsSelectionAudit }> {
-  const cat = `json_extract(i.extra,'$.ai_category')`;
-  const co = `json_extract(i.extra,'$.source_company')`;
-  const tzh = `json_extract(i.extra,'$.title_zh')`;
-  // 时间窗:默认锚 now(逐字节保持原样);传 asOfDate=D 时锚到 D 日 00:00 UTC(= 当日晨自然跑时刻),
-  // 上界=datetime(D)(不加 '+1 day',与通用路径同构),下界回退 3 天。anchored(D) ≡ 当日自然跑窗口。
-  const asOf = options.asOfDate;
-  const windowClause = asOf
-    ? `datetime(i.scraped_at) >= datetime((SELECT as_of FROM bounds), '-3 day')
-      AND datetime(i.scraped_at) < datetime((SELECT as_of FROM bounds))`
-    : `datetime(i.scraped_at) >= datetime('now','-3 day')`;
-  const sql = `
-    WITH ${FORMAL_NEWS_REGISTRY_CTE}${asOf ? ', bounds AS (SELECT ? AS as_of)' : ''}
-    SELECT i.id, i.title, i.source_type, i.content, i.content_translated, i.extra, i.published_at
-    FROM items i
-    JOIN registry r ON r.id=json_extract(
-      CASE WHEN i.extra IS NOT NULL AND json_valid(i.extra)=1 THEN i.extra ELSE '{}' END,
-      '$.feed_id')
-    JOIN sources s ON s.id=r.id
-    WHERE i.source_type IN ('blog','podcast')
-      AND i.is_relevant = 1
-      AND ${windowClause}
-      AND ${formalNewsScheduledSqlPredicate('i', 'r', 's')}
-      -- 噪音过滤①:slow-news / "没什么大事" 填充帖(如 smol.ai 的 "[AINews] not much
-      -- happened today")。措辞很特定,按原标题英文匹配(对中文重写鲁棒),几乎不误伤真新闻。
-      AND lower(COALESCE(title,'')) NOT LIKE '%not much happened%'
-      AND lower(COALESCE(title,'')) NOT LIKE '%nothing happened%'
-      AND lower(COALESCE(title,'')) NOT LIKE '%slow news%'
-      AND COALESCE(${tzh},'') NOT LIKE '%没什么大事%'
-      -- 噪音过滤②:纯活动门票/促销广告(如 "[Exclusive] $250 off AI Engineer tix")。
-      -- 限定在 ai_category='other' 内匹配,保护被正确分类(model-release/product/...)的真新闻。
-      AND NOT (
-        ${cat} = 'other' AND (
-          (lower(COALESCE(title,'')) LIKE '% off %' AND (lower(COALESCE(title,'')) LIKE '%tix%' OR lower(COALESCE(title,'')) LIKE '%ticket%'))
-          OR lower(COALESCE(title,'')) LIKE '%early bird%'
-          OR lower(COALESCE(title,'')) LIKE '%promo code%'
-          OR lower(COALESCE(title,'')) LIKE '%register now%'
-          OR COALESCE(${tzh},'') LIKE '%门票%'
-          OR COALESCE(${tzh},'') LIKE '%早鸟%'
-          OR COALESCE(${tzh},'') LIKE '%报名%'
-          OR COALESCE(${tzh},'') LIKE '%优惠码%'
-        )
-      )`;
-  const rows = asOf
-    ? await env.DB.prepare(sql).bind(buildFormalNewsRegistryJson(), asOf).all<NewsCandidateDbRow>()
-    : await env.DB.prepare(sql).bind(buildFormalNewsRegistryJson()).all<NewsCandidateDbRow>();
-  const candidates = (rows.results || []).map(newsCandidateFromDbRow);
+  // 两阶段:先用纯索引查询发现候选(不 JOIN registry/sources),再把有上限的候选 id 集合
+  // 喂给逐字未改的授权查询。9/2 D1 CPU 超限事故的修复,设计说明见文件上方常量注释。
+  const window = newsCandidateWindow(options.asOfDate);
+  const candidateIds = await discoverNewsCandidateIds(env, window);
+  const rows = await authorizeNewsCandidateRows(env, candidateIds, window);
+  const candidates = rows.map(newsCandidateFromDbRow);
   const scored = scoreNewsCandidatesForDigest(candidates);
   const eventDeduped = options.strictCrossDayEventDedup
     ? suppressCrossDayRepeatedNewsEvents(scored, await fetchPreviousPushedNewsCandidates(env))
@@ -471,16 +612,20 @@ async function fetchNewsCandidatesByIds(env: Env, ids: string[]): Promise<NewsCa
   // 否则 30 天窗口中较早但仍有效的同事件记录会随机漏掉。
   for (let start = 0; start < uniqueIds.length; start += D1_ID_BATCH_SIZE) {
     const batch = uniqueIds.slice(start, start + D1_ID_BATCH_SIZE);
+    // 与阶段二授权查询同款的规划器约束(MATERIALIZED registry + CROSS JOIN 钉死循环顺序):
+    // 驱动集合本来就有上限(每批 ≤ D1_ID_BATCH_SIZE 条 id),但不钉顺序时规划器仍可能
+    // 改成「registry 当外层 → 扫 items」。语义与钉之前逐字相同,只影响执行顺序。
     const result = await env.DB.prepare(
-      `WITH ${FORMAL_NEWS_REGISTRY_CTE},
+      `/* news_selection:pushed_ledger_authorization */
+       WITH ${FORMAL_NEWS_REGISTRY_CTE_MATERIALIZED},
        requested AS (SELECT value AS id FROM json_each(?))
        SELECT i.id, i.title, i.source_type, i.content, i.content_translated, i.extra, i.published_at
          FROM requested q
-         JOIN items i ON i.id=q.id
-         JOIN registry r ON r.id=json_extract(
+         CROSS JOIN items i ON i.id=q.id
+         CROSS JOIN registry r ON r.id=json_extract(
            CASE WHEN i.extra IS NOT NULL AND json_valid(i.extra)=1 THEN i.extra ELSE '{}' END,
            '$.feed_id')
-         JOIN sources s ON s.id=r.id
+         CROSS JOIN sources s ON s.id=r.id
         WHERE i.source_type IN ('blog','podcast')
           AND ${formalNewsScheduledSqlPredicate('i', 'r', 's')}`,
     ).bind(buildFormalNewsRegistryJson(), JSON.stringify(batch)).all<NewsCandidateDbRow>();

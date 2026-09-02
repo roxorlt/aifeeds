@@ -180,8 +180,8 @@ export function buildFormalNewsRegistryJson(): string {
   return JSON.stringify(registryDescriptors());
 }
 
-function formalNewsRegistryCte(registryJsonExpression: string): string {
-  return `registry AS (
+function formalNewsRegistryCte(registryJsonExpression: string, materialized = false): string {
+  return `registry AS ${materialized ? 'MATERIALIZED ' : ''}(
   SELECT
     json_extract(value, '$.id') AS id,
     json_extract(value, '$.key') AS key,
@@ -194,6 +194,16 @@ function formalNewsRegistryCte(registryJsonExpression: string): string {
 }
 
 export const FORMAL_NEWS_REGISTRY_CTE = formalNewsRegistryCte('?');
+
+/**
+ * 与 `FORMAL_NEWS_REGISTRY_CTE` 行为完全一致(SELECT 列表 / FROM / WHERE 逐字相同),
+ * 唯一差别是给规划器加 `MATERIALIZED` 提示:把 registry 落成临时表,使外层 JOIN 能对
+ * `r.id` 建 automatic index,而不是每行候选都重新展开一次 `json_each(?)`。
+ * `MATERIALIZED` 是 SQLite 3.35+ 的规划器指令,不改变查询结果集(见
+ * `news-source-policy.test.ts` 里的「两种 CTE 结果集逐行相同」断言)。
+ * 仅供「候选集合已有明确上限」的 id 驱动查询使用(见 selection.ts 阶段二授权查询)。
+ */
+export const FORMAL_NEWS_REGISTRY_CTE_MATERIALIZED = formalNewsRegistryCte('?', true);
 
 /** Highest-priority item-side radar/legacy deny signals. */
 export function isRadarNewsItemIdentity(item: NewsItemIdentity): boolean {
