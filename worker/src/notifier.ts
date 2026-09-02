@@ -106,6 +106,51 @@ export async function pushDeerAlert(
 }
 
 /**
+ * 与 pushDeerAlert 同一封路径(同样加 `xList告警 | ` 前缀),但**把投递结果交还给调用方**。
+ *
+ * 为什么需要它(2026-09-02 事故教训):`sendPushDeer` 内部把每一种失败
+ * (PUSHDEER_ADMIN_KEYS 未配置 / HTTP 非 2xx / provider code≠0 / fetch 抛异常)
+ * 都吞掉、计数、`console.error`,然后**正常返回**;`pushDeerAlert` 又把这个结果丢掉返回 void。
+ * 结果是全仓所有告警调用点都无法区分「推成功」和「一条都没推出去」,写在后面的
+ * `.catch(() => {})` 更是永远不可能触发的死代码。关键告警必须用这个变体,
+ * 自己检查 `succeeded` 并落日志。
+ */
+export async function pushDeerAlertResult(
+  env: Env,
+  title: string,
+  body: string,
+): Promise<PushDeerSendResult> {
+  return sendPushDeer(env, `xList告警 | ${title}`, body);
+}
+
+/**
+ * 关键告警的统一发送口:发送 + 检查投递结果 + 失败落日志,**绝不静默**。
+ * 返回是否至少有一个 PushDeer key 投递成功,让调用方能把它写进 workflow 返回值 / 观测字段。
+ */
+export async function deliverCriticalAlert(
+  env: Env,
+  context: string,
+  title: string,
+  body: string,
+): Promise<boolean> {
+  let result: PushDeerSendResult;
+  try {
+    result = await pushDeerAlertResult(env, title, body);
+  } catch (error) {
+    // sendPushDeer 目前不会抛,但它未来若改实现,这里也不能把异常吞成静默。
+    console.error(`[alert:${context}] delivery threw for "${title}":`, error);
+    return false;
+  }
+  if (result.succeeded > 0) return true;
+  console.error(
+    `[alert:${context}] PushDeer delivered 0/${result.configured ?? 0} for "${title}"`
+    + ` (http_failures=${result.http_failures ?? 0} provider_failures=${result.provider_failures ?? 0}`
+    + ` exceptions=${result.exceptions ?? 0}) body=${body.slice(0, 200)}`,
+  );
+  return false;
+}
+
+/**
  * Warning 级别告警:不立即推送,写 KV ring buffer 攒批,
  * 每日 UTC 23:00 (BJT 07:00) cron 触发 sendDailyWarningDigest 推一次日报。
  *

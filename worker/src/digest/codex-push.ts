@@ -10,7 +10,7 @@ import { type DigestSource } from './config';
 import { slotKey, bjtDateStr, getBases } from './lib';
 import { renderItem, type RenderRow, type RenderedItem } from './render';
 import { SOURCE_LABELS } from './templates';
-import { pushDeerAlert } from '../notifier';
+import { deliverCriticalAlert } from '../notifier';
 import {
   getAppliedNewsReviewSelection,
   getVerifiedNewsReviewSelectionSnapshot,
@@ -888,7 +888,7 @@ export async function pushDailyStageToCodex(
         env, attemptedPayload.date, stage, attemptedPayload.revision, attemptedPayload.content_hash, message,
       ).catch(() => {});
     }
-    await pushDeerAlert(env, '分批日报推 Codex 失败', `${stage}: ${message}`).catch(() => {});
+    await deliverCriticalAlert(env, 'codex-push:stage', '分批日报推 Codex 失败', `${stage}: ${message}`);
     return { ok: false, stage, error: message };
   }
   const { response, payload } = posted;
@@ -898,7 +898,7 @@ export async function pushDailyStageToCodex(
     await recordDailyStageAttempt(
       env, payload.date, stage, payload.revision, payload.content_hash, error,
     ).catch(() => {});
-    await pushDeerAlert(env, '分批日报推 Codex 失败', `${payload.render_key}: ${error}`).catch(() => {});
+    await deliverCriticalAlert(env, 'codex-push:stage-http', '分批日报推 Codex 失败', `${payload.render_key}: ${error}`);
     return {
       ok: false, stage, revision: payload.revision, content_hash: payload.content_hash,
       render_key: payload.render_key, total_items: total, error,
@@ -928,7 +928,7 @@ export async function pushDailyStageToCodex(
     await recordDailyStageAttempt(
       env, payload.date, stage, payload.revision, payload.content_hash, message,
     ).catch(() => {});
-    await pushDeerAlert(env, '分批日报状态落库失败', `${payload.render_key}: ${message}`).catch(() => {});
+    await deliverCriticalAlert(env, 'codex-push:stage-persist', '分批日报状态落库失败', `${payload.render_key}: ${message}`);
     return {
       ok: false, stage, revision: payload.revision, content_hash: payload.content_hash,
       render_key: payload.render_key, total_items: total, error: message,
@@ -984,7 +984,7 @@ export async function pushDailyToCodex(env: Env, slotHourBjt = 8, dateOverride?:
     const raw = String(e).slice(0, 180);
     if (raw.includes('empty_pool')) return { ok: false, skipped: 'empty_pool' };
     const error = `network: ${raw}`;
-    await pushDeerAlert(env, '日报推 Codex 失败', error).catch(() => {});
+    await deliverCriticalAlert(env, 'codex-push:v1', '日报推 Codex 失败', error);
     return { ok: false, error };
   }
   const { response: res, payload } = posted;
@@ -993,7 +993,7 @@ export async function pushDailyToCodex(env: Env, slotHourBjt = 8, dateOverride?:
   if (!res.ok) {
     const txt = (await res.text().catch(() => '')).slice(0, 200);
     const error = `http_${res.status}: ${txt}`;
-    await pushDeerAlert(env, '日报推 Codex 失败', `${payload.render_key}: ${error}`).catch(() => {});
+    await deliverCriticalAlert(env, 'codex-push:v1-http', '日报推 Codex 失败', `${payload.render_key}: ${error}`);
     return { ok: false, error, render_key: payload.render_key, total_items: total };
   }
 
