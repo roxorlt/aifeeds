@@ -825,7 +825,8 @@ test('selectNewsByScoreWithAudit does not truncate matching events after the fir
 });
 
 test('selectNewsByScoreWithAudit fail-closes a historical radar item whose editorial_type is missing', async () => {
-  let selectionSql = '';
+  let discoverySql = '';
+  let authorizationSql = '';
   const radarRow = {
     id: 'blog:weibo-hot-tech:radar-lead',
     title: 'Unverified social-media rumor',
@@ -847,8 +848,13 @@ test('selectNewsByScoreWithAudit fail-closes a historical radar item whose edito
           return statement;
         },
         async all<T>() {
-          if (sql.includes('FROM items')) {
-            selectionSql = sql;
+          if (sql.includes('news_selection:candidate_discovery')) {
+            discoverySql = sql;
+            // 阶段一只做候选发现,radar 线索照样会被带出来 —— 拦截责任全在阶段二。
+            return { results: [{ id: radarRow.id }] as T[] };
+          }
+          if (sql.includes('news_selection:candidate_authorization')) {
+            authorizationSql = sql;
             const hasLegacyIdentityGuard = sql.includes("$.feed_key")
               && sql.includes('weibo-hot-tech')
               && sql.includes('source_ref');
@@ -863,9 +869,16 @@ test('selectNewsByScoreWithAudit fail-closes a historical radar item whose edito
 
   const result = await selectNewsByScoreWithAudit({ DB: db } as never, 5);
 
-  assert.match(selectionSql, /editorial_type/);
-  assert.match(selectionSql, /weibo-hot-tech/);
-  assert.match(selectionSql, /source_ref/);
+  // 授权谓词整体搬到阶段二,一字未减。
+  assert.match(authorizationSql, /editorial_type/);
+  assert.match(authorizationSql, /weibo-hot-tech/);
+  assert.match(authorizationSql, /source_ref/);
+  // 阶段一必须是纯 items 查询:不 JOIN registry / sources,也不带 deleted_at
+  // (idx_items_deleted 是 9/2 事故里规划器选错索引的诱饵)。
+  assert.ok(discoverySql.includes('FROM items'));
+  assert.ok(!discoverySql.includes('JOIN registry'));
+  assert.ok(!discoverySql.includes('JOIN sources'));
+  assert.ok(!discoverySql.includes('deleted_at'));
   assert.deepEqual(result.ids, []);
 });
 

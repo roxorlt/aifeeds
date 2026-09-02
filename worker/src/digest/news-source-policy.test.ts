@@ -163,6 +163,20 @@ describe('canonical formal-news authorization', () => {
     expect(cte).toContain('json_each(?)');
   });
 
+  test('MATERIALIZED 变体只是规划器提示:文本仅差一个关键字,结果集逐行相同', () => {
+    const plain = (policy as unknown as { FORMAL_NEWS_REGISTRY_CTE: string }).FORMAL_NEWS_REGISTRY_CTE;
+    const materialized = (policy as unknown as { FORMAL_NEWS_REGISTRY_CTE_MATERIALIZED: string })
+      .FORMAL_NEWS_REGISTRY_CTE_MATERIALIZED;
+    expect(materialized.replace('registry AS MATERIALIZED (', 'registry AS (')).toBe(plain);
+
+    const db = new SqliteD1(); opened.push(db);
+    const registryJson = policy.buildFormalNewsRegistryJson();
+    const read = (cte: string) => db.sqlite
+      .prepare(`WITH ${cte} SELECT id, key, kind, editorial_type, enabled FROM registry ORDER BY id`)
+      .all(registryJson);
+    expect(read(materialized)).toEqual(read(plain));
+  });
+
   test('allows only exact current and evidence-backed historical producer shapes', async () => {
     const db = new SqliteD1(); opened.push(db);
     insertSource(db, 'blog:openai');
