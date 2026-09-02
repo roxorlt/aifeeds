@@ -128,6 +128,7 @@ import { routeDigestCronWorkflows } from './digest/node-run';
 import { generateDailyPage, backfillDailyPages } from './digest/daily-page-run';
 import { backfillItemPages, generateItemPage } from './seo/item-page-run';
 import { checkDailyPageFreshness } from './digest/daily-page-monitor';
+import { checkStagedDailyStages } from './digest/staged-stage-monitor';
 import { handleDailyNewsReviewApi, reconcileDailyNewsReviewPublication } from './digest/news-review-api';
 import { handleManualNewsLeadsApi } from './digest/manual-news-leads-api';
 import { freezeNewsReviewBatchFromPool, markNewsReviewPublished, notifyNewsReviewBatch } from './digest/news-review';
@@ -2103,6 +2104,15 @@ export default {
           .catch((e) => console.error('[digest] node-run create fail', e)),
       );
     }
+    // 分批日报阶段看门狗(2026-09-02 事故第二道防线):每 tick 调一次,窗口外纯计算直接返回。
+    // 必须独立于 node-run workflow —— workflow 内部的告警全部活在故障 isolate 里,
+    // CPU 超限 / isolate 被掐这类故障下一条都发不出来(9/2 六连败零告警就是这个形状)。
+    ctx.waitUntil(
+      checkStagedDailyStages(env)
+        .then((res) => { if (res.alerted > 0) console.log('[cron] staged-stage-monitor:', JSON.stringify(res)); })
+        .catch((e) => console.error('[cron] staged-stage-monitor failed:', e)),
+    );
+
     if (env.DAILY_STAGED_PUSH_ENABLED === '1'
       && env.DAILY_PUSH_ENABLED === '1'
       && env.DAILY_NEWS_REVIEW_ENABLED === '1') {

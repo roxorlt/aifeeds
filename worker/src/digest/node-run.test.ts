@@ -19,7 +19,10 @@ vi.mock('./pool-rebuild', () => ({
 }));
 
 vi.mock('./daily-page-monitor', () => ({ runDailyPagePhase: vi.fn() }));
-vi.mock('../notifier', () => ({ pushDeerAlert: vi.fn(async () => undefined) }));
+vi.mock('../notifier', () => ({
+  pushDeerAlert: vi.fn(async () => undefined),
+  deliverCriticalAlert: vi.fn(async () => true),
+}));
 vi.mock('./news-review', () => ({
   freezeNewsReviewBatchFromPool: vi.fn(),
   notifyNewsReviewBatch: vi.fn(),
@@ -37,7 +40,7 @@ import {
   rebuildDigestPoolSubject,
 } from './pool-rebuild';
 import { runDailyPagePhase } from './daily-page-monitor';
-import { pushDeerAlert } from '../notifier';
+import { deliverCriticalAlert } from '../notifier';
 import { freezeNewsReviewBatchFromPool, notifyNewsReviewBatch } from './news-review';
 import {
   routeDigestCronWorkflows,
@@ -290,8 +293,9 @@ describe('staged 08:00 node run', () => {
 
     expect(deliverCreate).toHaveBeenCalled();
     expect(runDailyPagePhase).toHaveBeenCalledWith(env, '2026-07-21');
-    expect(pushDeerAlert).toHaveBeenCalledWith(
+    expect(deliverCriticalAlert).toHaveBeenCalledWith(
       env,
+      'node-run:workflow',
       '分批日报 Workflow 失败',
       expect.stringContaining('2026-07-21 papers'),
     );
