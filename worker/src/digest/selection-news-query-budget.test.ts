@@ -26,6 +26,7 @@ import { FEED_REGISTRY } from '../feeds/registry';
 import {
   authorizeNewsCandidateRows,
   discoverNewsCandidateIds,
+  loadNewsEventHistory,
   newsCandidateWindow,
   selectNewsByScoreWithAudit,
 } from './selection';
@@ -292,3 +293,43 @@ test('审计:剩余的 registry/sources 授权 JOIN 消费点全部由有上限�
     expect(guardPlan.join('\n')).not.toMatch(/SCAN i\b/);
   }
 }, 120_000);
+
+// ── 事件级历史去重的预算守护(2026-09-02)────────────────────────────────────
+// 历史查询是每天 07:50 热路径上新增的一次 D1 往返 + 一轮内存成对比对,
+// 必须同样遵守本文件开头那套守则:索引驱动、驱动集合有上限、计划 + 时间双断言。
+test('事件历史查询:索引驱动 + 有上限,不出现 SCAN items', async () => {
+  const window = newsCandidateWindow(AS_OF);
+  await loadNewsEventHistory(envWithDb(db), window);
+  const sql = db.preparedSql.find((entry) => entry.includes('news_selection:event_history'))!;
+  expect(sql).toBeTruthy();
+
+  const untilMs = Date.parse(window.since);
+  const since = new Date(untilMs - 27 * 86400_000).toISOString();
+  const plan = db.plan(sql, since, window.since, 4000).join('\n');
+
+  expect(plan).toMatch(/SEARCH i USING (COVERING )?INDEX/);
+  expect(plan).not.toMatch(/SCAN i\b/);
+  // 裸列比较让 scraped_at 真的被当成范围条件用上(与阶段一同一条守则)。
+  expect(plan).toMatch(/scraped_at>/);
+  // 事故里被选中的那条索引不能再出现。
+  expect(plan).not.toContain('idx_items_deleted');
+  // 单表查询,不 JOIN registry/sources。
+  expect(sql).not.toContain('JOIN registry');
+  expect(sql).not.toContain('JOIN sources');
+  expect(sql).toContain('LIMIT ?');
+});
+
+test('生产规模夹具上,带事件历史去重的整条流水线仍在预算内', async () => {
+  const window = newsCandidateWindow(AS_OF);
+  const history = await loadNewsEventHistory(envWithDb(db), window);
+  // 30 天历史量级应与生产同量级,且远在安全阀(4000)之内。
+  expect(history.length).toBeGreaterThan(200);
+  expect(history.length).toBeLessThan(4_000);
+
+  const ms = await elapsedMsAsync(() => selectNewsByScoreWithAudit(envWithDb(db), 30, {
+    asOfDate: AS_OF,
+    strictCrossDayEventDedup: true,
+  }));
+  expect(ms, `pipeline with event-history dedup took ${ms.toFixed(1)}ms`)
+    .toBeLessThan(TWO_PHASE_BUDGET_MS);
+}, 60_000);
