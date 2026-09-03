@@ -424,6 +424,8 @@ export interface Env {
   // 固定可信研究网关：网关负责逐跳 DNS 校验与连接 peer pinning，并提供有审计元数据的
   // HTML/JSON/PDF 文本提取及开放网络检索。Worker 绝不直接 fetch 用户提供的域名。
   MANUAL_NEWS_RESEARCH_ORIGIN?: string;
+  /** `handle=Actor Name,handle2=Actor 2`：并入官方 X 账号白名单，写坏则整体忽略。 */
+  MANUAL_NEWS_OFFICIAL_X_HANDLES?: string;
   MANUAL_NEWS_RESEARCH_TOKEN?: string;
   // Independent 32-byte lowercase-hex key for article_text_v2 response HMACs.
   // It must match HK AIFEEDS_MANUAL_NEWS_RESPONSE_SECRET for the same environment.

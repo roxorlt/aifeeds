@@ -1,0 +1,361 @@
+import { describe, expect, test } from 'vitest';
+
+import {
+  buildManualLeadAssessmentPrompt,
+  buildManualLeadAssessmentRegenerationPrompt,
+  FACT_ACTION_IDS,
+  FACT_ACTION_VOCABULARY,
+  factActionOccurrences,
+  isRegeneratableManualLeadAssessmentValidationCode,
+  manualLeadAssessmentValidationFailure,
+  validateManualLeadGeneratedAssessment,
+  type ManualNewsEvidence,
+} from './manual-news-leads';
+import { MANUAL_NEWS_PROVIDER_PROMPT_MAX_CHARS } from './manual-news-leads-runtime';
+
+const promptEvidence: ManualNewsEvidence = {
+  id: 'ev-official',
+  url: 'https://blog.google/products/gemini/example',
+  source_type: 'official_primary',
+  publisher: 'blog.google',
+  published_at: '2026-09-02T00:00:00Z',
+  retrieved_at: 1,
+  title: 'Gemini 3.8 Flash is here',
+  excerpt: 'Google announced Gemini 3.8 Flash today.',
+  claims_supported: ['Google announced Gemini 3.8 Flash today.'],
+  reliable: true,
+};
+
+const promptInput = {
+  date: '2026-09-03',
+  text: 'Google 发布 Gemini 3.8 Flash',
+  note: '',
+  evidence: [promptEvidence],
+  prior_events: [],
+};
+
+describe('谓语动作词表与正则同步', () => {
+  test('词表覆盖 FACT_ACTION_PATTERNS 的每一个动作，且不含表外动作', () => {
+    const vocabularyActions = FACT_ACTION_VOCABULARY.map((entry) => entry.action);
+    expect([...vocabularyActions].sort()).toEqual([...FACT_ACTION_IDS].sort());
+    expect(new Set(vocabularyActions).size).toBe(vocabularyActions.length);
+  });
+
+  test('词表每条写法都恰好命中它自己的动作', () => {
+    for (const entry of FACT_ACTION_VOCABULARY) {
+      expect(entry.zh.length + entry.en.length).toBeGreaterThanOrEqual(2);
+      expect(entry.zh.length).toBeLessThanOrEqual(5);
+      expect(entry.en.length).toBeLessThanOrEqual(5);
+      for (const surface of [...entry.zh, ...entry.en]) {
+        const occurrences = factActionOccurrences(surface);
+        expect(
+          occurrences.map((item) => item.action),
+          `${entry.action} / ${surface}`,
+        ).toEqual([entry.action]);
+      }
+    }
+  });
+
+  test('通告动词让位：通告词后面紧跟别的动作时，只保留后面那个动作', () => {
+    const actions = (value: string) => factActionOccurrences(value).map((item) => item.action);
+    expect(actions('宣布收购')).toEqual(['acquire']);
+    expect(actions('宣布禁止')).toEqual(['ban']);
+    expect(actions('announced it will acquire')).toEqual(['acquire']);
+    expect(actions('announced the acquisition')).toEqual(['release']);
+    expect(actions('announced Gemini 3.8 Flash')).toEqual(['release']);
+    expect(actions('宣布 Gemini 3.8 Flash')).toEqual(['release']);
+    // 通告词与后一个动作离得远（> 24 字符）时不让位，仍是两个动作。
+    expect(actions('announced a broad set of platform changes and then acquired Bun').length)
+      .toBeGreaterThan(1);
+    // 「宣布推出」「正式推出」整体只算一个 release，不因为拆词变成两个。
+    expect(actions('宣布推出')).toEqual(['release']);
+    expect(actions('正式推出')).toEqual(['release']);
+  });
+
+  test('嵌套匹配只保留最外层，不把同一段文字算成两个动作', () => {
+    const actions = (value: string) => factActionOccurrences(value).map((item) => item.action);
+    expect(actions('达成合作')).toEqual(['partner']);
+    expect(actions('开放源码')).toEqual(['open_source']);
+    expect(actions('获得战略投资')).toEqual(['finance']);
+  });
+
+  test('新增动作认得常见 AI 新闻动词', () => {
+    const actions = (value: string) => factActionOccurrences(value).map((item) => item.action);
+    expect(actions('更新')).toEqual(['update']);
+    expect(actions('升级')).toEqual(['update']);
+    expect(actions('updated')).toEqual(['update']);
+    expect(actions('部署')).toEqual(['deploy']);
+    expect(actions('deployed')).toEqual(['deploy']);
+    expect(actions('任命')).toEqual(['appoint']);
+    expect(actions('appoints')).toEqual(['appoint']);
+    expect(actions('离职')).toEqual(['depart']);
+    expect(actions('resigned')).toEqual(['depart']);
+    expect(actions('突破')).toEqual(['reach']);
+    expect(actions('surpassed')).toEqual(['reach']);
+    expect(actions('警告')).toEqual(['warn']);
+    expect(actions('warns')).toEqual(['warn']);
+    expect(actions('测试')).toEqual(['test']);
+    expect(actions('piloted')).toEqual(['test']);
+  });
+
+  test('新增动作不会被词内子串误命中', () => {
+    const actions = (value: string) => factActionOccurrences(value).map((item) => item.action);
+    expect(actions('deployment')).toEqual([]);
+    expect(actions('disappointed')).toEqual([]);
+    expect(actions('department')).toEqual([]);
+    expect(actions('outreach')).toEqual([]);
+    expect(actions('latest')).toEqual([]);
+    expect(actions('模型部署活动')).toEqual([]);
+  });
+
+  test('中文写法只含中文，英文写法只含 ASCII', () => {
+    for (const entry of FACT_ACTION_VOCABULARY) {
+      for (const surface of entry.zh) expect(surface).toMatch(/\p{Script=Han}/u);
+      for (const surface of entry.en) expect(surface).toMatch(/^[\x20-\x7e]+$/u);
+    }
+  });
+});
+
+describe('评估提示词把词表交给模型', () => {
+  test('user JSON 带上完整 predicate_vocabulary', () => {
+    const body = JSON.parse(buildManualLeadAssessmentPrompt(promptInput).user) as {
+      predicate_vocabulary: Array<{ action: string; zh: string[]; en: string[] }>;
+      output_schema: { source_facts: Array<{ atomic_fact: { predicate: string } }> };
+    };
+    expect(body.predicate_vocabulary.map((entry) => entry.action))
+      .toEqual(FACT_ACTION_VOCABULARY.map((entry) => entry.action));
+    expect(body.predicate_vocabulary).toEqual(FACT_ACTION_VOCABULARY.map((entry) => ({
+      action: entry.action, zh: [...entry.zh], en: [...entry.en],
+    })));
+    expect(body.output_schema.source_facts[0].atomic_fact.predicate)
+      .toContain('predicate_vocabulary');
+  });
+
+  test('system 说明谓语只能取词表写法，并交代同义动词怎么改写', () => {
+    const { system } = buildManualLeadAssessmentPrompt(promptInput);
+    expect(system).toContain('predicate_vocabulary');
+    expect(system).toContain('宣布');
+    expect(system).toContain('announce');
+    expect(system).toContain('editorial_projection');
+  });
+
+  test('词表带来的提示词增量小于 5000 个字符，且总长仍在 provider 上限内', () => {
+    const withVocabulary = buildManualLeadAssessmentPrompt(promptInput);
+    const serialized = (prompt: { system: string; user: string }) =>
+      Array.from(JSON.stringify({ system: prompt.system, user: prompt.user })).length;
+    const body = JSON.parse(withVocabulary.user) as Record<string, unknown>;
+    const { predicate_vocabulary: _vocabulary, ...withoutVocabulary } = body;
+    const increment = serialized(withVocabulary)
+      - serialized({ system: withVocabulary.system, user: JSON.stringify(withoutVocabulary) });
+    expect(increment).toBeGreaterThan(0);
+    expect(increment).toBeLessThan(5_000);
+    expect(serialized(withVocabulary)).toBeLessThan(MANUAL_NEWS_PROVIDER_PROMPT_MAX_CHARS);
+  });
+
+  test('重生成提示词的 predicate 机械指令引用词表', () => {
+    const regeneration = buildManualLeadAssessmentRegenerationPrompt(
+      promptInput, 'non_atomic_source_predicate', 'source_facts[0].atomic_fact.predicate',
+    );
+    const body = JSON.parse(regeneration.user) as {
+      predicate_vocabulary: unknown[];
+      regeneration: { mechanical_instruction: string };
+    };
+    expect(body.predicate_vocabulary).toHaveLength(FACT_ACTION_VOCABULARY.length);
+    expect(body.regeneration.mechanical_instruction).toContain('predicate_vocabulary');
+  });
+});
+
+interface FactShape {
+  subject: string;
+  role: string;
+  predicate: string;
+  object: string;
+  language: 'zh' | 'en';
+  zhSubject: string;
+  zhPredicate: string;
+  zhObject: string;
+}
+
+function assessmentEvidence(text: string): ManualNewsEvidence {
+  return {
+    id: 'ev-official',
+    url: 'https://blog.google/example',
+    source_type: 'official_primary',
+    publisher: 'blog.google',
+    published_at: '2026-09-02T00:00:00Z',
+    retrieved_at: 1,
+    title: text,
+    excerpt: text,
+    claims_supported: [text],
+    reliable: true,
+  };
+}
+
+function generatedAssessmentFor(fact: FactShape) {
+  const text = `${fact.subject} ${fact.predicate} ${fact.object}.`;
+  const projection = {
+    subject: fact.zhSubject,
+    subject_role: fact.role,
+    predicate: fact.zhPredicate,
+    object: fact.zhObject,
+  };
+  return {
+    evidence: [assessmentEvidence(text)],
+    raw: {
+      event_key: 'predicate-vocabulary-acceptance-2026-09-03',
+      event_type: 'product_release',
+      material_update: false,
+      score: 80,
+      recommendation: 'recommended',
+      occurred_at: null,
+      uncertainties: [],
+      matched_event_key: null,
+      source_facts: [{
+        fact_ref: 'fact-01',
+        source_language: fact.language,
+        atomic_fact: {
+          subject: fact.subject,
+          subject_role: fact.role,
+          predicate: fact.predicate,
+          object: fact.object,
+        },
+        evidence_ids: ['ev-official'],
+      }],
+      evidence_dispositions: [{
+        evidence_id: 'ev-official',
+        disposition: 'supports_core',
+        source_fact_refs: ['fact-01'],
+        reason_code: null,
+      }],
+      editorial_projection: {
+        title: { projection_ref: 'title-01', source_fact_refs: ['fact-01'], atomic_fact: projection },
+        summary: [{ projection_ref: 'summary-01', source_fact_refs: ['fact-01'], atomic_fact: projection }],
+      },
+    },
+  };
+}
+
+function validationFailureFor(fact: FactShape) {
+  const { raw, evidence } = generatedAssessmentFor(fact);
+  try {
+    validateManualLeadGeneratedAssessment(raw, evidence);
+    return null;
+  } catch (error) {
+    return manualLeadAssessmentValidationFailure(error);
+  }
+}
+
+const APPLE_CONSIDERED: FactShape = {
+  subject: 'Apple', role: 'organization', predicate: 'considered', object: 'buying Perplexity',
+  language: 'en', zhSubject: 'Apple', zhPredicate: '考虑', zhObject: '收购 Perplexity 的方案',
+};
+
+describe('谓语动作认不出来时的失败码与反馈', () => {
+  test('谓语一个动作都没命中，报 predicate_action_unrecognized 并带上出错槽位原文', () => {
+    const failure = validationFailureFor(APPLE_CONSIDERED);
+    expect(failure?.code).toBe('predicate_action_unrecognized');
+    expect(failure?.path).toBe('source_facts[0].atomic_fact.predicate');
+    expect(failure?.slot_text).toBe('considered');
+    expect(failure?.matched_actions).toEqual([]);
+  });
+
+  test('谓语命中两个动作，维持 non_atomic_source_predicate 并回显命中的动作', () => {
+    const failure = validationFailureFor({
+      subject: 'Google', role: 'organization',
+      predicate: 'released and open-sourced', object: 'Gemma 4 model',
+      language: 'en', zhSubject: 'Google', zhPredicate: '发布并开源', zhObject: 'Gemma 4 模型',
+    });
+    expect(failure?.code).toBe('non_atomic_source_predicate');
+    expect(failure?.path).toBe('source_facts[0].atomic_fact.predicate');
+    expect(failure?.slot_text).toBe('released and open-sourced');
+    expect(failure?.matched_actions).toEqual(['release', 'open_source']);
+  });
+
+  test('predicate_action_unrecognized 可以触发一次重生成', () => {
+    expect(isRegeneratableManualLeadAssessmentValidationCode('predicate_action_unrecognized')).toBe(true);
+  });
+
+  test('重生成提示词回显出错槽位原文、命中的动作与词表提示', () => {
+    const failure = validationFailureFor(APPLE_CONSIDERED)!;
+    const body = JSON.parse(buildManualLeadAssessmentRegenerationPrompt(
+      promptInput, failure.code, failure.path, {
+        slot_text: failure.slot_text, matched_actions: failure.matched_actions,
+      },
+    ).user) as { regeneration: Record<string, unknown> };
+    expect(body.regeneration.failure_slot_text).toBe('considered');
+    expect(body.regeneration.matched_actions).toEqual([]);
+    expect(String(body.regeneration.vocabulary_hint)).toContain('predicate_vocabulary');
+  });
+
+  test('回显的槽位原文过滤控制字符与零宽字符，并截到 160 个 code point', () => {
+    const body = JSON.parse(buildManualLeadAssessmentRegenerationPrompt(
+      promptInput, 'predicate_action_unrecognized', 'source_facts[0].atomic_fact.predicate', {
+        slot_text: `con\u200bside\u202ered${'x'.repeat(200)}`,
+        matched_actions: ['release', 'not_an_action'],
+      },
+    ).user) as { regeneration: Record<string, unknown> };
+    expect(body.regeneration.failure_slot_text).toBe(`considered${'x'.repeat(150)}`);
+    expect(body.regeneration.matched_actions).toEqual(['release']);
+  });
+});
+
+// 规格 1.5 的 8 条验收夹具：贴近真实 AI 新闻的 source_fact + 中文编辑投影，
+// 走完整的 validateManualLeadGeneratedAssessment。
+describe('常见 AI 新闻写法的验收夹具', () => {
+  const passing: Array<[string, FactShape, string]> = [
+    ['announced 走 release', {
+      subject: 'Google', role: 'organization', predicate: 'announced', object: 'Gemini 3.8 Flash model',
+      language: 'en', zhSubject: 'Google', zhPredicate: '已发布', zhObject: 'Gemini 3.8 Flash 模型',
+    }, 'release'],
+    ['is rolling out 走 release', {
+      subject: 'OpenAI', role: 'organization', predicate: 'is rolling out', object: 'GPT-6 model',
+      language: 'en', zhSubject: 'OpenAI', zhPredicate: '正在推出', zhObject: 'GPT-6 模型',
+    }, 'release'],
+    ['宣布收购 走 acquire', {
+      subject: 'Anthropic', role: 'organization', predicate: '宣布收购', object: 'Codex 工具',
+      language: 'zh', zhSubject: 'Anthropic', zhPredicate: '收购', zhObject: 'Codex 工具',
+    }, 'acquire'],
+    ['open-sourced 走 open_source', {
+      subject: 'Meta', role: 'organization', predicate: 'open-sourced', object: 'Llama 5 model',
+      language: 'en', zhSubject: 'Meta', zhPredicate: '已开源', zhObject: 'Llama 5 模型',
+    }, 'open_source'],
+    ['raised 走 finance', {
+      subject: 'xAI', role: 'organization', predicate: 'raised', object: 'Grok model',
+      language: 'en', zhSubject: 'xAI', zhPredicate: '已完成融资', zhObject: 'Grok 模型',
+    }, 'finance'],
+    ['hired 走 appoint', {
+      subject: 'Google', role: 'organization', predicate: 'hired', object: 'contractors',
+      language: 'en', zhSubject: 'Google', zhPredicate: '已聘请', zhObject: '承包商',
+    }, 'appoint'],
+  ];
+
+  test.each(passing)('%s', (_label, fact, action) => {
+    const { raw, evidence } = generatedAssessmentFor(fact);
+    const validated = validateManualLeadGeneratedAssessment(raw, evidence);
+    expect(validated.source_facts?.[0].atomic_fact.predicate).toBe(fact.predicate);
+    expect(factActionOccurrences(fact.predicate).map((item) => item.action)).toEqual([action]);
+    expect(factActionOccurrences(fact.zhPredicate).map((item) => item.action)).toEqual([action]);
+  });
+
+  test('considered 不在词表里，报 predicate_action_unrecognized 并回显原文', () => {
+    expect(validationFailureFor(APPLE_CONSIDERED)).toEqual({
+      code: 'predicate_action_unrecognized',
+      path: 'source_facts[0].atomic_fact.predicate',
+      slot_text: 'considered',
+      matched_actions: [],
+    });
+  });
+
+  test('released and open-sourced 是两个动作，报 non_atomic_source_predicate', () => {
+    expect(validationFailureFor({
+      subject: 'Google', role: 'organization',
+      predicate: 'released and open-sourced', object: 'Gemma 4 model',
+      language: 'en', zhSubject: 'Google', zhPredicate: '发布并开源', zhObject: 'Gemma 4 模型',
+    })).toEqual({
+      code: 'non_atomic_source_predicate',
+      path: 'source_facts[0].atomic_fact.predicate',
+      slot_text: 'released and open-sourced',
+      matched_actions: ['release', 'open_source'],
+    });
+  });
+});

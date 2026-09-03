@@ -14,7 +14,12 @@ import {
   type TrustedGatewayFetcher,
   type TrustedResearchService,
 } from '../security/safe-url-fetch';
-import type { ManualNewsEvidence, ManualEvidenceSourceType } from './manual-news-leads';
+import {
+  OFFICIAL_X_ACCOUNT_ACTORS,
+  type ManualNewsEvidence,
+  type ManualEvidenceSourceType,
+  type OfficialXAccountActor,
+} from './manual-news-leads';
 import {
   processManualNewsLead,
   type ManualLeadProcessingAdapters,
@@ -100,6 +105,44 @@ const INDEPENDENT_MEDIA_DOMAINS = new Set([
   'axios.com', 'reuters.com', 'apnews.com', 'theverge.com', 'techcrunch.com', 'bloomberg.com',
   'wsj.com', 'nytimes.com', 'ft.com', 'jiqizhixin.com', 'qbitai.com', '36kr.com',
 ]);
+// 官方 X 账号白名单(2026-09-03):一条推文的权威性取决于**账号**而不是域名。
+// 厂商官方账号发的推文就是一手公告,与官网 blog 同级;其余账号维持 reliable=false / 'other'。
+// handle 只能从**已签名**的 audit.canonical_url 里取(见 extractManualNewsEvidence),
+// 不能用 provider 返回的裸 author_handle —— 那个字段没进签名,可被伪造。
+// 名单本身定义在 manual-news-leads.ts(官方第一人称绑定也要用),这里只做 env 覆盖。
+export { OFFICIAL_X_ACCOUNT_ACTORS, type OfficialXAccountActor } from './manual-news-leads';
+
+const OFFICIAL_X_HANDLE_SHAPE = /^[a-z0-9_]{1,15}$/u;
+const OFFICIAL_X_ACTOR_SHAPE = /^[\p{L}\p{N}][\p{L}\p{N} .&'’-]{0,63}$/u;
+
+/**
+ * 可选 env `MANUAL_NEWS_OFFICIAL_X_HANDLES`(`handle=Actor Name,handle2=Actor 2`)并入白名单。
+ * 只要有任何一项写坏就整体忽略并 warn —— 半截生效比不生效更难排查。
+ */
+export function officialXAccountActors(env: Env): ReadonlyMap<string, OfficialXAccountActor> {
+  const raw = (env.MANUAL_NEWS_OFFICIAL_X_HANDLES || '').trim();
+  if (!raw) return OFFICIAL_X_ACCOUNT_ACTORS;
+  const parsed = new Map<string, OfficialXAccountActor>();
+  for (const entry of raw.split(',')) {
+    const separator = entry.indexOf('=');
+    if (separator < 0) return warnInvalidOfficialXHandles(entry);
+    const handle = entry.slice(0, separator).trim().toLowerCase();
+    const actor = entry.slice(separator + 1).trim();
+    if (!OFFICIAL_X_HANDLE_SHAPE.test(handle) || !OFFICIAL_X_ACTOR_SHAPE.test(actor)) {
+      return warnInvalidOfficialXHandles(entry);
+    }
+    parsed.set(handle, { actor, label: actor });
+  }
+  return new Map([...OFFICIAL_X_ACCOUNT_ACTORS, ...parsed]);
+}
+
+function warnInvalidOfficialXHandles(entry: string): ReadonlyMap<string, OfficialXAccountActor> {
+  console.warn('[manual-news-official-x-handles-invalid]', JSON.stringify({
+    entry_chars: Array.from(entry).length,
+  }));
+  return OFFICIAL_X_ACCOUNT_ACTORS;
+}
+
 const TRUSTED_WECHAT_INDEPENDENT_PUBLISHERS = new Map([
   ['机器之心\0MzA3MzI4MjgzMw==', 'jiqizhixin.com'],
 ]);
@@ -265,6 +308,7 @@ export async function extractManualNewsEvidence(
   document: PublicDocument,
   hint?: ManualSearchResult,
   now = Date.now(),
+  officialAccounts: ReadonlyMap<string, OfficialXAccountActor> = OFFICIAL_X_ACCOUNT_ACTORS,
 ): Promise<ManualNewsEvidence | null> {
   // 推文证据(2026-09-03):走 /v1/tweet 取回,来源标注要与网页证据可区分。
   // source_type 仍是 'other' / reliable=false —— 一条推文的权威性取决于**账号**而不是域名,
@@ -275,18 +319,20 @@ export async function extractManualNewsEvidence(
     const handle = parseTwitterStatusUrl(audit.canonical_url)?.handle || '';
     const excerpt = document.excerpt;
     if (!excerpt.trim()) return null;
+    // 白名单只认已签名 canonical_url 里的 handle;命中即视同官网一手公告。
+    const official = handle ? officialAccounts.get(handle.toLowerCase()) : undefined;
     return {
       id: await evidenceId(audit.canonical_url),
       response_key_id: document.response_key_id,
       url: audit.canonical_url,
-      source_type: 'other',
+      source_type: official ? 'official_primary' : 'other',
       publisher: compact(handle ? `X @${handle}` : 'X/Twitter 推文', 120),
       published_at: document.published_at ?? null,
       retrieved_at: now,
       title: compact(document.title || (handle ? `X @${handle} 的推文` : 'X/Twitter 推文'), 220),
       excerpt,
       claims_supported: [excerpt],
-      reliable: false,
+      reliable: !!official,
       fetch_audit: audit,
     };
   }
@@ -468,7 +514,8 @@ export function createManualNewsLeadRuntimeAdapters(
         published_at: tweet.published_at,
       };
     },
-    extract: (document, hint) => extractManualNewsEvidence(document, hint),
+    extract: (document, hint) =>
+      extractManualNewsEvidence(document, hint, Date.now(), officialXAccountActors(env)),
     assess: callProJson('assessment'),
     verify: callProJson('verification'),
   };
