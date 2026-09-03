@@ -37,6 +37,14 @@ import {
   type ManualReviewCandidate,
 } from './manual-news-leads';
 import {
+  createManualNewsOwnerVouchPayload,
+  createManualNewsOwnerVouchProof,
+  MANUAL_NEWS_OWNER_VOUCH_AUDIT_ACTION,
+  MANUAL_NEWS_OWNER_VOUCH_MUTATION_KIND,
+  MANUAL_NEWS_OWNER_VOUCH_POLICY,
+  normalizeOwnerVouchStatement,
+} from './manual-news-owner-vouch';
+import {
   loadManualNewsEvidence,
   loadVerifiedManualCandidateProof,
   loadVerifiedManualSourceSupportProofs,
@@ -166,6 +174,9 @@ async function orderedVerifiedManualCandidates(
          SELECT MIN(a.id) FROM manual_news_lead_audit a
          WHERE a.lead_id = l.id AND a.action = 'submit'
            AND json_extract(a.metadata_json, '$.candidate_authorization') = ?
+       ) WHEN v.policy_version = ? THEN (
+         SELECT MIN(a.id) FROM manual_news_lead_audit a
+         WHERE a.lead_id = l.id AND a.action = ?
        ) ELSE (
          SELECT MIN(a.id) FROM manual_news_lead_audit a
          WHERE a.lead_id = l.id AND a.action = 'confirm_candidate'
@@ -177,7 +188,11 @@ async function orderedVerifiedManualCandidates(
        AND l.status IN ('recommended', 'needs_review')
      ORDER BY authorization_order ASC, l.id ASC LIMIT 51`,
   ).bind(
-    MANUAL_NEWS_SOURCE_SUPPORT_POLICY, MANUAL_NEWS_SOURCE_SUPPORT_POLICY, date, excludeLeadId,
+    MANUAL_NEWS_SOURCE_SUPPORT_POLICY, MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+    // 担保候选的授权时刻是 owner 的 vouch_candidate 审计行(与 proof 行同 batch 落盘),
+    // 不是随后那次 confirm_candidate。取不到该行就让下面的正整数校验 fail-closed。
+    MANUAL_NEWS_OWNER_VOUCH_POLICY, MANUAL_NEWS_OWNER_VOUCH_AUDIT_ACTION,
+    date, excludeLeadId,
   ).all<{ lead_id: string; authorization_order: number | null }>();
   if ((rows.results || []).length > MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT) {
     throw new Error('manual_candidate_limit_exceeded');
@@ -499,6 +514,87 @@ export async function listManualNewsLeads(env: Env, date: string): Promise<Manua
     updated_at: Number(row.updated_at),
     evidence_count: Number(row.evidence_count || 0),
   }));
+}
+
+export interface ManualNewsCandidateAuthorizationView {
+  candidate_authorization: 'llm_verified' | typeof MANUAL_NEWS_SOURCE_SUPPORT_POLICY
+    | typeof MANUAL_NEWS_OWNER_VOUCH_POLICY | null;
+  vouch: { statement: string; vouched_at: number } | null;
+}
+
+interface ManualNewsCandidateAuthorizationRow {
+  lead_id?: string;
+  policy_version: string;
+  vouch_statement: string | null;
+  vouched_at: number | null;
+}
+
+/**
+ * 呈现用的放行方式。**不是授权判定** —— 是否真的能进候选池由
+ * loadVerifiedManualCandidateProof 与正式新闻门决定，这里只把当前 active 验证行的
+ * policy 与担保陈述展示给 owner，未知 policy 一律显示为 null。
+ */
+function manualNewsCandidateAuthorizationView(
+  row: ManualNewsCandidateAuthorizationRow | null,
+): ManualNewsCandidateAuthorizationView {
+  if (!row) return { candidate_authorization: null, vouch: null };
+  if (row.policy_version === MANUAL_LEAD_VERIFICATION_POLICY_VERSION) {
+    return { candidate_authorization: 'llm_verified', vouch: null };
+  }
+  if (row.policy_version === MANUAL_NEWS_SOURCE_SUPPORT_POLICY) {
+    return { candidate_authorization: MANUAL_NEWS_SOURCE_SUPPORT_POLICY, vouch: null };
+  }
+  if (row.policy_version !== MANUAL_NEWS_OWNER_VOUCH_POLICY) {
+    return { candidate_authorization: null, vouch: null };
+  }
+  const vouchedAt = Number(row.vouched_at);
+  return {
+    candidate_authorization: MANUAL_NEWS_OWNER_VOUCH_POLICY,
+    vouch: typeof row.vouch_statement === 'string' && row.vouch_statement
+      && Number.isSafeInteger(vouchedAt) && vouchedAt > 0
+      ? { statement: row.vouch_statement, vouched_at: vouchedAt }
+      : null,
+  };
+}
+
+const MANUAL_NEWS_CANDIDATE_AUTHORIZATION_COLUMNS = `v.policy_version,
+  CASE WHEN v.policy_version = ? THEN json_extract(v.verification_json, '$.statement') END
+    AS vouch_statement,
+  CASE WHEN v.policy_version = ? THEN json_extract(v.verification_json, '$.vouched_at') END
+    AS vouched_at`;
+
+export async function getManualNewsCandidateAuthorization(
+  env: Env,
+  leadId: string,
+): Promise<ManualNewsCandidateAuthorizationView> {
+  const row = await env.DB.prepare(
+    `/* manual_lead:candidate_authorization */ SELECT ${MANUAL_NEWS_CANDIDATE_AUTHORIZATION_COLUMNS}
+     FROM manual_news_assessment_verifications v
+     WHERE v.lead_id = ? AND v.status = 'active'
+     ORDER BY v.created_at DESC LIMIT 1`,
+  ).bind(MANUAL_NEWS_OWNER_VOUCH_POLICY, MANUAL_NEWS_OWNER_VOUCH_POLICY, leadId)
+    .first<ManualNewsCandidateAuthorizationRow>();
+  return manualNewsCandidateAuthorizationView(row);
+}
+
+export async function listManualNewsCandidateAuthorizations(
+  env: Env,
+  date: string,
+): Promise<Map<string, ManualNewsCandidateAuthorizationView>> {
+  const result = await env.DB.prepare(
+    `/* manual_lead:candidate_authorization_by_date */ SELECT v.lead_id,
+       ${MANUAL_NEWS_CANDIDATE_AUTHORIZATION_COLUMNS}
+     FROM manual_news_assessment_verifications v
+     JOIN manual_news_leads l ON l.id = v.lead_id
+     WHERE l.review_date = ? AND v.status = 'active'
+     ORDER BY v.lead_id ASC LIMIT 200`,
+  ).bind(MANUAL_NEWS_OWNER_VOUCH_POLICY, MANUAL_NEWS_OWNER_VOUCH_POLICY, date)
+    .all<ManualNewsCandidateAuthorizationRow>();
+  const views = new Map<string, ManualNewsCandidateAuthorizationView>();
+  for (const row of result.results || []) {
+    if (typeof row.lead_id === 'string') views.set(row.lead_id, manualNewsCandidateAuthorizationView(row));
+  }
+  return views;
 }
 
 export async function getManualNewsLeadCandidateState(
@@ -2152,6 +2248,13 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     }
   }
 
+  /**
+   * ⚠️ 已知限制（2026-09-03，`owner_vouched_v1` 上线时确认并接受）：跨天事件去重的历史只
+   * 来自 `manual_news_event_assessments`（大模型评估）与自动候选的 `event_fingerprint`，
+   * **owner 担保的线索不参与**——它没有评估行，事件身份只绑主证据 URL。
+   * 影响面：同一件事今天被担保、明天走大模型评估补录时，不会被判成「已推送过的旧闻」。
+   * 同一天内的重复担保仍被 confirm 的事件占用检查（mutation_nonce 唯一索引）挡住。
+   */
   async listRecentPriorEvents(date: string, excludeLeadId: string): Promise<ManualLeadPriorEvent[]> {
     const sourceScanLimit = MANUAL_NEWS_PRIOR_EVENT_PROVIDER_LIMITS.max_events * 2;
     const manual = await this.env.DB.prepare(
@@ -2441,6 +2544,223 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
   }
 }
 
+export interface ManualNewsLeadCandidateMutationResult {
+  ok: true;
+  changed: boolean;
+  lead: ManualNewsLeadRecord;
+  batch: {
+    batch_id: string;
+    revision: number;
+    supersedes_revision: number | null;
+    current: boolean;
+    review_url: string;
+  } | null;
+  pending_initial_freeze: boolean;
+  rerender_enqueued: false;
+}
+
+export type ManualNewsLeadCandidateMutationOutcome =
+  | ManualNewsLeadCandidateMutationResult
+  | { ok: false; status: 400 | 404 | 409; error: string; lead?: ManualNewsLeadRecord };
+
+/**
+ * owner 担保确认（`owner_vouched_v1`）。
+ *
+ * 两步：先把担保签名快照与 `vouch_candidate` 审计原子写进库（线索 version+1、
+ * `last_mutation_kind='vouch'`），再复用既有的 {@link confirmManualNewsLeadCandidate}
+ * 走完确认流程（冻结前候选池 / 新批次 / 事件占用冲突都不另起一套）。
+ *
+ * 第二步 409 时**保留** proof 行：owner 拿到新的 batch revision 重试即可，不必重写陈述。
+ */
+export async function vouchManualNewsLeadCandidate(
+  env: Env,
+  id: string,
+  expectedVersion: number,
+  expectedBatchRevision: number,
+  statementInput: unknown,
+  idempotencyKey: string,
+  now = Date.now(),
+): Promise<ManualNewsLeadCandidateMutationOutcome> {
+  let statement: string;
+  try {
+    statement = normalizeOwnerVouchStatement(statementInput);
+  } catch {
+    return { ok: false, status: 400, error: 'invalid_vouch_statement' };
+  }
+  const lead = await getManualNewsLead(env, id);
+  if (!lead) return { ok: false, status: 404, error: 'manual_news_lead_not_found' };
+  const confirmKey = `${idempotencyKey}:confirm`;
+  // 已有任何一条 active 验证行(含未知 / 已篡改 policy)就不能再担保 —— 唯一活跃索引会
+  // 挡住写入,这里显式判掉才能回一个说得清的错误码。
+  const activeVerification = await env.DB.prepare(
+    `/* manual_owner_vouch:active_verification */ SELECT verification_id
+     FROM manual_news_assessment_verifications
+     WHERE lead_id = ? AND status = 'active' LIMIT 1`,
+  ).bind(id).first<{ verification_id: string }>();
+  const existing = activeVerification ? await loadVerifiedManualCandidateProof(env, id) : null;
+  // 同一句陈述已经担保过（第二步失败后重试，或整轮重放）时跳过写入，直接续做确认。
+  const reusable = existing?.policy_version === MANUAL_NEWS_OWNER_VOUCH_POLICY
+    && existing.owner_vouch?.statement === statement;
+  const row = await env.DB.prepare(
+    `/* manual_lead:by_id */ SELECT * FROM manual_news_leads WHERE id = ?`,
+  ).bind(id).first<ManualLeadRow>();
+  // 同一个幂等键的整轮重放：版本号照旧是发起时那个，不能拿它当版本冲突。
+  const replayed = !!row && (
+    (row.last_mutation_kind === MANUAL_NEWS_OWNER_VOUCH_MUTATION_KIND
+      && row.last_mutation_idempotency_key === idempotencyKey)
+    || (row.last_mutation_kind === 'confirm' && row.last_mutation_idempotency_key === confirmKey));
+  if (reusable && !replayed && lead.version !== expectedVersion) {
+    return { ok: false, status: 409, error: 'lead_version_conflict', lead };
+  }
+  if (!reusable) {
+    if (activeVerification) return { ok: false, status: 409, error: 'lead_not_vouchable', lead };
+    if (lead.confirmed_at !== null) return { ok: false, status: 409, error: 'lead_already_confirmed', lead };
+    if (now >= newsReviewExpiresAt(lead.review_date)) {
+      return { ok: false, status: 409, error: 'review_expired', lead };
+    }
+    if (lead.version !== expectedVersion) {
+      return { ok: false, status: 409, error: 'lead_version_conflict', lead };
+    }
+    if (!['needs_review', 'failed'].includes(lead.status) || lead.evidence.length < 1) {
+      return { ok: false, status: 409, error: 'lead_not_vouchable', lead };
+    }
+    let written: Awaited<ReturnType<typeof writeOwnerVouchProof>>;
+    try {
+      written = await writeOwnerVouchProof(env, lead, statement, idempotencyKey, now);
+    } catch (error) {
+      // 证据链自己不成立(证据集非法 / response HMAC 或正文摘要对不上)时，担保这条路本来
+      // 就走不通，回 409 让 owner 看到「不能担保」，而不是把内部异常抛成 500。
+      const message = error instanceof Error ? error.message : '';
+      if (message === 'owner_vouch_payload_invalid' || message.startsWith('manual_news_evidence_')) {
+        return { ok: false, status: 409, error: 'lead_not_vouchable', lead };
+      }
+      throw error;
+    }
+    if (!written.ok) return written;
+  }
+  return confirmManualNewsLeadCandidate(
+    env, id, reusable ? lead.version : expectedVersion + 1, expectedBatchRevision, confirmKey, now,
+  );
+}
+
+async function writeOwnerVouchProof(
+  env: Env,
+  lead: ManualNewsLeadRecord,
+  statement: string,
+  idempotencyKey: string,
+  now: number,
+): Promise<{ ok: true } | { ok: false; status: 409; error: string; lead: ManualNewsLeadRecord }> {
+  const expectedVersion = lead.version;
+  const assessmentVersion = expectedVersion * 1_000_000 + 900_000;
+  if (!Number.isSafeInteger(assessmentVersion) || assessmentVersion <= 0) {
+    throw new Error('invalid_assessment_version');
+  }
+  const payload = await createManualNewsOwnerVouchPayload({
+    lead: { id: lead.id, review_date: lead.review_date },
+    statement,
+    evidence: lead.evidence,
+    vouched_at: now,
+  });
+  const proof = await createManualNewsOwnerVouchProof(
+    { lead_id: lead.id, assessment_version: assessmentVersion, payload },
+    manualNewsVerificationKeyring(env), manualNewsResponseKeyring(env),
+  );
+  const verificationId = `mav:${lead.id}:${assessmentVersion}:${proof.canonical_digest.slice(0, 16)}`;
+  const verificationJson = JSON.stringify(payload);
+  const creationNonce = createMutationNonce('owner_vouch_verification_create');
+  const mutationNonce = createMutationNonce('owner_vouch');
+  // 担保不占 workflow 的 processing fence（owner 从页面直接发起），但 proof 行的
+  // processing_owner / processing_attempt 有 NOT NULL 与 > 0 约束，这里记录发起方身份。
+  const processingOwner = `owner-vouch:${lead.id}`;
+  const processingAttempt = 1;
+  const verification: PersistedManualVerificationRow = {
+    verification_id: verificationId,
+    lead_id: lead.id,
+    assessment_version: assessmentVersion,
+    policy_version: proof.policy_version,
+    verification_key_id: proof.verification_key_id,
+    canonical_digest: proof.canonical_digest,
+    hmac_sha256: proof.hmac_sha256,
+    verification_json: verificationJson,
+    processing_owner: processingOwner,
+    processing_attempt: processingAttempt,
+    creation_nonce: creationNonce,
+    status: 'active',
+    reason: null,
+    created_at: now,
+    invalidated_at: null,
+  };
+  const proofGuardBindings = manualVerificationSnapshotGuardBindings(lead.id, verification);
+  const evidenceGuard = sourceSupportEvidenceSnapshotGuard(lead.id, lead.evidence);
+  const auditMetadata = JSON.stringify({
+    candidate_authorization: MANUAL_NEWS_OWNER_VOUCH_POLICY,
+    statement,
+    canonical_digest: proof.canonical_digest,
+    verification_id: verificationId,
+  });
+  const leadGuard = `EXISTS (
+    SELECT 1 FROM manual_news_leads l
+    WHERE l.id = ? AND l.version = ? AND l.status IN ('needs_review', 'failed')
+      AND l.confirmed_at IS NULL
+  )`;
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `/* manual_owner_vouch:proof_insert */ INSERT OR IGNORE INTO manual_news_assessment_verifications (
+         verification_id, lead_id, assessment_version, policy_version, verification_key_id,
+         canonical_digest, hmac_sha256, verification_json, processing_owner, processing_attempt,
+         creation_nonce, status, reason, created_at, invalidated_at
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?, NULL
+       WHERE ${leadGuard}
+         AND NOT EXISTS (SELECT 1 FROM manual_news_assessment_verifications v
+           WHERE v.lead_id = ? AND v.status = 'active')
+         AND ${evidenceGuard.sql}`,
+    ).bind(
+      verificationId, lead.id, assessmentVersion, proof.policy_version, proof.verification_key_id,
+      proof.canonical_digest, proof.hmac_sha256, verificationJson, processingOwner, processingAttempt,
+      creationNonce, now,
+      lead.id, expectedVersion,
+      lead.id,
+      ...evidenceGuard.bindings,
+    ),
+    env.DB.prepare(
+      `/* manual_owner_vouch:lead_vouch */ UPDATE manual_news_leads SET
+         status = 'needs_review', version = version + 1,
+         last_mutation_kind = ?, last_mutation_idempotency_key = ?, last_mutation_nonce = ?,
+         updated_at = ?
+       WHERE id = ? AND version = ? AND status IN ('needs_review', 'failed')
+         AND confirmed_at IS NULL
+         AND ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}`,
+    ).bind(
+      MANUAL_NEWS_OWNER_VOUCH_MUTATION_KIND, idempotencyKey, mutationNonce, now,
+      lead.id, expectedVersion, ...proofGuardBindings,
+    ),
+    env.DB.prepare(
+      `/* manual_owner_vouch:audit */ INSERT INTO manual_news_lead_audit (
+         lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
+         resulting_version, metadata_json, created_at
+       ) SELECT ?, ?, ?, 'needs_review', ?, ?, version, ?, ? FROM manual_news_leads
+       WHERE id = ? AND version = ? AND status = 'needs_review'
+         AND last_mutation_kind = ? AND last_mutation_idempotency_key = ?
+         AND last_mutation_nonce = ?
+         AND ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}`,
+    ).bind(
+      lead.id, MANUAL_NEWS_OWNER_VOUCH_AUDIT_ACTION, lead.status, idempotencyKey, mutationNonce,
+      auditMetadata, now,
+      lead.id, expectedVersion + 1, MANUAL_NEWS_OWNER_VOUCH_MUTATION_KIND, idempotencyKey,
+      mutationNonce, ...proofGuardBindings,
+    ),
+  ]) as Array<{ meta?: { changes?: number } }>;
+  const changes = results.map((entry) => Number(entry?.meta?.changes || 0));
+  if (changes.every((value) => value === 0)) {
+    const latest = await getManualNewsLead(env, lead.id);
+    return {
+      ok: false, status: 409, error: 'lead_version_conflict', lead: latest || lead,
+    };
+  }
+  if (changes.some((value) => value !== 1)) throw new Error('manual_lead_audit_causality_mismatch');
+  return { ok: true };
+}
+
 export async function confirmManualNewsLeadCandidate(
   env: Env,
   id: string,
@@ -2448,28 +2768,23 @@ export async function confirmManualNewsLeadCandidate(
   expectedBatchRevision: number,
   idempotencyKey: string,
   now = Date.now(),
-): Promise<
-  | {
-    ok: true;
-    changed: boolean;
-    lead: ManualNewsLeadRecord;
-    batch: { batch_id: string; revision: number; supersedes_revision: number | null; current: boolean; review_url: string } | null;
-    pending_initial_freeze: boolean;
-    rerender_enqueued: false;
-  }
-  | { ok: false; status: 404 | 409; error: string; lead?: ManualNewsLeadRecord }
-> {
+): Promise<ManualNewsLeadCandidateMutationOutcome> {
   const lead = await getManualNewsLead(env, id);
   if (!lead) return { ok: false, status: 404, error: 'manual_news_lead_not_found' };
   const row = await env.DB.prepare(
     `/* manual_lead:by_id */ SELECT * FROM manual_news_leads WHERE id = ?`,
   ).bind(id).first<ManualLeadRow>();
-  const verified = await loadVerifiedManualAssessment(env, id, lead.evidence);
-  if (!verified || !lead.assessment) {
+  // 放行凭据统一从 loadVerifiedManualCandidateProof 取:大模型评估(v10)仍要求线索自己
+  // 带得出可读评估;source_support_v1 与 owner_vouched_v1 走签名快照,没有评估行也能确认。
+  const verified = await loadVerifiedManualCandidateProof(env, id);
+  if (!verified
+    || (verified.policy_version === MANUAL_LEAD_VERIFICATION_POLICY_VERSION
+      && (!verified.assessment || !lead.assessment))) {
     return { ok: false, status: 409, error: 'lead_not_fact_verified', lead };
   }
   const assessment = verified.assessment;
-  const eventClaimNonce = await manualEventClaimNonce(lead.review_date, assessment.event_key);
+  const eventKey = verified.candidate.event_key;
+  const eventClaimNonce = await manualEventClaimNonce(lead.review_date, eventKey);
   if (row?.last_mutation_kind === 'confirm' && row.last_mutation_idempotency_key === idempotencyKey) {
     const batch = row.confirmed_batch_id
       ? await getNewsReviewBatch(env, row.review_date, row.confirmed_batch_id)
@@ -2492,7 +2807,7 @@ export async function confirmManualNewsLeadCandidate(
     return { ok: false, status: 409, error: 'lead_not_confirmable', lead };
   }
   const existingEventOwner = await confirmedManualEventOwner(
-    env, lead.review_date, assessment.event_key, eventClaimNonce,
+    env, lead.review_date, eventKey, eventClaimNonce,
   );
   if (existingEventOwner && existingEventOwner !== id) {
     return { ok: false, status: 409, error: 'manual_candidate_event_conflict', lead };
@@ -2502,7 +2817,7 @@ export async function confirmManualNewsLeadCandidate(
   // Keep the canonical `${source_type}:${source_id}` identity so existing
   // render/deep-link/item-page paths continue to understand manual candidates.
   const itemId = `blog:manual:${lead.id}`;
-  const candidate = {
+  const candidate: ManualReviewCandidate = assessment ? {
     item_id: itemId,
     title: assessment.title,
     summary: assessment.summary,
@@ -2513,18 +2828,30 @@ export async function confirmManualNewsLeadCandidate(
     // verifiedManualCandidateSnapshot(legacy 分支)逐字一致 —— 那是同一条候选被
     // sanitize 重建时的读取口径,不一致会让每次 sanitize 都看到 drift 而空转 bump 版本。
     ...(primaryEvidence?.published_at ? { published_at: primaryEvidence.published_at } : {}),
-    event_key: assessment.event_key,
+    event_key: eventKey,
+    origin: 'manual_lead' as const,
+    lead_id: lead.id,
+  } : {
+    // 签名快照路径(source_support_v1 / owner_vouched_v1):item_projection 被
+    // canonical_digest / hmac_sha256 覆盖,必须逐字透传。这里的展开式与
+    // news-review.ts 的 verifiedManualCandidateSnapshot 同一条 —— 两侧不一致同样会
+    // 让 sanitize 每次都看到 drift。
+    ...verified.candidate,
     origin: 'manual_lead' as const,
     lead_id: lead.id,
   };
   // Never invent a source publication time. `scraped_at` records our own
   // ingestion separately; missing source timing remains NULL and visible as uncertainty.
-  const publishedAt = lead.evidence.map((item) => item.published_at).find(Boolean) || null;
+  // 签名快照路径改取投影里的时间:那一列被 HMAC 覆盖,正式新闻门的最终守卫也拿它跟
+  // items.published_at 逐字对比,用「第一条带时间的证据」会在多证据时对不上而被拒。
+  const publishedAt = assessment
+    ? lead.evidence.map((item) => item.published_at).find(Boolean) || null
+    : candidate.published_at ?? null;
   const itemExtra = JSON.stringify({
-    title_zh: assessment.title,
-    ai_summary_zh: assessment.summary,
+    title_zh: candidate.title,
+    ai_summary_zh: candidate.summary,
     source_company: candidate.source,
-    event_fingerprint: assessment.event_key,
+    event_fingerprint: eventKey,
     manual_lead: { lead_id: lead.id, evidence_ids: lead.evidence.map((item) => item.id) },
   });
   // The successful confirmation audit is the event ownership record. Its existing
@@ -2538,7 +2865,7 @@ export async function confirmManualNewsLeadCandidate(
   if (activeSanitization) active = activeSanitization.batch;
   if ((active?.batch_revision || 0) !== expectedBatchRevision) {
     const eventOwner = await confirmedManualEventOwner(
-      env, lead.review_date, assessment.event_key, eventClaimNonce,
+      env, lead.review_date, eventKey, eventClaimNonce,
     );
     if (eventOwner && eventOwner !== id) {
       return { ok: false, status: 409, error: 'manual_candidate_event_conflict', lead };
@@ -2594,7 +2921,7 @@ export async function confirmManualNewsLeadCandidate(
       ]) as Array<{ meta?: { changes?: number } }>;
     } catch (error) {
       const eventOwner = await confirmedManualEventOwner(
-        env, lead.review_date, assessment.event_key, eventClaimNonce,
+        env, lead.review_date, eventKey, eventClaimNonce,
       );
       if (eventOwner && eventOwner !== id) {
         return { ok: false, status: 409, error: 'manual_candidate_event_conflict', lead };
@@ -2615,7 +2942,7 @@ export async function confirmManualNewsLeadCandidate(
         };
       }
       const eventOwner = await confirmedManualEventOwner(
-        env, lead.review_date, assessment.event_key, eventClaimNonce,
+        env, lead.review_date, eventKey, eventClaimNonce,
       );
       if (eventOwner && eventOwner !== id) {
         return { ok: false, status: 409, error: 'manual_candidate_event_conflict', lead: updated };
@@ -2763,7 +3090,7 @@ export async function confirmManualNewsLeadCandidate(
     results = await env.DB.batch(statements) as Array<{ meta?: { changes?: number } }>;
   } catch (error) {
     const eventOwner = await confirmedManualEventOwner(
-      env, lead.review_date, assessment.event_key, eventClaimNonce,
+      env, lead.review_date, eventKey, eventClaimNonce,
     );
     if (eventOwner && eventOwner !== id) {
       return { ok: false, status: 409, error: 'manual_candidate_event_conflict', lead };
@@ -2785,7 +3112,7 @@ export async function confirmManualNewsLeadCandidate(
   }
   if (!updated || updated.confirmed_batch_id !== batchId || !batch || !changed) {
     const eventOwner = await confirmedManualEventOwner(
-      env, lead.review_date, assessment.event_key, eventClaimNonce,
+      env, lead.review_date, eventKey, eventClaimNonce,
     );
     if (eventOwner && eventOwner !== id) {
       return { ok: false, status: 409, error: 'manual_candidate_event_conflict', ...(updated ? { lead: updated } : {}) };

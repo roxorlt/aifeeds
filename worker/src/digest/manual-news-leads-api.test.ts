@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url';
 
 vi.mock('./manual-news-leads-store', () => ({
   confirmManualNewsLeadCandidate: vi.fn(),
+  vouchManualNewsLeadCandidate: vi.fn(),
+  getManualNewsCandidateAuthorization: vi.fn(),
+  listManualNewsCandidateAuthorizations: vi.fn(),
   getManualNewsLead: vi.fn(),
   listManualNewsLeads: vi.fn(),
   retryManualNewsLead: vi.fn(),
@@ -19,6 +22,9 @@ vi.mock('./manual-news-leads-runtime', () => ({ processManualNewsLeadWithEnv: vi
 import { handleManualNewsLeadsApi } from './manual-news-leads-api';
 import {
   confirmManualNewsLeadCandidate,
+  vouchManualNewsLeadCandidate,
+  getManualNewsCandidateAuthorization,
+  listManualNewsCandidateAuthorizations,
   getManualNewsLead,
   listManualNewsLeads,
   retryManualNewsLead,
@@ -123,6 +129,14 @@ describe('manual daily news leads API', () => {
     vi.mocked(listManualNewsLeads).mockResolvedValue([record] as never);
     vi.mocked(getManualNewsLeadCandidateState).mockResolvedValue({
       batch_id: 'nr-20260811-current000001', revision: 1,
+    } as never);
+    vi.mocked(getManualNewsCandidateAuthorization).mockResolvedValue({
+      candidate_authorization: null, vouch: null,
+    } as never);
+    vi.mocked(listManualNewsCandidateAuthorizations).mockResolvedValue(new Map() as never);
+    vi.mocked(vouchManualNewsLeadCandidate).mockResolvedValue({
+      ok: true, changed: true, lead: record, batch: null,
+      pending_initial_freeze: true, rerender_enqueued: false,
     } as never);
     vi.mocked(retryManualNewsLead).mockResolvedValue({
       ok: true,
@@ -687,5 +701,159 @@ describe('manual daily news leads API', () => {
     );
     expect(internal.status).toBe(500);
     expect(await internal.text()).not.toContain('SENTINEL-READ');
+  });
+});
+
+describe('manual daily news leads API · owner vouch', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getManualNewsLead).mockResolvedValue(record as never);
+    vi.mocked(listManualNewsLeads).mockResolvedValue([record] as never);
+    vi.mocked(recoverStaleManualNewsLeads).mockResolvedValue([] as never);
+    vi.mocked(getManualNewsLeadCandidateState).mockResolvedValue({
+      batch_id: 'nr-20260811-current000001', revision: 1,
+    } as never);
+    vi.mocked(getManualNewsCandidateAuthorization).mockResolvedValue({
+      candidate_authorization: null, vouch: null,
+    } as never);
+    vi.mocked(listManualNewsCandidateAuthorizations).mockResolvedValue(new Map() as never);
+    vi.mocked(vouchManualNewsLeadCandidate).mockResolvedValue({
+      ok: true, changed: true, lead: { ...record, status: 'needs_review', confirmed_at: 100 },
+      batch: null, pending_initial_freeze: true, rerender_enqueued: false,
+    } as never);
+  });
+
+  test('routes the vouch mutation with the statement and its own idempotency key', async () => {
+    const response = await handleManualNewsLeadsApi(request(
+      `/api/digest/daily-news-leads/${record.id}/vouch-candidate`,
+      {
+        method: 'POST',
+        headers: { 'Idempotency-Key': 'vouch-1' },
+        body: JSON.stringify({
+          expected_version: 4, expected_batch_revision: 1, statement: 'OpenAI 发布 GPT-6 并向用户开放。',
+        }),
+      },
+    ), env(), { waitUntil() {} } as never);
+
+    const payload = await response.json<Record<string, unknown>>();
+    expect(response.status).toBe(200);
+    expect(payload).toMatchObject({
+      ok: true, rerender_enqueued: false, pending_initial_freeze: true, batch: null,
+    });
+    expect(payload.lead).toMatchObject({
+      response_profile: 'manual_news_lead_detail_v1', schema_version: 1,
+    });
+    expect(vouchManualNewsLeadCandidate).toHaveBeenCalledWith(
+      expect.anything(), record.id, 4, 1, 'OpenAI 发布 GPT-6 并向用户开放。', 'vouch-1',
+      expect.any(Number),
+    );
+    expect(confirmManualNewsLeadCandidate).not.toHaveBeenCalled();
+    expect(processManualNewsLeadWithEnv).not.toHaveBeenCalled();
+  });
+
+  test('passes store validation failures through with their status', async () => {
+    vi.mocked(vouchManualNewsLeadCandidate).mockResolvedValueOnce({
+      ok: false, status: 400, error: 'invalid_vouch_statement',
+    } as never);
+    const invalid = await handleManualNewsLeadsApi(request(
+      `/api/digest/daily-news-leads/${record.id}/vouch-candidate`,
+      {
+        method: 'POST',
+        headers: { 'Idempotency-Key': 'vouch-invalid' },
+        body: JSON.stringify({ expected_version: 4, expected_batch_revision: 1, statement: '短' }),
+      },
+    ), env(), { waitUntil() {} } as never);
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toEqual({ ok: false, status: 400, error: 'invalid_vouch_statement' });
+
+    vi.mocked(vouchManualNewsLeadCandidate).mockResolvedValueOnce({
+      ok: false, status: 409, error: 'lead_not_vouchable', lead: record,
+    } as never);
+    const conflict = await handleManualNewsLeadsApi(request(
+      `/api/digest/daily-news-leads/${record.id}/vouch-candidate`,
+      {
+        method: 'POST',
+        headers: { 'Idempotency-Key': 'vouch-conflict' },
+        body: JSON.stringify({
+          expected_version: 4, expected_batch_revision: 1, statement: 'OpenAI 发布 GPT-6 并向用户开放。',
+        }),
+      },
+    ), env(), { waitUntil() {} } as never);
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json<{ error: string }>()).toMatchObject({ error: 'lead_not_vouchable' });
+  });
+
+  test('rejects a vouch without an idempotency key or with a bad expected batch revision', async () => {
+    const missingKey = await handleManualNewsLeadsApi(request(
+      `/api/digest/daily-news-leads/${record.id}/vouch-candidate`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          expected_version: 4, expected_batch_revision: 1, statement: 'OpenAI 发布 GPT-6 并向用户开放。',
+        }),
+      },
+    ), env(), { waitUntil() {} } as never);
+    expect(missingKey.status).toBe(400);
+
+    const badRevision = await handleManualNewsLeadsApi(request(
+      `/api/digest/daily-news-leads/${record.id}/vouch-candidate`,
+      {
+        method: 'POST',
+        headers: { 'Idempotency-Key': 'vouch-bad-revision' },
+        body: JSON.stringify({
+          expected_version: 4, statement: 'OpenAI 发布 GPT-6 并向用户开放。',
+        }),
+      },
+    ), env(), { waitUntil() {} } as never);
+    expect(badRevision.status).toBe(400);
+    expect(await badRevision.json()).toEqual({ ok: false, error: 'invalid_expected_batch_revision' });
+    expect(vouchManualNewsLeadCandidate).not.toHaveBeenCalled();
+  });
+
+  test('exposes candidate_authorization and the vouch statement on summaries and details', async () => {
+    vi.mocked(listManualNewsCandidateAuthorizations).mockResolvedValueOnce(new Map([
+      [record.id, {
+        candidate_authorization: 'owner_vouched_v1',
+        vouch: { statement: 'OpenAI 发布 GPT-6 并向用户开放。', vouched_at: 100 },
+      }],
+    ]) as never);
+    vi.mocked(getManualNewsCandidateAuthorization).mockResolvedValueOnce({
+      candidate_authorization: 'owner_vouched_v1',
+      vouch: { statement: 'OpenAI 发布 GPT-6 并向用户开放。', vouched_at: 100 },
+    } as never);
+
+    const list = await handleManualNewsLeadsApi(
+      request('/api/digest/daily-news-leads?date=2026-08-11'), env(), { waitUntil() {} } as never,
+    );
+    const listPayload = await list.json<{ leads: Array<Record<string, unknown>> }>();
+    expect(listPayload.leads[0]).toMatchObject({
+      candidate_authorization: 'owner_vouched_v1',
+      vouch: { statement: 'OpenAI 发布 GPT-6 并向用户开放。', vouched_at: 100 },
+    });
+    expect(Object.keys(listPayload.leads[0]).sort())
+      .toEqual([...apiContract.list.lead_fields].sort());
+
+    const detail = await handleManualNewsLeadsApi(
+      request(`/api/digest/daily-news-leads/${record.id}`), env(), { waitUntil() {} } as never,
+    );
+    const detailPayload = await detail.json<{ lead: Record<string, unknown> }>();
+    expect(detailPayload.lead).toMatchObject({
+      candidate_authorization: 'owner_vouched_v1',
+      vouch: { statement: 'OpenAI 发布 GPT-6 并向用户开放。', vouched_at: 100 },
+    });
+    expect(Object.keys(detailPayload.lead)).toEqual(expect.arrayContaining(
+      apiContract.detail.lead_required_fields,
+    ));
+  });
+
+  test('keeps the published client contract in step with the vouch route and fields', () => {
+    expect(apiContract.list.lead_fields).toEqual(expect.arrayContaining([
+      'candidate_authorization', 'vouch',
+    ]));
+    expect(apiContract.detail.lead_required_fields).toEqual(expect.arrayContaining([
+      'candidate_authorization', 'vouch',
+    ]));
+    expect((apiContract as unknown as { mutations: { routes: string[] } }).mutations.routes)
+      .toEqual(['submit', 'retry', 'confirm-candidate', 'vouch-candidate']);
   });
 });

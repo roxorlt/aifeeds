@@ -204,6 +204,20 @@ async function fakeConfirmationEnv() {
           if (sql.includes('manual_verification:active_assessment')) {
             return verification.status === 'active' ? { ...verification } : null;
           }
+          if (sql.includes('manual_verification:policy_dispatch')) {
+            return verification.status === 'active' ? {
+              ...verification,
+              review_date: row.review_date,
+              input_type: row.input_type,
+              input_text: row.input_text,
+              input_url: row.input_url,
+              note: row.note,
+              submit_idempotency_key: row.submit_idempotency_key,
+              lead_status: row.status,
+              lead_confirmed_at: row.confirmed_at,
+              lead_version: row.version,
+            } : null;
+          }
           return null;
         },
         async all() {
