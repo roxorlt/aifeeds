@@ -3,8 +3,10 @@ import {
   isPublicIpAddress,
   normalizeWeChatArticleUrl,
   validatePublicHttpUrl,
+  parseTwitterStatusUrl,
   verifyDocumentFetchAuditResponseHmac,
   verifyProviderRetrievalAuditResponseHmac,
+  verifyTweetEvidenceAuditResponseHmac,
   type DocumentFetchAudit,
   type ManualNewsFetchAudit,
   type ProviderRetrievalAudit,
@@ -6997,10 +6999,68 @@ function normalizedProviderEvidenceProvenance(
   };
 }
 
-function normalizedSignedEvidenceProvenance(item: ManualNewsEvidence): ManualNewsFetchAudit {
+/**
+ * 推文证据的持久化 provenance 归一化(2026-09-03)。
+ *
+ * 与网页直抓 audit 完全不同的形状:没有 hops / limits / parser,也**不该**有 ——
+ * 推文取证走第三方 API,不存在「连到 x.com 的某个 IP」这件事。这里逐字重建允许的键集合,
+ * 任何多余键、缺失键或与 item 字段不自洽都判为无效来源。
+ */
+function normalizedTweetEvidenceProvenance(
+  item: ManualNewsEvidence,
+  raw: Record<string, unknown>,
+): ManualNewsFetchAudit {
+  if (!hasExactKeys(raw, [
+    'kind', 'provider', 'tweet_id', 'requested_url', 'canonical_url', 'fetched_at', 'provider_status',
+    'protocol_version', 'request_nonce', 'request_timestamp', 'body_sha256', 'response_hmac',
+  ])) return invalidManualNewsEvidenceProvenance();
+  const canonical = parseTwitterStatusUrl(String(raw.canonical_url ?? ''));
+  const requested = parseTwitterStatusUrl(String(raw.requested_url ?? ''));
+  if (raw.kind !== 'tweet_api'
+    || raw.provider !== 'scrapebadger'
+    || raw.protocol_version !== 'tweet_evidence_v1'
+    || typeof raw.tweet_id !== 'string' || !/^\d{1,25}$/.test(raw.tweet_id)
+    || !canonical || canonical.canonicalUrl !== raw.canonical_url || canonical.tweetId !== raw.tweet_id
+    || !requested || requested.tweetId !== raw.tweet_id
+    || canonicalPersistedPublishedAt(raw.fetched_at) === undefined
+    || typeof raw.provider_status !== 'number' || !Number.isSafeInteger(raw.provider_status)
+    || raw.provider_status < 100 || raw.provider_status > 599
+    || typeof raw.request_nonce !== 'string'
+    || typeof raw.request_timestamp !== 'string'
+    || typeof raw.body_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(raw.body_sha256)
+    || typeof raw.response_hmac !== 'string' || !/^[a-f0-9]{64}$/.test(raw.response_hmac)
+    // 证据行必须指向 audit 里那条推文,不能挂到别的 URL 上。
+    || item.url !== raw.canonical_url) {
+    return invalidManualNewsEvidenceProvenance();
+  }
+  return {
+    kind: 'tweet_api',
+    provider: 'scrapebadger',
+    tweet_id: raw.tweet_id,
+    requested_url: raw.requested_url as string,
+    canonical_url: raw.canonical_url as string,
+    fetched_at: raw.fetched_at as string,
+    provider_status: raw.provider_status,
+    protocol_version: 'tweet_evidence_v1',
+    request_nonce: raw.request_nonce,
+    request_timestamp: raw.request_timestamp,
+    body_sha256: raw.body_sha256,
+    response_hmac: raw.response_hmac,
+  };
+}
+
+/**
+ * 证据签名前的来源归一化:把持久化的 fetch_audit 逐字重建成允许的形状,
+ * 任何多余键 / 缺失键 / 与证据行不自洽都抛 manual_news_evidence_provenance_invalid。
+ * 导出以便直接覆盖三种 audit 形态(直抓 / provider / 推文)的判定。
+ */
+export function normalizedSignedEvidenceProvenance(item: ManualNewsEvidence): ManualNewsFetchAudit {
   const candidate = item.fetch_audit;
   if (candidate?.protocol_version === 'provider_retrieval_v1') {
     return normalizedProviderEvidenceProvenance(item, candidate as unknown as Record<string, unknown>);
+  }
+  if ((candidate as { kind?: unknown } | null | undefined)?.kind === 'tweet_api') {
+    return normalizedTweetEvidenceProvenance(item, candidate as unknown as Record<string, unknown>);
   }
   const raw = candidate as DocumentFetchAudit | null | undefined;
   const articleText = raw?.extraction === 'article_text';
@@ -7218,7 +7278,9 @@ async function assertManualNewsEvidenceBodyDigests(
     if (!responseSecret) throw new Error('manual_news_response_key_unavailable');
     const hmacValid = provenance.protocol_version === 'provider_retrieval_v1'
       ? await verifyProviderRetrievalAuditResponseHmac(provenance, responseSecret)
-      : await verifyDocumentFetchAuditResponseHmac(provenance, responseSecret);
+      : provenance.protocol_version === 'tweet_evidence_v1'
+        ? await verifyTweetEvidenceAuditResponseHmac(provenance, responseSecret)
+        : await verifyDocumentFetchAuditResponseHmac(provenance, responseSecret);
     if (!hmacValid) {
       throw new Error('manual_news_evidence_response_hmac_invalid');
     }

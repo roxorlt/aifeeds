@@ -2086,3 +2086,155 @@ describe('manual lead processing pipeline', () => {
     expect(result).toMatchObject({ status: 'duplicate', error_code: null, error_message: null });
   });
 });
+
+// ── X 链接补录:推文取证通道（2026-09-03）──────────────────────────────────────
+// owner 提交的 X 链接线索此前全部失败:线索 URL 被交给 /v1/document 直抓 x.com,
+// 大陆机房被墙 → 超时 502 → 判 transient → 3 次重试烧掉约 5 分钟。
+// 现在按 host 分流到网关的 POST /v1/tweet(ScrapeBadger 推文接口取证)。
+describe('X 链接线索走推文取证通道', () => {
+  const TWEET_URL = 'https://x.com/AnthropicAI/status/1234567890123456789';
+
+  function tweetDocument(url = TWEET_URL): PublicDocument {
+    return {
+      response_key_id: 'response-key-2026-08-11',
+      url,
+      content_type: 'application/json',
+      extraction: 'tweet_api',
+      excerpt: 'Anthropic 发布了新模型。',
+      redirects: 0,
+      title: 'Anthropic（@AnthropicAI）',
+      publisher: 'X @AnthropicAI',
+      published_at: '2026-09-03T04:05:06.000Z',
+      fetch_audit: {
+        kind: 'tweet_api',
+        provider: 'scrapebadger',
+        tweet_id: '1234567890123456789',
+        requested_url: url,
+        canonical_url: TWEET_URL,
+        fetched_at: '2026-09-03T04:05:07.000Z',
+        provider_status: 200,
+        protocol_version: 'tweet_evidence_v1',
+        request_nonce: 'a'.repeat(32),
+        request_timestamp: '2026-09-03T04:05:06.000Z',
+        body_sha256: 'b'.repeat(64),
+        response_hmac: 'c'.repeat(64),
+      },
+    };
+  }
+
+  test.each([
+    ['https://x.com/AnthropicAI/status/1234567890123456789'],
+    ['https://twitter.com/AnthropicAI/status/1234567890123456789'],
+    ['https://www.x.com/AnthropicAI/status/1234567890123456789'],
+    ['https://mobile.twitter.com/AnthropicAI/status/1234567890123456789'],
+  ])('%s 走 fetchTweet,不再走网页直抓', async (url) => {
+    const memory = memoryStore(lead({ input_url: url }));
+    const webFetched: string[] = [];
+    const tweetFetched: string[] = [];
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [],
+      fetch: async (target: string) => { webFetched.push(target); return documentFixture(target, 'doc'); },
+      fetchTweet: async (target: string) => { tweetFetched.push(target); return tweetDocument(target); },
+      extract: async () => officialEvidence,
+      assess: async () => assessed(),
+      verify: async (prompt: { system: string; user: string }) => verifiedFromPrompt(prompt),
+    });
+
+    expect(tweetFetched).toEqual([url]);
+    expect(webFetched).toEqual([]);
+  });
+
+  test.each([
+    // 非 status 路径本来就不是推文取证的对象,拦下来只会把一类失败换成另一类。
+    ['https://x.com/AnthropicAI'],
+    ['https://x.com/i/lists/123'],
+    // 相近 host 绝不能误分流。
+    ['https://x.com.evil.test/a/status/1'],
+    ['https://support.claude.com/example'],
+  ])('%s 维持网页直抓路径', async (url) => {
+    const memory = memoryStore(lead({ input_url: url }));
+    const webFetched: string[] = [];
+    const tweetFetched: string[] = [];
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [],
+      fetch: async (target: string) => { webFetched.push(target); return documentFixture(target, 'doc'); },
+      fetchTweet: async (target: string) => { tweetFetched.push(target); return tweetDocument(target); },
+      extract: async () => officialEvidence,
+      assess: async () => assessed(),
+      verify: async (prompt: { system: string; user: string }) => verifiedFromPrompt(prompt),
+    });
+
+    expect(webFetched).toEqual([url]);
+    expect(tweetFetched).toEqual([]);
+  });
+
+  test('没有注入 fetchTweet 时退回旧行为(回滚安全)', async () => {
+    const memory = memoryStore(lead({ input_url: TWEET_URL }));
+    const webFetched: string[] = [];
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [],
+      fetch: async (target: string) => { webFetched.push(target); return documentFixture(target, 'doc'); },
+      extract: async () => officialEvidence,
+      assess: async () => assessed(),
+      verify: async (prompt: { system: string; user: string }) => verifiedFromPrompt(prompt),
+    });
+    expect(webFetched).toEqual([TWEET_URL]);
+  });
+
+  test('推文取证失败时,owner 看到的是具体原因而不是笼统的「未取得证据」', async () => {
+    const memory = memoryStore(lead({ input_url: TWEET_URL }));
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [],
+      fetch: async (target: string) => documentFixture(target, 'doc'),
+      fetchTweet: async () => { throw new Error('tweet_evidence:tweet_provider_auth'); },
+      extract: async () => officialEvidence,
+      assess: async () => assessed(),
+      verify: async (prompt: { system: string; user: string }) => verifiedFromPrompt(prompt),
+    });
+
+    const current = memory.current();
+    expect(current.status).toBe('needs_review');
+    expect(current.error_code).toBe('evidence_insufficient');
+    expect(current.error_message).toContain('推文提供方拒绝了凭证');
+    // 变异对照:没有这层映射时 owner 只会看到这句通用文案。
+    expect(current.error_message).not.toBe('未取得可核验的一手或独立证据，请补充链接后重试。');
+  });
+
+  test('止血码 x_link_requires_tweet_api 也有人话,并判终态', async () => {
+    const memory = memoryStore(lead({ input_url: TWEET_URL }));
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [],
+      fetch: async () => { throw new Error('tweet_evidence:x_link_requires_tweet_api'); },
+      extract: async () => officialEvidence,
+      assess: async () => assessed(),
+      verify: async (prompt: { system: string; user: string }) => verifiedFromPrompt(prompt),
+    });
+
+    const current = memory.current();
+    expect(current.status).toBe('needs_review');
+    expect(current.error_message).toContain('X 链接需要走推文取证通道');
+    expect(isTransientManualLeadError(new Error('tweet_evidence:x_link_requires_tweet_api'))).toBe(false);
+  });
+
+  test.each([
+    ['tweet_provider_unavailable', true],
+    ['egress_proxy_unavailable', true],
+    // 5xx 但不会自愈的配置/凭证问题,必须从通用 5xx transient 规则里摘出来。
+    ['tweet_provider_auth', false],
+    ['tweet_provider_not_configured', false],
+    ['tweet_response_signing_unavailable', false],
+    ['tweet_not_found', false],
+    ['tweet_empty', false],
+    ['invalid_tweet_url', false],
+    ['unauthorized', false],
+  ])('never misclassifies tweet outcome %s as a durable Workflow retry', (code, transient) => {
+    expect(isTransientManualLeadError(new Error(`tweet_evidence:${code}`))).toBe(transient);
+  });
+
+  test('变异验证:去掉 tweet 分级后,tweet_provider_auth 会被通用 5xx 规则误判为可重试', () => {
+    // 通用规则只看到 502 就判 transient(这正是 5 分钟白重试的来源)。
+    expect(isTransientManualLeadError(new Error('trusted_gateway_http_502'))).toBe(true);
+    // 加了分级之后,同一个底层 502 的推文凭证错误判终态。
+    expect(isTransientManualLeadError(new Error('tweet_evidence:tweet_provider_auth'))).toBe(false);
+  });
+});

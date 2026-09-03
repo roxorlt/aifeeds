@@ -13,7 +13,7 @@
     "route": "/api/digest/daily-news-leads/:lead_id",
     "top_level_fields": ["ok", "lead"],
     "lead_required_fields": ["response_profile", "schema_version", "id", "review_date", "input_type", "input_text", "input_url", "note", "status", "version", "error_code", "error_message", "processing_owner", "processing_attempt", "processing_lease_until", "confirmed_batch_id", "confirmed_at", "created_at", "updated_at", "assessment", "evidence"],
-    "evidence_fields": ["id", "url", "source_type", "publisher", "published_at", "retrieved_at", "title", "excerpt", "reliable"]
+    "evidence_fields": ["id", "url", "source_type", "evidence_kind", "source_label", "publisher", "published_at", "retrieved_at", "title", "excerpt", "reliable"]
   },
   "mutations": {
     "routes": ["submit", "retry", "confirm-candidate"],
