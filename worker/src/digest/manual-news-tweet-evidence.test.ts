@@ -102,10 +102,12 @@ describe('推文文档 → 证据', () => {
     // 来源标注与网页证据可区分。
     expect(evidence!.publisher).toBe('X @AnthropicAI');
     expect(isTweetEvidenceAudit(evidence!.fetch_audit)).toBe(true);
-    // 一条推文的权威性取决于账号而不是域名,x.com 这个 host 不构成一手信源 ——
-    // 推文进证据链、对 owner 可见,但不自动把线索抬进「一手/独立」档位。
-    expect(evidence!.source_type).toBe('other');
-    expect(evidence!.reliable).toBe(false);
+    // 一条推文的权威性取决于账号而不是域名,x.com 这个 host 不构成一手信源。
+    // @AnthropicAI 在官方账号白名单里(2026-09-03 起),所以这条算一手公告;
+    // 白名单之外的账号仍是 'other' / reliable=false,见
+    // manual-news-official-x-accounts.test.ts。
+    expect(evidence!.source_type).toBe('official_primary');
+    expect(evidence!.reliable).toBe(true);
     expect(evidence!.claims_supported).toEqual([TWEET_TEXT]);
   });
 

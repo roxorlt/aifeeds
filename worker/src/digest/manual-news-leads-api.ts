@@ -56,17 +56,22 @@ function manualNewsLeadSummary(lead: ManualNewsListInput) {
   };
 }
 
-function manualNewsEvidenceDetail(item: ManualNewsEvidence) {
+export function manualNewsEvidenceDetail(item: ManualNewsEvidence) {
   // 证据种类从已持久化的 fetch_audit 派生,不新增持久化字段:
   // 推文证据的 audit 形状与网页直抓完全不同(kind='tweet_api',无 hops/IP),
   // 呈现层据此把「推文证据」与「网页证据」分开,而不是让 owner 从 URL 里猜。
   const tweet = isTweetEvidenceAudit(item.fetch_audit);
+  // 官方账号推文(白名单命中,2026-09-03)与普通推文分开标注:前者与官网公告同级,
+  // owner 在证据列表里要一眼看出来。
+  const officialAccount = tweet && item.reliable && item.source_type === 'official_primary';
   return {
     id: item.id,
     url: item.url,
     source_type: item.source_type,
     evidence_kind: tweet ? 'tweet_api' : 'web',
-    source_label: tweet ? 'X/Twitter 推文（ScrapeBadger）' : '网页',
+    source_label: tweet
+      ? (officialAccount ? 'X/Twitter 官方账号推文（ScrapeBadger）' : 'X/Twitter 推文（ScrapeBadger）')
+      : '网页',
     publisher: item.publisher,
     published_at: item.published_at,
     retrieved_at: item.retrieved_at,
