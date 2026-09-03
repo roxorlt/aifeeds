@@ -3001,6 +3001,7 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
       'source_facts 不接受自由文本 text。每条 source fact 必须机械地填写 atomic_fact 的主体角色、主体、单一谓词、对象四个槽位；程序会按槽位顺序生成可签名事实，不会修补或拆分 raw JSON。',
       '核心事件最小化：默认只输出 1 条 core source_fact，只保留足以决定本条线索推荐与去重的核心事件。仅当另一事实独立、必要且同样可由直接证据核验时才增加，总数最多 3 条 source_facts。禁止为了填充摘要加入原因、替代产品或背景信息。',
       'atomic_fact.subject 只能有一个完整主体；atomic_fact.predicate 只能有一个谓词，可包含紧邻该谓词的时态、否定、计划或“据报道”等限定；atomic_fact.object 只能有一个对象及其必要版本、地区和范围。',
+      'atomic_fact.predicate 的动作必须且只能取 predicate_vocabulary 中某一个动作的写法（可加紧邻的时态 / 否定 / 情态 / “据报道” 标记）。证据使用同义动词（announce、unveil、introduce、debut、宣布、亮相、公布 等）时，改写为词表中对应动作的写法；“宣布 + 动作”“announced it will + 动作”只保留后面的动作。editorial_projection 的中文句子使用同一动作的中文写法。',
       '命名产品或标准后的逗号同位语、定义性说明、用途说明和受众范围不是该产品 identity/object 的组成。若核心事件只需命名对象，atomic_fact.object 必须在必要产品名或版本名结束；删除尾部说明作为非核心背景，不得塞入 object，也不得为了填充另造事实。',
       '结构正例：证据 “Anthropic is opening a research preview of the Model Hardware Standard (MHS), a shared specification for AI agents to safely operate physical devices, to a first group of scientific research labs and advanced manufacturers.” 的核心事件必须写为 subject="Anthropic"、predicate="is opening a research preview of"、object="Model Hardware Standard (MHS)"；逗号后的 “a shared specification ...” 与 “to a first group ...” 均为非核心说明，不得进入 object。',
       'source_facts.atomic_fact 必须沿用直接证据的源语言、实体原文与谓词表达：英文证据写英文 source fact，中文证据写中文 source fact，禁止先翻译再绑定连续原文。',
@@ -3036,6 +3037,9 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
     user: JSON.stringify({
       task: '生成源语言原子事实、逐句映射的严肃中文编辑投影、事件身份与评分建议',
       allowed_evidence_ids: allowedEvidenceIds,
+      predicate_vocabulary: FACT_ACTION_VOCABULARY.map((entry) => ({
+        action: entry.action, zh: [...entry.zh], en: [...entry.en],
+      })),
       output_schema: {
         event_key: 'ASCII lowercase, 6..200 chars, exactly ^[a-z0-9][a-z0-9:_-]{5,199}$',
         event_type: 'product_release|product_documentation|political_regulatory|industry_event|other',
@@ -3049,7 +3053,7 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
           atomic_fact: {
             subject: 'exactly one subject; source-language entity text; no predicate or conjunction',
             subject_role: 'authority|organization|person|product|other',
-            predicate: 'exactly one predicate with only its local tense/polarity/modality markers',
+            predicate: 'exactly one action from predicate_vocabulary, written in that vocabulary form, plus only its local tense/polarity/modality markers',
             object: 'exactly one object with necessary version/region/scope; no second subject or predicate',
           },
           evidence_ids: ['one or more IDs copied character-for-character from allowed_evidence_ids'],
@@ -3127,7 +3131,7 @@ export function buildManualLeadAssessmentRegenerationPrompt(
     : slot === 'subject'
       ? '只纠正同类 subject 槽：每个 subject 只能是一个完整主体实体，不得包含并列主体、动作、原因或背景。整份 schema 仍须从原证据重新生成。'
     : slot === 'predicate'
-      ? '只纠正同类 predicate 槽：每个 predicate 只能有一个动作及其紧邻时态、否定、情态标记；多个动作必须拆成必要且可核验的独立 fact，否则删除非核心背景。整份 schema 仍须从原证据重新生成。'
+      ? '只纠正同类 predicate 槽：每个 predicate 只能有一个动作及其紧邻时态、否定、情态标记，且该动作必须取自 predicate_vocabulary 的写法；同义动词改写成词表写法，“宣布 + 动作”只保留后面的动作；多个动作必须拆成必要且可核验的独立 fact，否则删除非核心背景。整份 schema 仍须从原证据重新生成。'
       : failureCode === 'non_atomic_source_object'
         ? '只纠正同类 object 槽：命名产品或标准后的逗号同位语、定义性说明、用途说明和受众范围不是该产品 identity/object 的组成；若核心事件只需命名对象，object 必须在必要产品名或版本名结束，删除尾部说明作为非核心背景，不得塞入 object，也不得为了填充另造事实。结构正例：证据 “Anthropic is opening a research preview of the Model Hardware Standard (MHS), a shared specification for AI agents to safely operate physical devices, to a first group of scientific research labs and advanced manufacturers.” 的核心事件必须写为 subject="Anthropic"、predicate="is opening a research preview of"、object="Model Hardware Standard (MHS)"；逗号后的 “a shared specification ...” 与 “to a first group ...” 均不得进入 object。对象若仍含并列、原因或第二动作，必须拆为必要且可核验的独立 fact，或删除非核心背景。整份 schema 仍须从原证据重新生成。'
         : slot === 'object'

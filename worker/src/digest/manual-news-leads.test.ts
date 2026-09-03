@@ -2531,7 +2531,7 @@ describe('manual news lead domain', () => {
       atomic_fact: {
         subject: expect.stringContaining('exactly one subject'),
         subject_role: expect.stringContaining('organization'),
-        predicate: expect.stringContaining('exactly one predicate'),
+        predicate: expect.stringContaining('exactly one action from predicate_vocabulary'),
         object: expect.stringContaining('exactly one object'),
       },
     }));

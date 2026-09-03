@@ -1,10 +1,35 @@
 import { describe, expect, test } from 'vitest';
 
 import {
+  buildManualLeadAssessmentPrompt,
+  buildManualLeadAssessmentRegenerationPrompt,
   FACT_ACTION_IDS,
   FACT_ACTION_VOCABULARY,
   factActionOccurrences,
+  type ManualNewsEvidence,
 } from './manual-news-leads';
+import { MANUAL_NEWS_PROVIDER_PROMPT_MAX_CHARS } from './manual-news-leads-runtime';
+
+const promptEvidence: ManualNewsEvidence = {
+  id: 'ev-official',
+  url: 'https://blog.google/products/gemini/example',
+  source_type: 'official_primary',
+  publisher: 'blog.google',
+  published_at: '2026-09-02T00:00:00Z',
+  retrieved_at: 1,
+  title: 'Gemini 3.8 Flash is here',
+  excerpt: 'Google announced Gemini 3.8 Flash today.',
+  claims_supported: ['Google announced Gemini 3.8 Flash today.'],
+  reliable: true,
+};
+
+const promptInput = {
+  date: '2026-09-03',
+  text: 'Google 发布 Gemini 3.8 Flash',
+  note: '',
+  evidence: [promptEvidence],
+  prior_events: [],
+};
 
 describe('谓语动作词表与正则同步', () => {
   test('词表覆盖 FACT_ACTION_PATTERNS 的每一个动作，且不含表外动作', () => {
@@ -85,5 +110,54 @@ describe('谓语动作词表与正则同步', () => {
       for (const surface of entry.zh) expect(surface).toMatch(/\p{Script=Han}/u);
       for (const surface of entry.en) expect(surface).toMatch(/^[\x20-\x7e]+$/u);
     }
+  });
+});
+
+describe('评估提示词把词表交给模型', () => {
+  test('user JSON 带上完整 predicate_vocabulary', () => {
+    const body = JSON.parse(buildManualLeadAssessmentPrompt(promptInput).user) as {
+      predicate_vocabulary: Array<{ action: string; zh: string[]; en: string[] }>;
+      output_schema: { source_facts: Array<{ atomic_fact: { predicate: string } }> };
+    };
+    expect(body.predicate_vocabulary.map((entry) => entry.action))
+      .toEqual(FACT_ACTION_VOCABULARY.map((entry) => entry.action));
+    expect(body.predicate_vocabulary).toEqual(FACT_ACTION_VOCABULARY.map((entry) => ({
+      action: entry.action, zh: [...entry.zh], en: [...entry.en],
+    })));
+    expect(body.output_schema.source_facts[0].atomic_fact.predicate)
+      .toContain('predicate_vocabulary');
+  });
+
+  test('system 说明谓语只能取词表写法，并交代同义动词怎么改写', () => {
+    const { system } = buildManualLeadAssessmentPrompt(promptInput);
+    expect(system).toContain('predicate_vocabulary');
+    expect(system).toContain('宣布');
+    expect(system).toContain('announce');
+    expect(system).toContain('editorial_projection');
+  });
+
+  test('词表带来的提示词增量小于 5000 个字符，且总长仍在 provider 上限内', () => {
+    const withVocabulary = buildManualLeadAssessmentPrompt(promptInput);
+    const serialized = (prompt: { system: string; user: string }) =>
+      Array.from(JSON.stringify({ system: prompt.system, user: prompt.user })).length;
+    const body = JSON.parse(withVocabulary.user) as Record<string, unknown>;
+    const { predicate_vocabulary: _vocabulary, ...withoutVocabulary } = body;
+    const increment = serialized(withVocabulary)
+      - serialized({ system: withVocabulary.system, user: JSON.stringify(withoutVocabulary) });
+    expect(increment).toBeGreaterThan(0);
+    expect(increment).toBeLessThan(5_000);
+    expect(serialized(withVocabulary)).toBeLessThan(MANUAL_NEWS_PROVIDER_PROMPT_MAX_CHARS);
+  });
+
+  test('重生成提示词的 predicate 机械指令引用词表', () => {
+    const regeneration = buildManualLeadAssessmentRegenerationPrompt(
+      promptInput, 'non_atomic_source_predicate', 'source_facts[0].atomic_fact.predicate',
+    );
+    const body = JSON.parse(regeneration.user) as {
+      predicate_vocabulary: unknown[];
+      regeneration: { mechanical_instruction: string };
+    };
+    expect(body.predicate_vocabulary).toHaveLength(FACT_ACTION_VOCABULARY.length);
+    expect(body.regeneration.mechanical_instruction).toContain('predicate_vocabulary');
   });
 });
