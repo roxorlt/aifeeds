@@ -1030,7 +1030,10 @@ describe('manual lead processing pipeline', () => {
 
     expect(assessCalls).toBe(2);
     const regeneration = JSON.parse(prompts[1].user) as {
-      regeneration: { failure_code: string; failure_path: string; mechanical_instruction: string };
+      regeneration: {
+        failure_code: string; failure_path: string; mechanical_instruction: string;
+        failure_slot_text?: string;
+      };
     };
     expect(regeneration.regeneration).toMatchObject({
       failure_code: 'non_atomic_source_object',

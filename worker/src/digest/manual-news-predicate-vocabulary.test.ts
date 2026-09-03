@@ -298,3 +298,64 @@ describe('谓语动作认不出来时的失败码与反馈', () => {
     expect(body.regeneration.matched_actions).toEqual(['release']);
   });
 });
+
+// 规格 1.5 的 8 条验收夹具：贴近真实 AI 新闻的 source_fact + 中文编辑投影，
+// 走完整的 validateManualLeadGeneratedAssessment。
+describe('常见 AI 新闻写法的验收夹具', () => {
+  const passing: Array<[string, FactShape, string]> = [
+    ['announced 走 release', {
+      subject: 'Google', role: 'organization', predicate: 'announced', object: 'Gemini 3.8 Flash model',
+      language: 'en', zhSubject: 'Google', zhPredicate: '已发布', zhObject: 'Gemini 3.8 Flash 模型',
+    }, 'release'],
+    ['is rolling out 走 release', {
+      subject: 'OpenAI', role: 'organization', predicate: 'is rolling out', object: 'GPT-6 model',
+      language: 'en', zhSubject: 'OpenAI', zhPredicate: '正在推出', zhObject: 'GPT-6 模型',
+    }, 'release'],
+    ['宣布收购 走 acquire', {
+      subject: 'Anthropic', role: 'organization', predicate: '宣布收购', object: 'Codex 工具',
+      language: 'zh', zhSubject: 'Anthropic', zhPredicate: '收购', zhObject: 'Codex 工具',
+    }, 'acquire'],
+    ['open-sourced 走 open_source', {
+      subject: 'Meta', role: 'organization', predicate: 'open-sourced', object: 'Llama 5 model',
+      language: 'en', zhSubject: 'Meta', zhPredicate: '已开源', zhObject: 'Llama 5 模型',
+    }, 'open_source'],
+    ['raised 走 finance', {
+      subject: 'xAI', role: 'organization', predicate: 'raised', object: 'Grok model',
+      language: 'en', zhSubject: 'xAI', zhPredicate: '已完成融资', zhObject: 'Grok 模型',
+    }, 'finance'],
+    ['hired 走 appoint', {
+      subject: 'Google', role: 'organization', predicate: 'hired', object: 'contractors',
+      language: 'en', zhSubject: 'Google', zhPredicate: '已聘请', zhObject: '承包商',
+    }, 'appoint'],
+  ];
+
+  test.each(passing)('%s', (_label, fact, action) => {
+    const { raw, evidence } = generatedAssessmentFor(fact);
+    const validated = validateManualLeadGeneratedAssessment(raw, evidence);
+    expect(validated.source_facts?.[0].atomic_fact.predicate).toBe(fact.predicate);
+    expect(factActionOccurrences(fact.predicate).map((item) => item.action)).toEqual([action]);
+    expect(factActionOccurrences(fact.zhPredicate).map((item) => item.action)).toEqual([action]);
+  });
+
+  test('considered 不在词表里，报 predicate_action_unrecognized 并回显原文', () => {
+    expect(validationFailureFor(APPLE_CONSIDERED)).toEqual({
+      code: 'predicate_action_unrecognized',
+      path: 'source_facts[0].atomic_fact.predicate',
+      slot_text: 'considered',
+      matched_actions: [],
+    });
+  });
+
+  test('released and open-sourced 是两个动作，报 non_atomic_source_predicate', () => {
+    expect(validationFailureFor({
+      subject: 'Google', role: 'organization',
+      predicate: 'released and open-sourced', object: 'Gemma 4 model',
+      language: 'en', zhSubject: 'Google', zhPredicate: '发布并开源', zhObject: 'Gemma 4 模型',
+    })).toEqual({
+      code: 'non_atomic_source_predicate',
+      path: 'source_facts[0].atomic_fact.predicate',
+      slot_text: 'released and open-sourced',
+      matched_actions: ['release', 'open_source'],
+    });
+  });
+});

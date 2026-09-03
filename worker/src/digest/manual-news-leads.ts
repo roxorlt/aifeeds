@@ -1093,6 +1093,10 @@ function structuredChinesePredicateModality(
   const consume = (pattern: RegExp) => consumeSemanticPattern(mask, normalized, pattern);
   const has = (pattern: RegExp) => pattern.test(normalized.slice(0, occurrence.index));
 
+  // 「宣布收购」里的「宣布」只是宣告方式,动作是「收购」(与 factActionOccurrences 的通告
+  // 动词让位一致)。它不带任何语义槽,所以「宣布收购」与「收购」的模态槽完全相同,
+  // 中文投影写「收购」也能对上。
+  if (has(/(?:宣布|宣告)/u)) consume(/(?:宣布|宣告)/u);
   if (has(/(?:据报道|报道称|消息称|据称)/u)) {
     attribution.push('reported'); consume(/(?:据报道|报道称|消息称|据称)/u);
   }
@@ -3768,7 +3772,7 @@ const FACT_ACTION_PATTERNS: ReadonlyArray<FactActionPattern> = [
   ['order', /(?:下令|命令)|\b(?:order(?:s|ed))\b/giu, /^order(?:s|ed)/iu],
   ['pause', /(?:停止|暂停)|\b(?:stop(?:s|ped|ping)?|paus(?:e|es|ed|ing))\b/giu, /^(?:stop(?:ping|ped|s)?|paus(?:ing|ed|es|e))\b/iu],
   ['invest', /(?:投资)|\b(?:invest(?:s|ed|ing|ment)?)\b/giu, /^invest(?:s|ed|ing|ment)?/iu],
-  ['finance', /(?:获得[^，,。]{0,8}(?:投资|融资)|完成[^，,。]{0,8}融资|融资)|\b(?:financ(?:e|es|ed|ing)|fundrais(?:e|es|ing)|raised?\s+funding)\b|\brais(?:e|es|ed|ing)\s+(?:US\$|\$|€|£|¥)?\d/giu, /^(?:financ(?:ing|ed|es|e)|fundrais(?:ing|es|e)|rais(?:ing|ed|es|e))\b/iu],
+  ['finance', /(?:获得[^，,。]{0,8}(?:投资|融资)|完成[^，,。]{0,8}融资|融资)|\b(?:financ(?:e|es|ed|ing)|fundrais(?:e|es|ing)|rais(?:e|es|ed|ing)\s+funding|rais(?:e|es|ed|ing))\b/giu, /^(?:financ(?:ing|ed|es|e)|fundrais(?:ing|es|e)|rais(?:ing|ed|es|e))\b/iu],
   ['sign', /(?:签署|签订|签约)|\b(?:sign(?:s|ed|ing))\b/giu, /^sign(?:s|ed|ing)/iu],
   ['sue', /(?:起诉|提起诉讼)|\b(?:su(?:e|es|ed|ing)|file(?:s|d)?\s+(?:a\s+)?lawsuit)\b/giu, /^(?:su(?:ing|ed|es|e)|file(?:s|d)?)\b/iu],
   ['ban', /(?:禁止|禁用)|\b(?:ban(?:s|ned|ning)?|prohibit(?:s|ed|ing)?)\b/giu, /^(?:ban(?:s|ned|ning)?|prohibit(?:s|ed|ing)?)/iu],
@@ -4055,6 +4059,7 @@ const PRODUCT_ENTITY_REGISTRY: Readonly<Record<string, readonly string[]>> = {
   google_sheets: ['google sheets', '谷歌表格'],
   chatgpt: ['chatgpt'], ernie: ['ernie', '文心', '文心一言'], qwen: ['qwen', '通义', '通义千问'],
   hunyuan: ['hunyuan', '混元'], doubao: ['doubao', '豆包'], pangu: ['pangu', '盘古'],
+  grok: ['grok'],
   deepseek: ['deepseek', '深度求索'], glm: ['glm'], minimax: ['minimax'], llama: ['llama'],
   gemma: ['gemma'], mistral: ['mistral'], seed: ['seed'], longcat: ['longcat'],
 };
