@@ -3715,21 +3715,23 @@ const FACT_ACTION_PATTERNS: ReadonlyArray<FactActionPattern> = [
   ['support', /(?:支持|提供)|\b(?:support(?:s|ed)?|provid(?:e|es|ed))\b/giu, /^(?:support(?:ed|s)?|provid(?:ed|es|e))\b/iu],
   ['approve', /(?:获批|批准|通过(?:审核|审批|批准))|\b(?:approv(?:e|es|ed)|gain(?:s|ed)?\s+approval)\b/giu, /^(?:approv(?:ed|es|e)|gain(?:ed|s)?)\b/iu],
   ['reject', /(?:拒绝|否决)|\b(?:reject(?:s|ed)?|refus(?:e|es|ed))\b/giu, /^(?:reject(?:ed|s)?|refus(?:ed|es|e))\b/iu],
-  ['disclose', /(?:披露|说明|文档)|\b(?:disclos(?:e|es|ed)|document(?:s|ed|ation)?|state(?:s|d))\b/giu, /^(?:disclos(?:ed|es|e)|document(?:ation|ed|s)?|state(?:s|d)?)\b/iu],
-  ['release', /(?:发布|推出|上线)|\b(?:releas(?:e|es|ed)|launch(?:es|ed)?)\b/giu, /^(?:releas(?:ed|es|e)|launch(?:es|ed)?)\b/iu],
+  ['disclose', /(?:披露|透露|公开|说明|文档)|\b(?:disclos(?:e|es|ed)|reveal(?:s|ed)?|document(?:s|ed|ation)?|state(?:s|d))\b/giu, /^(?:disclos(?:ed|es|e)|reveal(?:ed|s)?|document(?:ation|ed|s)?|state(?:s|d)?)\b/iu],
+  // release 的写法必须「长的排前面」:否则「宣布推出」会先命中「宣布」再命中「推出」,
+  // 同一个动作被算成两次,谓语反而不原子。
+  ['release', /(?:正式推出|宣布推出|发布|推出|上线|亮相|公测|首发|宣布)|\b(?:releas(?:e|es|ed)|launch(?:es|ed)?|announc(?:e|es|ed|ing)|unveil(?:s|ed|ing)?|introduc(?:e|es|ed|ing)|roll(?:s|ed|ing)?[ -]out|debut(?:s|ed|ing)?|ship(?:s|ped|ping)?|(?:make|makes|made)\s+available|(?:go|goes|went)\s+live)\b/giu, /^(?:releas(?:ed|es|e)|launch(?:es|ed)?|announc(?:ed|es|ing|e)|unveil(?:ed|ing|s)?|introduc(?:ed|es|ing|e)|roll(?:ed|ing|s)?|debut(?:ed|ing|s)?|ship(?:ped|ping|s)?|makes?|made|goes?|went)\b/iu],
   ['request', /(?:请求|呼吁|建议|敦促)|\b(?:request(?:s|ed)?|recommend(?:s|ed)?|urge(?:s|d)?|call(?:s|ed)?\s+for)\b/giu, /^(?:request(?:s|ed)?|recommend(?:s|ed)?|urge(?:s|d)?|call(?:s|ed)?)/iu],
   ['regulatory_require', /(?:法规要求|法案要求|监管要求|要求)|\brequir(?:e|es|ed)\b/giu, /^requir(?:ed|es|e)\b/iu],
   ['mandate', /(?:强制|必须)|\b(?:mandat(?:e|es|ed)|must)\b/giu, /^(?:mandat(?:ed|es|e)|must)\b/iu],
   ['order', /(?:下令|命令)|\b(?:order(?:s|ed))\b/giu, /^order(?:s|ed)/iu],
   ['pause', /(?:停止|暂停)|\b(?:stop(?:s|ped|ping)?|paus(?:e|es|ed|ing))\b/giu, /^(?:stop(?:ping|ped|s)?|paus(?:ing|ed|es|e))\b/iu],
   ['invest', /(?:投资)|\b(?:invest(?:s|ed|ing|ment)?)\b/giu, /^invest(?:s|ed|ing|ment)?/iu],
-  ['finance', /(?:融资)|\b(?:financ(?:e|es|ed|ing)|fundrais(?:e|es|ing)|raised?\s+funding)\b/giu, /^(?:financ(?:ing|ed|es|e)|fundrais(?:ing|es|e)|rais(?:ed|e))\b/iu],
+  ['finance', /(?:获得[^，,。]{0,8}(?:投资|融资)|完成[^，,。]{0,8}融资|融资)|\b(?:financ(?:e|es|ed|ing)|fundrais(?:e|es|ing)|raised?\s+funding)\b|\brais(?:e|es|ed|ing)\s+(?:US\$|\$|€|£|¥)?\d/giu, /^(?:financ(?:ing|ed|es|e)|fundrais(?:ing|es|e)|rais(?:ing|ed|es|e))\b/iu],
   ['sign', /(?:签署|签订|签约)|\b(?:sign(?:s|ed|ing))\b/giu, /^sign(?:s|ed|ing)/iu],
   ['sue', /(?:起诉|提起诉讼)|\b(?:su(?:e|es|ed|ing)|file(?:s|d)?\s+(?:a\s+)?lawsuit)\b/giu, /^(?:su(?:ing|ed|es|e)|file(?:s|d)?)\b/iu],
   ['ban', /(?:禁止|禁用)|\b(?:ban(?:s|ned|ning)?|prohibit(?:s|ed|ing)?)\b/giu, /^(?:ban(?:s|ned|ning)?|prohibit(?:s|ed|ing)?)/iu],
-  ['open_source', /(?:开源)|\b(?:open[ -]?sourc(?:e|es|ed|ing))\b/giu, /^open[ -]?sourc(?:ing|ed|es|e)\b/iu],
+  ['open_source', /(?:开放源码|开源)|\b(?:open[ -]?sourc(?:e|es|ed|ing))\b/giu, /^open[ -]?sourc(?:ing|ed|es|e)\b/iu],
   ['train', /(?:训练)|\b(?:train(?:s|ed|ing))\b/giu, /^train(?:s|ed|ing)/iu],
-  ['partner', /(?:合作)|\b(?:partner(?:s|ed|ing)?|collaborat(?:e|es|ed|ing|ion))\b/giu, /^(?:partner(?:ing|ed|s)?|collaborat(?:ion|ing|ed|es|e))\b/iu],
+  ['partner', /(?:达成合作|合作|联手|携手)|\b(?:partner(?:s|ed|ing)?|collaborat(?:e|es|ed|ing|ion))\b/giu, /^(?:partner(?:ing|ed|s)?|collaborat(?:ion|ing|ed|es|e))\b/iu],
   ['layoff', /(?:裁员)|\b(?:lay(?:s|ing)?\s+off|laid\s+off|job\s+cuts?)\b/giu, /^(?:lay(?:s|ing)?|laid|job)/iu],
   ['decide', /(?:决定)|\b(?:decid(?:e|es|ed|ing))\b/giu, /^decid(?:ing|ed|es|e)\b/iu],
   ['discuss', /(?:讨论|商议|磋商)|\b(?:discuss(?:es|ed|ing)?|deliberat(?:e|es|ed|ing))\b/giu, /^(?:discuss(?:ing|ed|es)?|deliberat(?:ing|ed|es|e))\b/iu],
@@ -3763,21 +3765,21 @@ export const FACT_ACTION_VOCABULARY: ReadonlyArray<FactActionVocabularyEntry> = 
   { action: 'support', zh: ['支持', '提供'], en: ['supports', 'provides'] },
   { action: 'approve', zh: ['批准', '获批'], en: ['approves', 'approved'] },
   { action: 'reject', zh: ['拒绝', '否决'], en: ['rejects', 'refuses'] },
-  { action: 'disclose', zh: ['披露', '说明'], en: ['discloses', 'states'] },
-  { action: 'release', zh: ['发布', '推出', '上线'], en: ['releases', 'launches'] },
+  { action: 'disclose', zh: ['披露', '透露', '公开'], en: ['discloses', 'reveals'] },
+  { action: 'release', zh: ['发布', '推出', '上线', '亮相'], en: ['releases', 'launches', 'announces', 'unveils', 'rolls out'] },
   { action: 'request', zh: ['呼吁', '建议', '敦促'], en: ['requests', 'urges'] },
   { action: 'regulatory_require', zh: ['要求', '监管要求'], en: ['requires'] },
   { action: 'mandate', zh: ['强制', '必须'], en: ['mandates', 'must'] },
   { action: 'order', zh: ['下令', '命令'], en: ['orders', 'ordered'] },
   { action: 'pause', zh: ['暂停', '停止'], en: ['pauses', 'stops'] },
   { action: 'invest', zh: ['投资'], en: ['invests', 'invested'] },
-  { action: 'finance', zh: ['融资'], en: ['financing', 'raised funding'] },
+  { action: 'finance', zh: ['融资', '完成融资'], en: ['raised funding', 'raised $10 million'] },
   { action: 'sign', zh: ['签署', '签订'], en: ['signs', 'signed'] },
   { action: 'sue', zh: ['起诉', '提起诉讼'], en: ['sues', 'filed a lawsuit'] },
   { action: 'ban', zh: ['禁止', '禁用'], en: ['bans', 'prohibits'] },
-  { action: 'open_source', zh: ['开源'], en: ['open-sources', 'open-sourced'] },
+  { action: 'open_source', zh: ['开源', '开放源码'], en: ['open-sources', 'open-sourced'] },
   { action: 'train', zh: ['训练'], en: ['trains', 'trained'] },
-  { action: 'partner', zh: ['合作'], en: ['partners', 'collaborates'] },
+  { action: 'partner', zh: ['合作', '联手', '携手'], en: ['partners', 'collaborates'] },
   { action: 'layoff', zh: ['裁员'], en: ['lays off', 'laid off'] },
   { action: 'decide', zh: ['决定'], en: ['decides', 'decided'] },
   { action: 'discuss', zh: ['讨论', '磋商'], en: ['discusses', 'deliberates'] },
@@ -3830,6 +3832,9 @@ function actionModality(value: string, index: number, surface: string): FactActi
   return 'asserted';
 }
 
+const ANNOUNCEMENT_ACTION_SURFACE = /^(?:宣布|announc)/iu;
+const ANNOUNCEMENT_YIELD_WINDOW = 24;
+
 export function factActionOccurrences(value: string): FactActionOccurrence[] {
   const occurrences: FactActionOccurrence[] = [];
   for (const [action, pattern, englishFiniteHead] of FACT_ACTION_PATTERNS) {
@@ -3848,8 +3853,21 @@ export function factActionOccurrences(value: string): FactActionOccurrence[] {
       });
     }
   }
-  const sorted = occurrences.sort((left, right) => left.index - right.index || right.end - left.end);
+  const ordered = occurrences.sort((left, right) => left.index - right.index || right.end - left.end);
+  // 嵌套匹配只保留最外层:「获得战略投资」既命中 finance 的整体写法又命中 invest 的「投资」,
+  // 「开放源码」既命中 open_source 又命中 open_access 的「开放」—— 内层是同一段文字的一部分,
+  // 不是第二个动作,留着会让本来原子的谓语被判成多动作。
+  const sorted = ordered.filter((occurrence) => !ordered.some((other) =>
+    other !== occurrence
+    && other.index <= occurrence.index && other.end >= occurrence.end
+    && other.end - other.index > occurrence.end - occurrence.index));
   return sorted.filter((occurrence) => {
+    // 通告动词让位:「宣布收购」「announced it will acquire」里,「宣布 / announce」只是宣告
+    // 方式,真正的动作是紧跟其后的那个。后面 24 字符内还有别的动作时丢弃通告匹配;
+    // 「announced Gemini 3.8 Flash」这种后面没有动作的,通告词本身就是发布动作。
+    if (occurrence.action === 'release' && ANNOUNCEMENT_ACTION_SURFACE.test(occurrence.surface)
+      && sorted.some((item) => item !== occurrence && item.index >= occurrence.end
+        && item.index - occurrence.end <= ANNOUNCEMENT_YIELD_WINDOW)) return false;
     if (actionLooksLikeNominalModifier(value, occurrence, sorted)) return false;
     if (occurrence.action === 'mandate' && /^(?:强制|必须)$/u.test(occurrence.surface)) {
       const next = sorted.find((item) => item.index >= occurrence.end && item.action !== 'mandate');
