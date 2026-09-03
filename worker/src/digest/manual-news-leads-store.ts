@@ -2601,6 +2601,17 @@ export async function vouchManualNewsLeadCandidate(
   // 同一句陈述已经担保过（第二步失败后重试，或整轮重放）时跳过写入，直接续做确认。
   const reusable = existing?.policy_version === MANUAL_NEWS_OWNER_VOUCH_POLICY
     && existing.owner_vouch?.statement === statement;
+  const row = await env.DB.prepare(
+    `/* manual_lead:by_id */ SELECT * FROM manual_news_leads WHERE id = ?`,
+  ).bind(id).first<ManualLeadRow>();
+  // 同一个幂等键的整轮重放：版本号照旧是发起时那个，不能拿它当版本冲突。
+  const replayed = !!row && (
+    (row.last_mutation_kind === MANUAL_NEWS_OWNER_VOUCH_MUTATION_KIND
+      && row.last_mutation_idempotency_key === idempotencyKey)
+    || (row.last_mutation_kind === 'confirm' && row.last_mutation_idempotency_key === confirmKey));
+  if (reusable && !replayed && lead.version !== expectedVersion) {
+    return { ok: false, status: 409, error: 'lead_version_conflict', lead };
+  }
   if (!reusable) {
     if (activeVerification) return { ok: false, status: 409, error: 'lead_not_vouchable', lead };
     if (lead.confirmed_at !== null) return { ok: false, status: 409, error: 'lead_already_confirmed', lead };

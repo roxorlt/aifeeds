@@ -4305,6 +4305,11 @@ describe('manual news owner vouch', () => {
     expect(retried).toMatchObject({ ok: true, changed: true, lead: { version: 6, confirmed_at: 101 } });
     expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
       WHERE lead_id = ? AND action = 'vouch_candidate'`).get(state.leadId)).toEqual({ count: 1 });
+
+    // 换一个幂等键、拿早已过期的版本号重放同一句陈述:属于版本冲突,不能靠复用 proof 混过去。
+    await expect(vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, frozen.batch.batch_revision + 1, VOUCH_STATEMENT, 'vouch-key-9', 103,
+    )).resolves.toMatchObject({ ok: false, status: 409, error: 'lead_version_conflict' });
   });
 
   test('rejects an invalid statement with 400 before touching the database', async () => {
