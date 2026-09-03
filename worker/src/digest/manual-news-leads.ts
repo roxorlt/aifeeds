@@ -3788,8 +3788,11 @@ const FACT_ACTION_PATTERNS: ReadonlyArray<FactActionPattern> = [
   // 新增动作(2026-09-03):AI 新闻里高频但词表原来没有的动作。
   ['update', /(?:更新|升级|迭代)|\b(?:updat(?:e|es|ed|ing)|upgrad(?:e|es|ed|ing))\b/giu, /^(?:updat(?:ing|ed|es|e)|upgrad(?:ing|ed|es|e))\b/iu],
   ['deploy', /(?:部署)|\b(?:deploy(?:s|ed|ing)?)\b/giu, /^deploy(?:ing|ed|s)?\b/iu],
+  // 规格给的 appoint 写法里,「加入 / join」与既有的 add 完全重叠(同一段文字会被算成
+  // 两个动作),depart 的「离开 / left / leave」在普通句子里误命中太多,一并没有收录。
   ['appoint', /(?:任命|聘请|出任)|\b(?:appoint(?:s|ed)?|hir(?:e|es|ed))\b/giu, /^(?:appoint(?:ed|s)?|hir(?:ed|es|e))\b/iu],
   ['depart', /(?:离职|辞职)|\b(?:resign(?:s|ed)?|depart(?:s|ed)?|step(?:s|ped)?\s+down)\b/giu, /^(?:resign(?:ed|s)?|depart(?:ed|s)?|step(?:ped|s)?)\b/iu],
+  // reach 的「hit」没收录:裸 hit 在英文里太泛,误命中的代价大于识别收益。
   ['reach', /(?:达到|突破|超过)|\b(?:reach(?:es|ed)?|surpass(?:es|ed)?|exceed(?:s|ed)?)\b/giu, /^(?:reach(?:ed|es)?|surpass(?:ed|es)?|exceed(?:ed|s)?)\b/iu],
   ['warn', /(?:警告)|\b(?:warn(?:s|ed)?)\b/giu, /^warn(?:ed|s)?\b/iu],
   ['test', /(?:测试|试用)|\b(?:test(?:s|ed|ing)?|pilot(?:s|ed)?)\b/giu, /^(?:test(?:ing|ed|s)?|pilot(?:ed|s)?)\b/iu],
@@ -6688,6 +6691,9 @@ const FIRST_PERSON_ACTOR_BINDING_RULES: ReadonlyArray<FirstPersonActorBindingRul
   },
   {
     binding_contract: OFFICIAL_X_ACCOUNT_FIRST_PERSON_ACTOR_BINDING,
+    // 注意:这里用的是内置白名单,不含 env MANUAL_NEWS_OFFICIAL_X_HANDLES 的临时追加项。
+    // env 追加的账号仍能让推文算「一手」,但拿不到第一人称主语替换 —— 有意 fail closed:
+    // 主语替换要改写核验句,只有经过代码评审的账号才够格。
     resolve({ selected, rawQuote, parsedFact }) {
       const account = officialXAccountActorForUrl(selected.url);
       if (!account || !firstPersonFactSubjectMatches(parsedFact, account.actor)) return null;
