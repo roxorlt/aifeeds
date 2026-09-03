@@ -6,6 +6,9 @@ import {
   FACT_ACTION_IDS,
   FACT_ACTION_VOCABULARY,
   factActionOccurrences,
+  isRegeneratableManualLeadAssessmentValidationCode,
+  manualLeadAssessmentValidationFailure,
+  validateManualLeadGeneratedAssessment,
   type ManualNewsEvidence,
 } from './manual-news-leads';
 import { MANUAL_NEWS_PROVIDER_PROMPT_MAX_CHARS } from './manual-news-leads-runtime';
@@ -159,5 +162,139 @@ describe('评估提示词把词表交给模型', () => {
     };
     expect(body.predicate_vocabulary).toHaveLength(FACT_ACTION_VOCABULARY.length);
     expect(body.regeneration.mechanical_instruction).toContain('predicate_vocabulary');
+  });
+});
+
+interface FactShape {
+  subject: string;
+  role: string;
+  predicate: string;
+  object: string;
+  language: 'zh' | 'en';
+  zhSubject: string;
+  zhPredicate: string;
+  zhObject: string;
+}
+
+function assessmentEvidence(text: string): ManualNewsEvidence {
+  return {
+    id: 'ev-official',
+    url: 'https://blog.google/example',
+    source_type: 'official_primary',
+    publisher: 'blog.google',
+    published_at: '2026-09-02T00:00:00Z',
+    retrieved_at: 1,
+    title: text,
+    excerpt: text,
+    claims_supported: [text],
+    reliable: true,
+  };
+}
+
+function generatedAssessmentFor(fact: FactShape) {
+  const text = `${fact.subject} ${fact.predicate} ${fact.object}.`;
+  const projection = {
+    subject: fact.zhSubject,
+    subject_role: fact.role,
+    predicate: fact.zhPredicate,
+    object: fact.zhObject,
+  };
+  return {
+    evidence: [assessmentEvidence(text)],
+    raw: {
+      event_key: 'predicate-vocabulary-acceptance-2026-09-03',
+      event_type: 'product_release',
+      material_update: false,
+      score: 80,
+      recommendation: 'recommended',
+      occurred_at: null,
+      uncertainties: [],
+      matched_event_key: null,
+      source_facts: [{
+        fact_ref: 'fact-01',
+        source_language: fact.language,
+        atomic_fact: {
+          subject: fact.subject,
+          subject_role: fact.role,
+          predicate: fact.predicate,
+          object: fact.object,
+        },
+        evidence_ids: ['ev-official'],
+      }],
+      evidence_dispositions: [{
+        evidence_id: 'ev-official',
+        disposition: 'supports_core',
+        source_fact_refs: ['fact-01'],
+        reason_code: null,
+      }],
+      editorial_projection: {
+        title: { projection_ref: 'title-01', source_fact_refs: ['fact-01'], atomic_fact: projection },
+        summary: [{ projection_ref: 'summary-01', source_fact_refs: ['fact-01'], atomic_fact: projection }],
+      },
+    },
+  };
+}
+
+function validationFailureFor(fact: FactShape) {
+  const { raw, evidence } = generatedAssessmentFor(fact);
+  try {
+    validateManualLeadGeneratedAssessment(raw, evidence);
+    return null;
+  } catch (error) {
+    return manualLeadAssessmentValidationFailure(error);
+  }
+}
+
+const APPLE_CONSIDERED: FactShape = {
+  subject: 'Apple', role: 'organization', predicate: 'considered', object: 'buying Perplexity',
+  language: 'en', zhSubject: 'Apple', zhPredicate: '考虑', zhObject: '收购 Perplexity 的方案',
+};
+
+describe('谓语动作认不出来时的失败码与反馈', () => {
+  test('谓语一个动作都没命中，报 predicate_action_unrecognized 并带上出错槽位原文', () => {
+    const failure = validationFailureFor(APPLE_CONSIDERED);
+    expect(failure?.code).toBe('predicate_action_unrecognized');
+    expect(failure?.path).toBe('source_facts[0].atomic_fact.predicate');
+    expect(failure?.slot_text).toBe('considered');
+    expect(failure?.matched_actions).toEqual([]);
+  });
+
+  test('谓语命中两个动作，维持 non_atomic_source_predicate 并回显命中的动作', () => {
+    const failure = validationFailureFor({
+      subject: 'Google', role: 'organization',
+      predicate: 'released and open-sourced', object: 'Gemma 4 model',
+      language: 'en', zhSubject: 'Google', zhPredicate: '发布并开源', zhObject: 'Gemma 4 模型',
+    });
+    expect(failure?.code).toBe('non_atomic_source_predicate');
+    expect(failure?.path).toBe('source_facts[0].atomic_fact.predicate');
+    expect(failure?.slot_text).toBe('released and open-sourced');
+    expect(failure?.matched_actions).toEqual(['release', 'open_source']);
+  });
+
+  test('predicate_action_unrecognized 可以触发一次重生成', () => {
+    expect(isRegeneratableManualLeadAssessmentValidationCode('predicate_action_unrecognized')).toBe(true);
+  });
+
+  test('重生成提示词回显出错槽位原文、命中的动作与词表提示', () => {
+    const failure = validationFailureFor(APPLE_CONSIDERED)!;
+    const body = JSON.parse(buildManualLeadAssessmentRegenerationPrompt(
+      promptInput, failure.code, failure.path, {
+        slot_text: failure.slot_text, matched_actions: failure.matched_actions,
+      },
+    ).user) as { regeneration: Record<string, unknown> };
+    expect(body.regeneration.failure_slot_text).toBe('considered');
+    expect(body.regeneration.matched_actions).toEqual([]);
+    expect(String(body.regeneration.vocabulary_hint)).toContain('predicate_vocabulary');
+  });
+
+  test('回显的槽位原文过滤控制字符与零宽字符，并截到 160 个 code point', () => {
+    const body = JSON.parse(buildManualLeadAssessmentRegenerationPrompt(
+      promptInput, 'predicate_action_unrecognized', 'source_facts[0].atomic_fact.predicate', {
+        slot_text: `con\u200bside\u202ered${'x'.repeat(200)}`,
+        matched_actions: ['release', 'not_an_action'],
+      },
+    ).user) as { regeneration: Record<string, unknown> };
+    expect(body.regeneration.failure_slot_text).toBe(`considered${'x'.repeat(150)}`);
+    expect(body.regeneration.matched_actions).toEqual(['release']);
   });
 });

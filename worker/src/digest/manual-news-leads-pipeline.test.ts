@@ -942,7 +942,10 @@ describe('manual lead processing pipeline', () => {
     });
 
     const regeneration = JSON.parse(prompts[1].user) as {
-      regeneration: { failure_code: string; failure_path: string; mechanical_instruction: string };
+      regeneration: {
+        failure_code: string; failure_path: string; mechanical_instruction: string;
+        failure_slot_text?: string;
+      };
     };
     expect(regeneration.regeneration).toMatchObject({
       failure_code: 'invalid_claim_subject_role',
@@ -1034,7 +1037,15 @@ describe('manual lead processing pipeline', () => {
       failure_path: 'source_facts[0].atomic_fact.object',
     });
     expect(regeneration.regeneration.mechanical_instruction).toContain('删除非核心背景');
-    expect(prompts[1].user).not.toContain('because of security concerns');
+    // 2026-09-03 起只回显「出错的那一个槽位」原文（模型看不到自己写错哪一段就只能瞎猜），
+    // 上一次输出的其它部分仍然一律不回喂。
+    expect(regeneration.regeneration.failure_slot_text)
+      .toBe('employees from using Claude Code, because of security concerns');
+    expect(prompts[1].user.split('because of security concerns').length - 1).toBe(1);
+    expect(Object.keys(regeneration.regeneration).sort()).toEqual([
+      'failure_code', 'failure_path', 'failure_slot_text', 'instruction',
+      'matched_actions', 'mechanical_instruction', 'mode',
+    ]);
     expect(memory.transitionPatches).toContainEqual(expect.objectContaining({
       audit_metadata: expect.objectContaining({
         assessment_generation_attempts: 2,

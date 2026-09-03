@@ -2122,9 +2122,12 @@ describe('manual news lead domain', () => {
       failure = error;
     }
 
+    // 失败反馈自 2026-09-03 起额外带上出错槽位原文与命中的动作（用于重生成提示词）。
     expect(manualLeadAssessmentValidationFailure(failure)).toEqual({
       code: expectedCode,
       path,
+      slot_text: invalidValue.normalize('NFKC').replace(/\s+/gu, ' ').trim(),
+      matched_actions: expect.any(Array),
     });
   });
 
@@ -2140,6 +2143,8 @@ describe('manual news lead domain', () => {
     expect(manualLeadAssessmentValidationFailure(failure)).toEqual({
       code: 'non_atomic_source_object',
       path: 'source_facts[0].atomic_fact.object',
+      slot_text: 'employees launch Claude Code train GPT 5',
+      matched_actions: ['release'],
     });
   });
 

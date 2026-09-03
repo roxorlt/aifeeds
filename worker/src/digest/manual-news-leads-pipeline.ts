@@ -742,6 +742,12 @@ export async function processManualNewsLead(
                 prompt = cycle.acquired_call
                   ? buildManualLeadAssessmentRegenerationPrompt(
                     promptInput, validationFailure.code, validationFailure.path,
+                    // 出错槽位原文 + 命中的动作只回喂给模型,不落库(审计行的形状不变)。
+                    {
+                      ...(validationFailure.slot_text ? { slot_text: validationFailure.slot_text } : {}),
+                      ...(validationFailure.matched_actions
+                        ? { matched_actions: validationFailure.matched_actions } : {}),
+                    },
                   )
                   : null;
                 continue;
