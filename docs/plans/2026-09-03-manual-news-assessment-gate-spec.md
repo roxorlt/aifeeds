@@ -187,6 +187,13 @@ HMAC 域 `manual-news-owner-vouch-hmac-v1\0`，`canonical_digest = sha256Hex(dom
 
 ---
 
+## 4.5 落地记录（2026-09-03 晚）
+
+- PR #243（方案 1 + 2）、PR #242（方案 3 云端）、PR #244（追加修复）均已合并并由 CI 部署 prod；面板代理 v18 与渲染 release `613da866…`（c78e233）已部署，页面在 9/4 首次 finalize 渲染时生效。
+- **PR #244 的教训**：#243 给推文证据加的完整性核对拿 `sha256(excerpt)` 比 `audit.body_sha256`，但网关签的 `body_sha256` 覆盖的是整个 JSON 响应体（取证时已由 `parseTweetEvidenceAudit` 校验、不落库），excerpt 只是 `document.text`，真实推文证据永远失败（prod 409 `lead_not_vouchable`）。#243 的测试夹具把 `body_sha256` 设成正文哈希才绿。修正为以已验签审计为锚点；后续加固见 TODO（网关 `text_sha256`）。
+- prod 验收：线索 `ml-20260903-9f68943abb87`（@OfficialLoganK 推文，`assessment_validation_failed`）`vouch-candidate` → 200，进入 9/3 候选批次 V2（`owner_vouched_v1`，标题即 owner 陈述）。
+- 与规格的偏离：2.3 的核验句改用 `We've released …`（原句「to all users today」触发既有关系校验）；1.3 放弃 `integrate`；3.4 `item_projection` 增加 `source`；3.5#4 不做跨类排序偏移；页面开表单按钮与提交按钮分离。
+
 ## 5. 验收（主会话）
 
 1. staging：`wrangler deploy --env staging` 后，用 `Bearer DAILY_NEWS_REVIEW_SECRET`（staging 值）提交 X 链接线索与文字线索，观察 `manual_news_assessment_generation_revisions_v2` 校验码分布变化；对 `needs_review` 线索调用 `vouch-candidate` 进入候选池并出现在 `daily-news-review` 候选里。

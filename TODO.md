@@ -17,6 +17,15 @@
 - [ ] 发布前：staging 按序执行 migration 033、034，配置每环境独立且至少 32 UTF-8 bytes 的 `MANUAL_NEWS_VERIFICATION_SECRET`，部署并验证 Worker Workflow 与 HK；确认无误后按同序发布 production。
 - [ ] 发布后：通过工作台分别录入 Anthropic 水印/C2PA 文档线索和 Bernie Sanders 致 AI 公司负责人公开信线索，核对证据范围，不能把后者写成有约束力的国会命令。
 
+**9/3 评估门禁修复（PR #242 担保确认 + PR #243 词表提示词/官方 X 账号白名单，规格 `docs/plans/2026-09-03-manual-news-assessment-gate-spec.md`）残余项**：
+- [ ] 观察 9/4 起 `manual_news_assessment_generation_revisions_v2` 的 `validation_code` 分布：谓语类失败应明显下降；若 `non_atomic_source_assembled` / `_object` / `evidence_disposition_*` 仍是主力，下一轮修对象槽与证据处置的提示词
+- [ ] ~~补一条「推文证据线索走 `vouch-candidate`」的 D1 级测试~~ → PR-C（`cc/20260903-tweet-evidence-digest-fix`）处理：#243 的推文分支把 excerpt 与 `body_sha256`（网关整个 JSON 响应体哈希）比对，真实推文证据永远失败（prod 409 `lead_not_vouchable`）；改为以已验签审计为完整性锚点 + 真实语义夹具
+- [ ] 加固：网关 `signTweetAudit` 在签名审计里加 `text_sha256`（推文正文哈希），云端先接受可选字段、再网关下发，使推文 excerpt 也有可复核的签名摘要（当前只有网页证据的 `proof_excerpt` 有）
+- [ ] staging 的 `DAILY_NEWS_REVIEW_SECRET` 本地 `.secrets/aifeeds-staging.env` 缺失（codex 配置未同步），补齐后 staging 才能做补录接口功能验收
+- [ ] 文字线索搜索取证仍缺密钥：`BAIDU_SEARCH_API_KEY`/`QIANFAN_APPBUILDER_API_KEY`、`EXA_API_KEY`、`BRAVE_SEARCH_API_KEY` 均未配置；9/3 晚 ScrapeBadger 搜索接口本身故障（Google 搜索 521、推文搜索超时）
+- [ ] 担保线索不参与跨天事件去重、事件身份只绑主证据 URL（PR #242 已知限制）；`integrate` 动作因既有逗号复合防线放弃（PR #243）
+- [ ] latest 页面担保按钮随 9/4 首次 finalize 渲染生效（render release 613da866 已上线）；上线后核对 `assessment_validation_failed` 原因文案与错误码中文文案（模板字面量反斜杠修复）
+
 ### A9. Admin 看板渐进加载（2026-07-24，已上线）
 
 - [x] 生产浏览器抓包复现：HTML / ECharts 缓存命中且页面壳约 0.5 秒完成，但页面随后同一时刻
@@ -345,6 +354,16 @@
 ---
 
 ## 待做
+
+### 0. 9/2 D1 超限事故修复的残余项（低优，PR #237/#238 已上线主修）
+
+- JS 侧新闻打分 `scoreNewsCandidatesForDigest` 是 O(n²)（两两比事件指纹）：生产 ~140 条无压力，候选发现安全阀（5000）被顶满时 25M 次比较自身成 CPU 风险；且安全阀命中现在只 `console.warn` 静默丢最旧候选，源变多后应升级为告警
+- 首败告警的去重只在单 isolate 内有效，Workflows 重试跨 isolate 时同阶段最多收 3 条（取舍：宁重复不静默）
+- 阶段看门狗依赖 Worker 的 scheduled handler 本身活着，整体挂掉时无兜底——需 CF 侧 cron 健康监控
+- finalize 挂起状态只在日志/告警/workflow 返回值里，未写 D1 阶段状态表，admin 看板不可见
+- HK 面板侧「兜底已出片/人审暂不可用」诚实状态 + 审核卡片显示「首见时间/后续报道」标注：规格在 dailyVideo 仓 `docs/plans/2026-09-02-fallback-honest-state-spec.md`，待 codex 或后续会话实施（云端字段 `published_at` / `event_first_seen_at` / `event_previously_pushed` 已由 PR #239/#240 提供）
+- **事件指纹覆盖率缺口**：近 30 天相关新闻中 25% 没有 `event_fingerprint`（如 9/1 那篇 Gemini 3.7 合集稿），这些条目在事件级去重（PR #240）里只能降权不能剔除。查清指纹生成为何跳过（LLM 未返回 confidence 时默认 0.5？还是整条抽取步骤缺失），补回填后剔除规则才能全覆盖
+- 官方源的跨天去重放行通道（`suppressCrossDayRepeatedNewsEvents` 里 `officialSourceWeight > 0` 直接放行，无事件年龄上限）本身未动，PR #240 是在其后加判定兜住；若要收紧，那里是第二个落点
 
 ### 5. metrics 流水线统一改造
 
