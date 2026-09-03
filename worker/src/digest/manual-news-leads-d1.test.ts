@@ -59,6 +59,7 @@ import {
   testManualNewsResponseKeyring,
   testManualNewsVerificationKeyring,
   withSignedArticleTextV2Audit,
+  withSignedTweetEvidenceAudit,
 } from './manual-news-signed-evidence.test-fixture';
 
 class SqliteD1 {
@@ -4080,13 +4081,21 @@ describe('manual lead D1-backed dedupe', () => {
 const VOUCH_STATEMENT = 'OpenAI 发布 GPT-6 并向 Plus 用户开放。';
 const VOUCH_EXCERPT = 'OpenAI is rolling out GPT-6 to Plus users today.';
 const VOUCH_URL = 'https://openai.com/index/gpt-6/';
+const VOUCH_TWEET_URL = 'https://x.com/OpenAI/status/1234567890123456789';
 
-async function vouchFixture(status: 'needs_review' | 'failed' = 'needs_review', evidenceCount = 1) {
+async function vouchFixture(
+  status: 'needs_review' | 'failed' = 'needs_review',
+  evidenceCount = 1,
+  // 'tweet' 走推文证据（audit 是 tweet_evidence_v1，body_sha256 是整个 JSON 响应体的
+  // 哈希，与 sha256(excerpt) 不同）—— 2026-09-03 vouch-candidate 409 的真实形状。
+  evidenceKind: 'article' | 'tweet' = 'article',
+) {
   const state = fixture('verifying', 4);
   state.db.sqlite.prepare('DELETE FROM manual_news_leads').run();
   state.db.sqlite.prepare('DELETE FROM manual_news_evidence').run();
+  const leadUrl = evidenceKind === 'tweet' ? VOUCH_TWEET_URL : VOUCH_URL;
   const submitted = await submitManualNewsLead(state.env, {
-    date: '2026-08-28', text: 'OpenAI 发布 GPT-6', url: VOUCH_URL, note: '',
+    date: '2026-08-28', text: 'OpenAI 发布 GPT-6', url: leadUrl, note: '',
   }, 'submit-owner-vouch', 10);
   state.db.sqlite.prepare(`UPDATE manual_news_leads SET status = ?, version = 4,
     processing_owner = NULL, processing_attempt = 0,
@@ -4096,15 +4105,23 @@ async function vouchFixture(status: 'needs_review' | 'failed' = 'needs_review', 
     status === 'failed' ? 'invalid_claim_predicate' : null,
     submitted.lead.id,
   );
-  const evidence = Array.from({ length: evidenceCount }, (_, index) => withSignedArticleTextV2Audit({
-    id: index === 0 ? 'ev-openai-gpt-6' : `ev-openai-mirror-${index}`,
-    url: index === 0 ? VOUCH_URL : `${VOUCH_URL}mirror-${index}/`,
-    source_type: index === 0 ? 'official_primary' : 'other',
-    publisher: index === 0 ? 'OpenAI' : 'mirror.example.com',
-    published_at: '2026-08-28T00:00:00.000Z', retrieved_at: 11 + index,
-    title: 'Introducing GPT-6', excerpt: VOUCH_EXCERPT,
-    claims_supported: [VOUCH_EXCERPT], reliable: index === 0,
-  }));
+  const evidence = evidenceKind === 'tweet'
+    ? [withSignedTweetEvidenceAudit({
+      id: 'ev-openai-gpt-6-tweet', url: VOUCH_TWEET_URL,
+      source_type: 'official_primary', publisher: 'X @OpenAI',
+      published_at: '2026-08-28T00:00:00.000Z', retrieved_at: 11,
+      title: 'OpenAI', excerpt: VOUCH_EXCERPT,
+      claims_supported: [VOUCH_EXCERPT], reliable: true,
+    } as ManualNewsEvidence)]
+    : Array.from({ length: evidenceCount }, (_, index) => withSignedArticleTextV2Audit({
+      id: index === 0 ? 'ev-openai-gpt-6' : `ev-openai-mirror-${index}`,
+      url: index === 0 ? VOUCH_URL : `${VOUCH_URL}mirror-${index}/`,
+      source_type: index === 0 ? 'official_primary' : 'other',
+      publisher: index === 0 ? 'OpenAI' : 'mirror.example.com',
+      published_at: '2026-08-28T00:00:00.000Z', retrieved_at: 11 + index,
+      title: 'Introducing GPT-6', excerpt: VOUCH_EXCERPT,
+      claims_supported: [VOUCH_EXCERPT], reliable: index === 0,
+    }));
   for (const item of evidence) {
     state.db.sqlite.prepare(`INSERT INTO manual_news_evidence (
       lead_id, evidence_id, response_key_id, url, source_type, publisher, published_at, retrieved_at,
@@ -4174,6 +4191,38 @@ describe('manual news owner vouch', () => {
       candidate_authorization: 'owner_vouched_v1',
       statement: VOUCH_STATEMENT,
       canonical_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+  });
+
+  test('vouches a lead whose only evidence is a tweet (回归:2026-09-03 prod 409)', async () => {
+    // 推文证据的 body_sha256 覆盖整个 JSON 响应体，与 sha256(excerpt) 不同。
+    // 旧断言把这条线索一路挡到 409 lead_not_vouchable，owner 只看得到「不能担保」。
+    const state = await vouchFixture('needs_review', 1, 'tweet');
+    installSourceSupportReviewSchema(state);
+    state.db.sqlite.prepare(`DELETE FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28'`).run();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const result = await vouchManualNewsLeadCandidate(
+        state.env, state.leadId, 4, 0, VOUCH_STATEMENT, 'vouch-key-tweet', 100,
+      );
+      expect(result).toMatchObject({
+        ok: true, changed: true,
+        lead: { status: 'needs_review', version: 6, confirmed_at: 100 },
+      });
+      // 证据链没被拒 → 不该出现那条诊断日志。
+      expect(warn).not.toHaveBeenCalledWith(
+        '[manual-news-vouch] evidence chain rejected', expect.anything(),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+    expect(state.db.sqlite.prepare(`SELECT policy_version, status FROM
+      manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId))
+      .toMatchObject({ policy_version: 'owner_vouched_v1', status: 'active' });
+    expect(state.db.sqlite.prepare(`SELECT title, url FROM items WHERE id = ?`)
+      .get(`blog:manual:${state.leadId}`)).toMatchObject({
+      title: VOUCH_STATEMENT, url: VOUCH_TWEET_URL,
     });
   });
 

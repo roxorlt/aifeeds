@@ -354,7 +354,10 @@ describe('推文证据的正文完整性', () => {
     const evidence = await extractManualNewsEvidence(tweetDocument('GoogleAI'));
     const tamperedAudit = {
       ...evidence!,
-      fetch_audit: { ...(evidence!.fetch_audit as Record<string, unknown>), body_sha256: 'e'.repeat(64) },
+      fetch_audit: {
+        ...(evidence!.fetch_audit as unknown as Record<string, unknown>),
+        body_sha256: 'e'.repeat(64),
+      },
     } as ManualNewsEvidence;
     await expect(sourceSupportProofFor(tamperedAudit, TWEET_TEXT))
       .rejects.toThrow('manual_news_evidence_response_hmac_invalid');
