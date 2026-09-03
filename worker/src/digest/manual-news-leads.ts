@@ -6039,7 +6039,7 @@ export function manualLeadFactVerificationErrorCode(error: unknown): string {
   return FACT_VERIFICATION_ERROR_CODES.has(code) ? code : 'invalid_fact_verification';
 }
 
-function canonicalJson(value: unknown): string {
+export function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   const object = value as Record<string, unknown>;
@@ -6198,7 +6198,7 @@ function canonicalVerificationPayload(
   });
 }
 
-function canonicalEvidence(evidence: readonly ManualNewsEvidence[]) {
+export function canonicalEvidence(evidence: readonly ManualNewsEvidence[]) {
   return [...evidence].sort((left, right) => left.id.localeCompare(right.id)).map((item) => ({
     id: item.id,
     response_key_id: item.response_key_id ?? null,
@@ -6757,7 +6757,7 @@ function invalidManualNewsEvidenceProvenance(): never {
   throw new Error('manual_news_evidence_provenance_invalid');
 }
 
-function hasExactKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+export function hasExactKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
   if (!isPlainObject(value)) return false;
   const actual = Object.keys(value);
   return actual.length === keys.length && actual.every((key) => keys.includes(key));
@@ -7266,7 +7266,7 @@ export function assertManualNewsEvidenceSet(evidence: readonly ManualNewsEvidenc
   }
 }
 
-async function assertManualNewsEvidenceBodyDigests(
+export async function assertManualNewsEvidenceBodyDigests(
   evidence: readonly ManualNewsEvidence[],
   responseKeys: ManualNewsKeyring,
 ): Promise<void> {
@@ -7306,7 +7306,7 @@ function bytesToHex(bytes: ArrayBuffer): string {
   return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-async function sha256Hex(value: string): Promise<string> {
+export async function sha256Hex(value: string): Promise<string> {
   return bytesToHex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)));
 }
 
@@ -7327,7 +7327,7 @@ export function isManualNewsVerificationSecretConfigured(secret: unknown): secre
   return typeof secret === 'string' && /^[a-f0-9]{64}$/.test(secret);
 }
 
-async function hmacSha256Hex(secret: string, value: string): Promise<string> {
+export async function hmacSha256Hex(secret: string, value: string): Promise<string> {
   assertVerificationSecret(secret);
   const key = await crypto.subtle.importKey(
     'raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
@@ -7376,7 +7376,7 @@ export async function createManualLeadVerificationProof(
   };
 }
 
-function constantTimeHexEqual(left: string, right: string): boolean {
+export function constantTimeHexEqual(left: string, right: string): boolean {
   if (left.length !== right.length) return false;
   let difference = 0;
   for (let index = 0; index < left.length; index += 1) {
