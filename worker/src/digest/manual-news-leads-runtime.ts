@@ -3,6 +3,9 @@ import { callDeepSeekJson, DEEPSEEK_PRO } from '../hf-paper/llm';
 import {
   deriveManualNewsRetrievalOperationId,
   fetchPublicDocument,
+  fetchTweetEvidence,
+  isTweetEvidenceAudit,
+  parseTwitterStatusUrl,
   validateCompleteArticleText,
   searchPublicWeb,
   type PublicDocument,
@@ -263,6 +266,30 @@ export async function extractManualNewsEvidence(
   hint?: ManualSearchResult,
   now = Date.now(),
 ): Promise<ManualNewsEvidence | null> {
+  // 推文证据(2026-09-03):走 /v1/tweet 取回,来源标注要与网页证据可区分。
+  // source_type 仍是 'other' / reliable=false —— 一条推文的权威性取决于**账号**而不是域名,
+  // x.com 这个 host 本身不构成一手信源。这是有意的:推文能进证据链、能被 owner 看到,
+  // 但不会自动把线索抬进「一手/独立」档位。
+  if (isTweetEvidenceAudit(document.fetch_audit)) {
+    const audit = document.fetch_audit;
+    const handle = parseTwitterStatusUrl(audit.canonical_url)?.handle || '';
+    const excerpt = document.excerpt;
+    if (!excerpt.trim()) return null;
+    return {
+      id: await evidenceId(audit.canonical_url),
+      response_key_id: document.response_key_id,
+      url: audit.canonical_url,
+      source_type: 'other',
+      publisher: compact(handle ? `X @${handle}` : 'X/Twitter 推文', 120),
+      published_at: document.published_at ?? null,
+      retrieved_at: now,
+      title: compact(document.title || (handle ? `X @${handle} 的推文` : 'X/Twitter 推文'), 220),
+      excerpt,
+      claims_supported: [excerpt],
+      reliable: false,
+      fetch_audit: audit,
+    };
+  }
   const providerPublisher = trustedWeChatIndependentPublisher(document);
   const identity = providerPublisher
     ? { source_type: 'independent_media' as const, reliable: true, publisher: providerPublisher }
@@ -423,6 +450,23 @@ export function createManualNewsLeadRuntimeAdapters(
           retrievalGeneration: context!.retrieval_generation,
         } : {}),
       });
+    },
+    fetchTweet: async (url) => {
+      const tweet = await fetchTweetEvidence(url, { service: researchService(env, deps.researchFetcher) });
+      // 把推文取证结果整形成 PublicDocument,好让证据链后续环节零改动地消费它。
+      return {
+        url: tweet.canonical_url,
+        content_type: 'application/json',
+        extraction: 'tweet_api',
+        excerpt: tweet.text,
+        redirects: 0,
+        fetch_audit: tweet.fetch_audit,
+        response_key_id: tweet.response_key_id,
+        title: tweet.author || (tweet.author_handle ? `X @${tweet.author_handle}` : ''),
+        publisher: tweet.author_handle ? `X @${tweet.author_handle}` : 'X/Twitter 推文',
+        // 用推文自己的发布时间,不用取证时刻。
+        published_at: tweet.published_at,
+      };
     },
     extract: (document, hint) => extractManualNewsEvidence(document, hint),
     assess: callProJson('assessment'),

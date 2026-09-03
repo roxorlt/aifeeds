@@ -20,6 +20,7 @@ import {
   type ManualNewsEvidence,
 } from './manual-news-leads';
 import type { ManualNewsLeadRecord, ManualNewsLeadSummary } from './manual-news-leads-pipeline';
+import { isTweetEvidenceAudit } from '../security/safe-url-fetch';
 
 const MAX_BODY_BYTES = 16 * 1024;
 const BASE_PATH = '/api/digest/daily-news-leads';
@@ -56,10 +57,16 @@ function manualNewsLeadSummary(lead: ManualNewsListInput) {
 }
 
 function manualNewsEvidenceDetail(item: ManualNewsEvidence) {
+  // 证据种类从已持久化的 fetch_audit 派生,不新增持久化字段:
+  // 推文证据的 audit 形状与网页直抓完全不同(kind='tweet_api',无 hops/IP),
+  // 呈现层据此把「推文证据」与「网页证据」分开,而不是让 owner 从 URL 里猜。
+  const tweet = isTweetEvidenceAudit(item.fetch_audit);
   return {
     id: item.id,
     url: item.url,
     source_type: item.source_type,
+    evidence_kind: tweet ? 'tweet_api' : 'web',
+    source_label: tweet ? 'X/Twitter 推文（ScrapeBadger）' : '网页',
     publisher: item.publisher,
     published_at: item.published_at,
     retrieved_at: item.retrieved_at,

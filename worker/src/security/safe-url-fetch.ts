@@ -61,7 +61,7 @@ export interface TrustedResearchService {
 export interface PublicDocument {
   url: string;
   content_type: string;
-  extraction: 'html' | 'article_text' | 'provider_article_text' | 'text' | 'json' | 'pdf_text';
+  extraction: 'html' | 'article_text' | 'provider_article_text' | 'tweet_api' | 'text' | 'json' | 'pdf_text';
   excerpt: string;
   redirects: number;
   fetch_audit: ManualNewsFetchAudit;
@@ -174,7 +174,344 @@ export interface ProviderRetrievalAudit {
   document?: never;
 }
 
-export type ManualNewsFetchAudit = DocumentFetchAudit | ProviderRetrievalAudit;
+export type ManualNewsFetchAudit = DocumentFetchAudit | ProviderRetrievalAudit | TweetEvidenceAudit;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 推文取证（POST /v1/tweet）—— 2026-09-03
+//
+// 为什么是独立的一条路而不是复用 /v1/document:
+// /v1/document 的 audit 断言「我按 DNS 解析拿到这个 IP、我连了这个 IP、正文来自它」,
+// 每个 hop 都要 validated_ip === connected_ip 且是公网地址。推文取证走的是第三方 API
+// (ScrapeBadger),根本不存在「连到 x.com 的某个 IP」这件事。把它塞进 /v1/document 只有
+// 两条路:伪造 IP 字段(伪造一份会被 HMAC 签名的来源记录),或放宽对所有 URL 都生效的
+// audit 校验。两条都不可接受,所以推文证据用自己的 audit 形状如实描述来源。
+//
+// 契约:dailyVideo 仓 docs/plans/2026-09-03-tweet-evidence-endpoint-contract.md
+// ⚠️ 这里刻意**不复用** parseFetchAudit —— 它见到没有 hops 的 audit 会直接
+// `unsafe_gateway_audit:invalid_schema` 拒掉。签名机制与文档 v2 路径同一套。
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TWEET_EVIDENCE_PROTOCOL = 'tweet_evidence_v1';
+const TWEET_EVIDENCE_PROVIDERS = new Set(['scrapebadger']);
+/** audit.fetched_at 相对本地时钟的允许偏差,与文档 v2 路径同量级。 */
+const TWEET_EVIDENCE_MAX_SKEW_MS = 5 * 60_000;
+const TWEET_EVIDENCE_MAX_FUTURE_MS = 30_000;
+const TWEET_EVIDENCE_MAX_BYTES = 512 * 1024;
+
+export interface TweetEvidenceAudit {
+  kind: 'tweet_api';
+  provider: 'scrapebadger';
+  tweet_id: string;
+  requested_url: string;
+  canonical_url: string;
+  fetched_at: string;
+  provider_status: number;
+  // 云端始终带 nonce/timestamp 请求,网关必须回签名 audit,因此签名字段一律必填。
+  // 未签名的 audit 在 parseTweetEvidenceAudit 里直接判为 signature_required。
+  protocol_version: 'tweet_evidence_v1';
+  request_nonce: string;
+  request_timestamp: string;
+  body_sha256: string;
+  response_hmac: string;
+  /** 直抓 / provider 专属字段绝不出现在推文证据里(也让联合类型上的属性访问可判别)。 */
+  hops?: never;
+  document?: never;
+  proof_excerpt?: never;
+  extraction?: never;
+  retrieval_type?: never;
+  final_url?: never;
+  response_profile?: never;
+  response_hmac_contract?: never;
+}
+
+export interface TweetEvidence {
+  tweet_id: string;
+  canonical_url: string;
+  author: string;
+  author_handle: string;
+  /** 推文自己的发布时间,已归一成 ISO;无法解析时为 null。 */
+  published_at: string | null;
+  /** 提供方原样返回的发布时间字符串(Twitter 格式),留作证据原文。 */
+  published_at_raw: string;
+  language: string;
+  text: string;
+  images: string[];
+  metrics: Record<string, number>;
+  fetch_audit: TweetEvidenceAudit;
+  response_key_id: string;
+}
+
+export interface TwitterStatusUrl {
+  tweetId: string;
+  handle: string;
+  canonicalUrl: string;
+}
+
+/**
+ * host 为 x.com / twitter.com（允许 www. / mobile. 前缀）、path 形如 /{user}/status/{数字 id}。
+ * 与网关侧 parseTwitterStatusUrl 同一判定,是 pipeline 分流与 audit 校验共用的唯一口径。
+ */
+export function parseTwitterStatusUrl(input: string): TwitterStatusUrl | null {
+  let url: URL;
+  try { url = validatePublicHttpUrl(input); } catch { return null; }
+  const host = normalizedHostname(url.hostname).replace(/^(?:www|mobile)\./, '');
+  if (host !== 'x.com' && host !== 'twitter.com') return null;
+  const match = /^\/([A-Za-z0-9_]{1,20})\/status\/(\d{1,25})\/?$/.exec(url.pathname);
+  if (!match) return null;
+  const [, handle, tweetId] = match;
+  return { tweetId, handle, canonicalUrl: `https://x.com/${handle}/status/${tweetId}` };
+}
+
+/** 联合类型判别器:推文 audit 与直抓/provider audit 没有共用字段,用 kind 区分。 */
+export function isTweetEvidenceAudit(
+  audit: ManualNewsFetchAudit | null | undefined,
+): audit is TweetEvidenceAudit {
+  return (audit as { kind?: unknown } | null | undefined)?.kind === 'tweet_api';
+}
+
+export function isTwitterStatusUrl(input: string): boolean {
+  return parseTwitterStatusUrl(input) !== null;
+}
+
+export async function verifyTweetEvidenceAuditResponseHmac(
+  audit: TweetEvidenceAudit,
+  responseSecret: string,
+): Promise<boolean> {
+  if (!/^[a-f0-9]{64}$/.test(responseSecret)
+    || !/^[a-f0-9]{64}$/.test(audit.response_hmac || '')) return false;
+  const { response_hmac: suppliedHmac, ...unsignedAudit } = audit;
+  // 与 signV2DocumentAudit 逐字一致:无域分隔,对去掉 response_hmac 的整个对象做 canonicalJson。
+  return verifyResponseHmac(responseSecret, unsignedAudit, suppliedHmac);
+}
+
+/**
+ * 独立的 tweet audit 解析器 —— 与 parseFetchAudit 没有任何共用分支。
+ * 校验:严格键集合、kind、provider 白名单、requested_url 与请求 URL 逐字一致、
+ * canonical_url 是合法 x.com status 链接、tweet_id 与两个 URL 内的 id 一致、
+ * fetched_at 是合法 ISO 且与本地时钟偏差合理;带签名时再验 HMAC 与 body 摘要。
+ */
+async function parseTweetEvidenceAudit(
+  response: Response,
+  requested: URL,
+  bodyText: string,
+  protocol: { nonce: string; requestTimestamp: string; now: number },
+  responseKeys: { currentKeyId: string; keys: ReadonlyMap<string, string> },
+): Promise<{ audit: TweetEvidenceAudit; responseKeyId: string }> {
+  const encoded = response.headers.get('X-AIFeeds-Tweet-Audit') || '';
+  if (!encoded || encoded.length > 8_192) throw new Error('unsafe_tweet_audit:missing');
+  let raw: unknown;
+  try { raw = JSON.parse(decodeURIComponent(encoded)); } catch { throw new Error('unsafe_tweet_audit:invalid_json'); }
+
+  const baseKeys = ['kind', 'provider', 'tweet_id', 'requested_url', 'canonical_url', 'fetched_at', 'provider_status'];
+  const signedKeys = [...baseKeys, 'protocol_version', 'request_nonce', 'request_timestamp', 'body_sha256', 'response_hmac'];
+  const signed = strictObject(raw, signedKeys);
+  if (!signed && !strictObject(raw, baseKeys)) throw new Error('unsafe_tweet_audit:invalid_schema');
+  const audit = raw as Record<string, unknown>;
+
+  if (audit.kind !== 'tweet_api') throw new Error('unsafe_tweet_audit:kind');
+  if (typeof audit.provider !== 'string' || !TWEET_EVIDENCE_PROVIDERS.has(audit.provider)) {
+    throw new Error('unsafe_tweet_audit:provider');
+  }
+  if (typeof audit.requested_url !== 'string' || audit.requested_url !== requested.toString()) {
+    throw new Error('unsafe_tweet_audit:request_mismatch');
+  }
+  const canonical = typeof audit.canonical_url === 'string' ? parseTwitterStatusUrl(audit.canonical_url) : null;
+  if (!canonical || canonical.canonicalUrl !== audit.canonical_url) {
+    throw new Error('unsafe_tweet_audit:canonical_url');
+  }
+  const requestedStatus = parseTwitterStatusUrl(audit.requested_url);
+  if (typeof audit.tweet_id !== 'string' || !/^\d{1,25}$/.test(audit.tweet_id)
+    || audit.tweet_id !== canonical.tweetId
+    || !requestedStatus || requestedStatus.tweetId !== audit.tweet_id) {
+    throw new Error('unsafe_tweet_audit:tweet_id');
+  }
+  const fetchedAt = canonicalIsoTimestamp(audit.fetched_at);
+  if (!fetchedAt
+    || fetchedAt.timestamp > protocol.now + TWEET_EVIDENCE_MAX_FUTURE_MS
+    || protocol.now - fetchedAt.timestamp > TWEET_EVIDENCE_MAX_SKEW_MS) {
+    throw new Error('unsafe_tweet_audit:fetched_at');
+  }
+  if (typeof audit.provider_status !== 'number' || !Number.isSafeInteger(audit.provider_status)
+    || audit.provider_status < 100 || audit.provider_status > 599) {
+    throw new Error('unsafe_tweet_audit:provider_status');
+  }
+
+  // 云端始终带 nonce/timestamp 请求,因此网关必须回签名 audit。收到未签名的 audit 说明
+  // 网关没配 response secret 或被中间人剥掉了签名 —— 两种都不能当作有效证据。
+  if (!signed) throw new Error('unsafe_tweet_audit:signature_required');
+  if (audit.protocol_version !== TWEET_EVIDENCE_PROTOCOL
+    || audit.request_nonce !== protocol.nonce
+    || audit.request_timestamp !== protocol.requestTimestamp
+    || typeof audit.body_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(audit.body_sha256)
+    || typeof audit.response_hmac !== 'string' || !/^[a-f0-9]{64}$/.test(audit.response_hmac)) {
+    throw new Error('unsafe_tweet_audit:protocol');
+  }
+  if (await sha256Hex(bodyText) !== audit.body_sha256) throw new Error('unsafe_tweet_audit:body_digest');
+  const typed = audit as unknown as TweetEvidenceAudit;
+  // 与文档路径同款:对整个 keyring 逐个试,记录命中的 key id(支持密钥轮换期的历史 key)。
+  for (const [keyId, secret] of responseKeys.keys) {
+    if (await verifyTweetEvidenceAuditResponseHmac(typed, secret)) return { audit: typed, responseKeyId: keyId };
+  }
+  throw new Error('unsafe_tweet_audit:signature');
+}
+
+function tweetString(value: unknown, max: number): string {
+  return typeof value === 'string' && value.length <= max ? value : '';
+}
+
+/**
+ * 推文取证客户端。与 fetchPublicDocument 并列,但走 /v1/tweet 与独立 audit。
+ * 网关错误按契约第 4 节以 `tweet_evidence:<code>` 抛出,transient/终态由
+ * TWEET_EVIDENCE_ERROR_SEMANTICS 决定(见 manual-news-leads-pipeline 的分类)。
+ */
+export async function fetchTweetEvidence(
+  input: string,
+  deps: { service?: TrustedResearchService; timeoutMs?: number } = {},
+): Promise<TweetEvidence> {
+  const status = parseTwitterStatusUrl(input);
+  if (!status) throw new Error('tweet_evidence:invalid_tweet_url');
+  const target = validatePublicHttpUrl(input);
+  const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const endpoint = trustedEndpoint(deps.service, '/v1/tweet');
+  const responseKeys = parseManualNewsKeyring({
+    keyId: deps.service?.responseKeyId,
+    secret: deps.service?.responseSecret,
+    keyringJson: deps.service?.responseKeyringJson,
+  }, 'trusted_research_response_keys_unavailable');
+  const protocolNow = deps.service?.protocolNow || Date.now;
+  const requestNow = protocolNow();
+  if (!Number.isFinite(requestNow)) throw new Error('invalid_trusted_research_clock');
+  const requestNonce = (deps.service?.nonceFactory || randomRequestNonce)();
+  if (!validRequestNonce(requestNonce)) throw new Error('invalid_trusted_research_nonce');
+  const requestTimestamp = new Date(requestNow).toISOString();
+
+  const controller = new AbortController();
+  const deadline = Date.now() + timeoutMs;
+  const init: RequestInit = {
+    method: 'POST', redirect: 'manual', signal: controller.signal,
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${endpoint.token}`,
+      'Content-Type': 'application/json',
+      'User-Agent': 'ai-feeds-manual-news-lead/2.0',
+    },
+    // 请求体形状严格:网关对多一个键/少一个键都返回 400 invalid_request。
+    body: JSON.stringify({
+      url: target.toString(),
+      request_nonce: requestNonce,
+      request_timestamp: requestTimestamp,
+    }),
+  };
+  const pending = endpoint.fetcher ? endpoint.fetcher(endpoint.url, init) : fetch(endpoint.url, init);
+  const response = await withinDeadline(pending, deadline, controller);
+  try {
+    if (!response.ok) {
+      // 网关把契约里的错误码放在 JSON body 的 error 字段。读出来才能做 transient/终态分级,
+      // 笼统抛 trusted_gateway_http_5xx 会让 tweet_provider_auth 这类配置问题被重试三次。
+      let code = '';
+      try {
+        const failure = await withinDeadline(response.json<{ error?: unknown }>(), deadline, controller);
+        if (typeof failure?.error === 'string') code = failure.error;
+      } catch { /* 网关没给结构化 body,退回 HTTP 状态码 */ }
+      throw new Error(code
+        ? `tweet_evidence:${code}`
+        : `tweet_evidence:gateway_http_${response.status}`);
+    }
+    const transportType = (response.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+    if (transportType !== 'application/json') throw new Error('invalid_gateway_content_type');
+    const bodyText = await withinDeadline(response.text(), deadline, controller);
+    if (bodyText.length > TWEET_EVIDENCE_MAX_BYTES) throw new Error('response_too_large');
+    const { audit, responseKeyId } = await parseTweetEvidenceAudit(
+      response, target, bodyText,
+      { nonce: requestNonce, requestTimestamp, now: protocolNow() },
+      responseKeys,
+    );
+    let payload: Record<string, unknown>;
+    try { payload = JSON.parse(bodyText) as Record<string, unknown>; }
+    catch { throw new Error('invalid_gateway_json'); }
+
+    const text = tweetString(payload.text, 64_000);
+    if (!text.trim()) throw new Error('tweet_evidence:tweet_empty');
+    if (tweetString(payload.tweet_id, 25) !== audit.tweet_id
+      || tweetString(payload.canonical_url, 512) !== audit.canonical_url) {
+      throw new Error('unsafe_tweet_audit:body_mismatch');
+    }
+    const publishedAtRaw = tweetString(payload.published_at, 128);
+    const publishedAtMs = publishedAtRaw ? Date.parse(publishedAtRaw) : NaN;
+    const images = Array.isArray(payload.images)
+      ? payload.images.filter((item): item is string => typeof item === 'string' && item.length <= 2_048).slice(0, 64)
+      : [];
+    const metrics: Record<string, number> = {};
+    if (payload.metrics && typeof payload.metrics === 'object' && !Array.isArray(payload.metrics)) {
+      for (const [key, value] of Object.entries(payload.metrics as Record<string, unknown>)) {
+        if (/^[a-z_]{1,32}$/.test(key) && typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) {
+          metrics[key] = value;
+        }
+      }
+    }
+    return {
+      tweet_id: audit.tweet_id,
+      canonical_url: audit.canonical_url,
+      author: tweetString(payload.author, 256),
+      author_handle: tweetString(payload.author_handle, 64),
+      published_at: Number.isFinite(publishedAtMs) ? new Date(publishedAtMs).toISOString() : null,
+      published_at_raw: publishedAtRaw,
+      language: tweetString(payload.language, 32),
+      text,
+      images,
+      metrics,
+      fetch_audit: audit,
+      response_key_id: responseKeyId,
+    };
+  } finally {
+    controller.abort();
+  }
+}
+
+/**
+ * 契约第 4 节的「云端应视为」列,逐条照搬。
+ * 只有 tweet_provider_unavailable / egress_proxy_unavailable 值得重试;
+ * tweet_provider_auth(502)与 tweet_provider_not_configured(503)虽然是 5xx,
+ * 但是不会自愈的凭证/配置问题,必须从通用 5xx transient 规则里摘出来当终态。
+ */
+export const TWEET_EVIDENCE_ERROR_SEMANTICS: Readonly<Record<string, { transient: boolean; message: string }>> = {
+  invalid_request: { transient: false, message: '推文取证请求被网关判为格式不合法（云端与网关契约不一致，需排查版本）。' },
+  invalid_tweet_url: { transient: false, message: '这条链接不是可识别的 X/Twitter 推文链接，请提供形如 x.com/用户名/status/编号 的地址。' },
+  unauthorized: { transient: false, message: '推文取证网关拒绝了云端凭证（Bearer 不匹配），需要运维核对 token。' },
+  tweet_not_found: { transient: false, message: '这条推文不存在、已删除或不可见，无法取证。' },
+  method_not_allowed: { transient: false, message: '推文取证网关拒绝了该请求方法（云端与网关契约不一致）。' },
+  request_too_large: { transient: false, message: '推文取证请求体过大（云端与网关契约不一致）。' },
+  unsupported_media_type: { transient: false, message: '推文取证请求的 Content-Type 不被网关接受（云端与网关契约不一致）。' },
+  tweet_empty: { transient: false, message: '提供方返回了这条推文，但没有可用正文，无法作为证据。' },
+  tweet_provider_unavailable: { transient: true, message: '推文提供方暂时不可用（5xx/超时），已自动重试。' },
+  egress_proxy_unavailable: { transient: true, message: '推文取证的出站代理暂时不可用（是代理故障，不是 X 的问题），已自动重试。' },
+  tweet_provider_not_configured: { transient: false, message: '推文取证网关没有配置提供方凭证（SCRAPEBADGER_API_KEY 缺失），需要运维补配置。' },
+  tweet_response_signing_unavailable: { transient: false, message: '推文取证网关没有配置响应签名密钥，无法产出可校验的证据，需要运维补配置。' },
+  tweet_provider_auth: { transient: false, message: '推文提供方拒绝了凭证（key 失效或额度耗尽），需要运维处理，重试无效。' },
+  // 网关止血码:/v1/document 见到 X status 链接时立即返回 422。云端接上 /v1/tweet 之后
+  // 不应再出现;留在这里是为了「万一走了旧路径」也能给 owner 一句人话而不是未知错误码。
+  x_link_requires_tweet_api: { transient: false, message: 'X 链接需要走推文取证通道，当前请求走了网页抓取路径（云端版本落后于网关，请等待升级）。' },
+};
+
+export function tweetEvidenceErrorCode(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : String(error || '');
+  const match = /^tweet_evidence:([a-z0-9_]+)$/.exec(message);
+  return match ? match[1] : null;
+}
+
+export function isTransientTweetEvidenceError(error: unknown): boolean | null {
+  const code = tweetEvidenceErrorCode(error);
+  if (!code) return null;
+  return TWEET_EVIDENCE_ERROR_SEMANTICS[code]?.transient ?? false;
+}
+
+export function tweetEvidencePublicMessage(error: unknown): string | null {
+  const code = tweetEvidenceErrorCode(error);
+  if (!code) return null;
+  return TWEET_EVIDENCE_ERROR_SEMANTICS[code]?.message
+    ?? '推文取证网关返回了未知错误码，请联系运维查看网关日志。';
+}
+
 
 const PROOF_EXCERPT_WHITESPACE =
   /[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/gu;
@@ -375,7 +712,7 @@ export function normalizeWeChatArticleUrl(input: string): string {
     + `&mid=${mid}&idx=${idx}&sn=${sn.toLowerCase()}`;
 }
 
-function trustedEndpoint(service: TrustedResearchService | undefined, path: '/v1/document' | '/v1/search') {
+function trustedEndpoint(service: TrustedResearchService | undefined, path: '/v1/document' | '/v1/search' | '/v1/tweet') {
   if (!service) throw new Error('trusted_research_service_required');
   let origin: URL;
   try { origin = validatePublicHttpUrl(service.origin); } catch { throw new Error('invalid_trusted_research_origin'); }

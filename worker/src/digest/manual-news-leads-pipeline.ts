@@ -34,7 +34,12 @@ import {
   type ManualNewsSourceSupportPayload,
   type ManualNewsSourceSupportPriorEvent,
 } from './manual-news-leads';
-import type { PublicDocument } from '../security/safe-url-fetch';
+import {
+  isTransientTweetEvidenceError,
+  isTwitterStatusUrl,
+  tweetEvidencePublicMessage,
+  type PublicDocument,
+} from '../security/safe-url-fetch';
 import {
   isManualNewsProviderJsonParseFailure,
   isTransientManualNewsProviderFailure,
@@ -231,6 +236,12 @@ function assessmentGenerationAuditFromCycle(
 export interface ManualLeadProcessingAdapters {
   search(input: { date: string; text: string; note: string }): Promise<ManualSearchResult[]>;
   fetch(url: string, context?: { retrieval_generation: number }): Promise<PublicDocument>;
+  /**
+   * X/Twitter status 链接专用取证(2026-09-03)。走网关 POST /v1/tweet 而不是 /v1/document ——
+   * 大陆机房直连 x.com 被墙,且 x.com 对未登录请求只返回 JS 外壳,两条都让网页直抓必然失败。
+   * 未注入时退回 fetch(旧行为),便于既有测试与回滚。
+   */
+  fetchTweet?(url: string): Promise<PublicDocument>;
   extract(document: PublicDocument, hint?: ManualSearchResult): Promise<ManualNewsEvidence | null>;
   assess(prompt: { system: string; user: string }, context?: ManualNewsProviderCallContext): Promise<unknown>;
   verify(prompt: { system: string; user: string }, context?: ManualNewsProviderCallContext): Promise<unknown>;
@@ -244,6 +255,11 @@ function conciseError(error: unknown): string {
 export function isTransientManualLeadError(error: unknown): boolean {
   const providerTransient = isTransientManualNewsProviderFailure(error);
   if (providerTransient !== null) return providerTransient;
+  // 推文取证错误码按契约第 4 节分级,必须先于下面的通用 5xx 规则:
+  // tweet_provider_auth(502)与 tweet_provider_not_configured(503)虽然是 5xx,
+  // 但都是不会自愈的凭证/配置问题,重试三次纯属浪费预算。
+  const tweetTransient = isTransientTweetEvidenceError(error);
+  if (tweetTransient !== null) return tweetTransient;
   const message = conciseError(error).trim();
   const stableCode = message.split(':', 1)[0].toLowerCase();
   if (isRegeneratableManualLeadAssessmentValidationCode(stableCode)
@@ -430,9 +446,14 @@ export async function processManualNewsLead(
       if (status === 'researching') await transition('extracting');
       const evidence: ManualNewsEvidence[] = [];
       let transientSourceError: unknown = null;
+      // 取证失败时给 owner 一句人话,而不是笼统的「未取得可核验证据」。
+      let sourceFailureMessage = '';
       for (const source of sources) {
         try {
-          const document = await adapters.fetch(source.url, { retrieval_generation: retrievalGeneration });
+          // X/Twitter status 链接走推文取证通道;其余一律维持原有网页直抓路径。
+          const document = isTwitterStatusUrl(source.url) && adapters.fetchTweet
+            ? await adapters.fetchTweet(source.url)
+            : await adapters.fetch(source.url, { retrieval_generation: retrievalGeneration });
           if (source.url === normalized.url
             && document.fetch_audit.protocol_version === 'provider_retrieval_v1'
             && document.fetch_audit.input_url !== normalized.url) {
@@ -442,6 +463,11 @@ export async function processManualNewsLead(
           if (extracted && !evidence.some((item) => item.id === extracted.id)) evidence.push(extracted);
         } catch (error) {
           if (isTransientManualLeadError(error)) transientSourceError = error;
+          // 线索 URL 自身的失败原因优先展示:owner 提交的就是它,搜索补充来源失败不值得报。
+          const readable = tweetEvidencePublicMessage(error);
+          if (readable && (source.url === normalized.url || !sourceFailureMessage)) {
+            sourceFailureMessage = readable;
+          }
           // A single bad source is evidence failure, not authority to downgrade or
           // fabricate the remaining sources. The final evidence gate decides.
         }
@@ -451,7 +477,7 @@ export async function processManualNewsLead(
       if (!evidence.length) {
         await transition('needs_review', {
           error_code: 'evidence_insufficient',
-          error_message: '未取得可核验的一手或独立证据，请补充链接后重试。',
+          error_message: sourceFailureMessage || '未取得可核验的一手或独立证据，请补充链接后重试。',
         });
         return (await store.getLead(leadId))!;
       }
