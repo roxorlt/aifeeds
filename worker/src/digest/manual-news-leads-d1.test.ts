@@ -36,6 +36,7 @@ import {
   recoverStaleManualNewsLeads,
   retryManualNewsLead,
   submitManualNewsLead,
+  vouchManualNewsLeadCandidate,
 } from './manual-news-leads-store';
 import {
   loadManualNewsEvidence,
@@ -44,6 +45,7 @@ import {
 import { ManualNewsProviderError } from './manual-news-provider';
 import { authorizeFormalNewsSet } from './news-source-policy';
 import {
+  durableConfirmedManualCandidates,
   freezeNewsReviewBatchFromPool,
   newsReviewSelectionHash,
   sanitizeCurrentNewsReviewBatch,
@@ -437,7 +439,7 @@ async function sourceSupportFixture() {
 }
 
 async function addSourceSupportLead(
-  state: Awaited<ReturnType<typeof sourceSupportFixture>>,
+  state: { db: SqliteD1; env: Env },
   input: {
     idempotencyKey: string;
     owner: string;
@@ -490,7 +492,7 @@ async function addSourceSupportLead(
 }
 
 function installSourceSupportReviewSchema(
-  state: Awaited<ReturnType<typeof sourceSupportFixture>>,
+  state: { db: SqliteD1 },
   candidates: Array<Record<string, unknown>> = Array.from({ length: 10 }, (_, index) => ({
     item_id: `auto-${index + 1}`, title: `自动${index + 1}`, summary: '摘要', source: '来源',
     score: 100 - index, event_key: `automatic-event-${index + 1}`,
@@ -551,7 +553,7 @@ function installSourceSupportReviewSchema(
 }
 
 function installSourceSupportAutomaticPool(
-  state: Awaited<ReturnType<typeof sourceSupportFixture>>,
+  state: { db: SqliteD1 },
   mhsIndex: number | null,
 ): Array<Record<string, unknown>> {
   const feed = FEED_REGISTRY.find((entry) => entry.id === 'blog:anthropic');
@@ -4070,5 +4072,388 @@ describe('manual lead D1-backed dedupe', () => {
       `SELECT action, resulting_version AS version, mutation_nonce AS nonce
        FROM manual_news_lead_audit WHERE lead_id = ? ORDER BY id`,
     ).all(state.leadId)).toEqual(auditBefore);
+  });
+});
+
+const VOUCH_STATEMENT = 'OpenAI 发布 GPT-6 并向 Plus 用户开放。';
+const VOUCH_EXCERPT = 'OpenAI is rolling out GPT-6 to Plus users today.';
+const VOUCH_URL = 'https://openai.com/index/gpt-6/';
+
+async function vouchFixture(status: 'needs_review' | 'failed' = 'needs_review', evidenceCount = 1) {
+  const state = fixture('verifying', 4);
+  state.db.sqlite.prepare('DELETE FROM manual_news_leads').run();
+  state.db.sqlite.prepare('DELETE FROM manual_news_evidence').run();
+  const submitted = await submitManualNewsLead(state.env, {
+    date: '2026-08-28', text: 'OpenAI 发布 GPT-6', url: VOUCH_URL, note: '',
+  }, 'submit-owner-vouch', 10);
+  state.db.sqlite.prepare(`UPDATE manual_news_leads SET status = ?, version = 4,
+    processing_owner = NULL, processing_attempt = 0,
+    error_code = ?, error_message = ? WHERE id = ?`).run(
+    status,
+    status === 'failed' ? 'assessment_validation_failed' : null,
+    status === 'failed' ? 'invalid_claim_predicate' : null,
+    submitted.lead.id,
+  );
+  const evidence = Array.from({ length: evidenceCount }, (_, index) => withSignedArticleTextV2Audit({
+    id: index === 0 ? 'ev-openai-gpt-6' : `ev-openai-mirror-${index}`,
+    url: index === 0 ? VOUCH_URL : `${VOUCH_URL}mirror-${index}/`,
+    source_type: index === 0 ? 'official_primary' : 'other',
+    publisher: index === 0 ? 'OpenAI' : 'mirror.example.com',
+    published_at: '2026-08-28T00:00:00.000Z', retrieved_at: 11 + index,
+    title: 'Introducing GPT-6', excerpt: VOUCH_EXCERPT,
+    claims_supported: [VOUCH_EXCERPT], reliable: index === 0,
+  }));
+  for (const item of evidence) {
+    state.db.sqlite.prepare(`INSERT INTO manual_news_evidence (
+      lead_id, evidence_id, response_key_id, url, source_type, publisher, published_at, retrieved_at,
+      title, excerpt, claims_supported_json, fetch_audit_json, reliable
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      submitted.lead.id, item.id, item.response_key_id, item.url, item.source_type, item.publisher,
+      item.published_at, item.retrieved_at, item.title, item.excerpt,
+      JSON.stringify(item.claims_supported), JSON.stringify(item.fetch_audit), item.reliable ? 1 : 0,
+    );
+  }
+  return {
+    ...state,
+    env: { ...state.env, DAILY_NEWS_REVIEW_SECRET: 'owner-vouch-review-secret' } as Env,
+    leadId: submitted.lead.id,
+    evidence,
+  };
+}
+
+async function frozenVouchBatch(state: { db: SqliteD1; env: Env }) {
+  installSourceSupportReviewSchema(state);
+  state.db.sqlite.prepare(`DELETE FROM daily_news_review_batches
+    WHERE review_date = '2026-08-28'`).run();
+  installSourceSupportAutomaticPool(state, null);
+  return freezeNewsReviewBatchFromPool(state.env, '2026-08-28', 100);
+}
+
+describe('manual news owner vouch', () => {
+  test('confirms a needs_review lead without an assessment into the pre-freeze pool', async () => {
+    const state = await vouchFixture();
+    installSourceSupportReviewSchema(state);
+    state.db.sqlite.prepare(`DELETE FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28'`).run();
+
+    const result = await vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, 0, VOUCH_STATEMENT, 'vouch-key-1', 100,
+    );
+
+    expect(result).toMatchObject({
+      ok: true, changed: true, batch: null, pending_initial_freeze: true, rerender_enqueued: false,
+      lead: { status: 'needs_review', version: 6, confirmed_at: 100, confirmed_batch_id: null },
+    });
+    expect(state.db.sqlite.prepare(`SELECT policy_version, status, assessment_version,
+      processing_attempt FROM manual_news_assessment_verifications WHERE lead_id = ?`)
+      .get(state.leadId)).toMatchObject({
+      policy_version: 'owner_vouched_v1', status: 'active', assessment_version: 4_900_000,
+      processing_attempt: 1,
+    });
+    expect(state.db.sqlite.prepare(
+      'SELECT COUNT(*) AS count FROM manual_news_event_assessments WHERE lead_id = ?',
+    ).get(state.leadId)).toEqual({ count: 0 });
+    expect(state.db.sqlite.prepare(`SELECT id, source_id, source_ref, title, content, extra
+      FROM items WHERE id = ?`).get(`blog:manual:${state.leadId}`)).toMatchObject({
+      id: `blog:manual:${state.leadId}`,
+      source_id: `manual:${state.leadId}`,
+      source_ref: 'manual_lead',
+      title: VOUCH_STATEMENT,
+      content: VOUCH_STATEMENT,
+    });
+    const audits = state.db.sqlite.prepare(`SELECT action, from_status, to_status,
+      resulting_version, metadata_json FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action IN ('vouch_candidate', 'confirm_candidate') ORDER BY id`)
+      .all(state.leadId) as Array<Record<string, unknown>>;
+    expect(audits.map((audit) => [audit.action, audit.resulting_version])).toEqual([
+      ['vouch_candidate', 5], ['confirm_candidate', 6],
+    ]);
+    expect(JSON.parse(String(audits[0].metadata_json))).toMatchObject({
+      candidate_authorization: 'owner_vouched_v1',
+      statement: VOUCH_STATEMENT,
+      canonical_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+  });
+
+  test('appends the vouched candidate and keeps the gate, durable rebuild and sanitizer stable', async () => {
+    const state = await vouchFixture();
+    const frozen = await frozenVouchBatch(state);
+
+    const result = await vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-key-1', 100,
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      changed: true,
+      rerender_enqueued: false,
+      pending_initial_freeze: false,
+      batch: { revision: frozen.batch.batch_revision + 1, current: true },
+      lead: { confirmed_at: 100 },
+    });
+    const active = state.db.sqlite.prepare(`SELECT candidates_json FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28' AND is_current = 1`).get() as { candidates_json: string };
+    const candidates = JSON.parse(active.candidates_json) as Array<Record<string, unknown>>;
+    expect(candidates[candidates.length - 1]).toMatchObject({
+      item_id: `blog:manual:${state.leadId}`,
+      title: VOUCH_STATEMENT,
+      summary: VOUCH_STATEMENT,
+      source: 'OpenAI',
+      score: null,
+      url: VOUCH_URL,
+      published_at: '2026-08-28T00:00:00.000Z',
+      origin: 'manual_lead',
+      lead_id: state.leadId,
+    });
+
+    await expect(durableConfirmedManualCandidates(state.env, '2026-08-28')).resolves.toEqual([
+      expect.objectContaining({
+        item_id: `blog:manual:${state.leadId}`,
+        title: VOUCH_STATEMENT,
+        lead_id: state.leadId,
+      }),
+    ]);
+    await expect(authorizeFormalNewsSet(
+      state.env, '2026-08-28', [`blog:manual:${state.leadId}`], 'owner-vouch-test',
+    )).resolves.toMatchObject({
+      allowed_ids: [`blog:manual:${state.leadId}`],
+      decisions: [{ allowed: true, code: 'ALLOW_VERIFIED_MANUAL' }],
+    });
+
+    const firstSanitize = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 100);
+    const secondSanitize = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 100);
+    expect(firstSanitize.changed).toBe(false);
+    expect(secondSanitize.changed).toBe(false);
+    expect(secondSanitize.batch.batch_id).toBe(firstSanitize.batch.batch_id);
+    expect(secondSanitize.batch.batch_revision).toBe(frozen.batch.batch_revision + 1);
+    expect(secondSanitize.manual_verifications).toEqual([
+      expect.objectContaining({
+        lead_id: state.leadId,
+        verification: expect.objectContaining({ policy_version: 'owner_vouched_v1' }),
+      }),
+    ]);
+  });
+
+  test('returns the same result when the vouch idempotency key is replayed', async () => {
+    const state = await vouchFixture();
+    const frozen = await frozenVouchBatch(state);
+
+    const first = await vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-key-1', 100,
+    );
+    const replay = await vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-key-1', 100,
+    );
+
+    expect(first.ok).toBe(true);
+    expect(replay).toMatchObject({ ok: true, changed: false, pending_initial_freeze: false });
+    expect(replay.ok && replay.batch?.batch_id).toBe(first.ok && first.batch?.batch_id);
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action IN ('vouch_candidate', 'confirm_candidate')`)
+      .get(state.leadId)).toEqual({ count: 2 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId))
+      .toEqual({ count: 1 });
+  });
+
+  test('keeps the proof row on a batch revision conflict and confirms on retry', async () => {
+    const state = await vouchFixture();
+    const frozen = await frozenVouchBatch(state);
+
+    const conflicted = await vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, frozen.batch.batch_revision + 5, VOUCH_STATEMENT, 'vouch-key-1', 100,
+    );
+
+    expect(conflicted).toMatchObject({
+      ok: false, status: 409, error: 'candidate_batch_revision_conflict',
+    });
+    expect(state.db.sqlite.prepare(`SELECT policy_version, status
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId))
+      .toMatchObject({ policy_version: 'owner_vouched_v1', status: 'active' });
+    expect(state.db.sqlite.prepare('SELECT version, confirmed_at FROM manual_news_leads WHERE id = ?')
+      .get(state.leadId)).toEqual({ version: 5, confirmed_at: null });
+
+    const retried = await vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 5, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-key-2', 101,
+    );
+
+    expect(retried).toMatchObject({ ok: true, changed: true, lead: { version: 6, confirmed_at: 101 } });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'vouch_candidate'`).get(state.leadId)).toEqual({ count: 1 });
+  });
+
+  test('rejects an invalid statement with 400 before touching the database', async () => {
+    const state = await vouchFixture();
+    installSourceSupportReviewSchema(state);
+    const sqlStart = state.db.preparedSql.length;
+
+    await expect(vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, 1, '太短', 'vouch-key-1', 100,
+    )).resolves.toEqual({ ok: false, status: 400, error: 'invalid_vouch_statement' });
+    expect(state.db.preparedSql.slice(sqlStart)).toEqual([]);
+  });
+
+  test('refuses a lead without evidence', async () => {
+    const state = await vouchFixture();
+    installSourceSupportReviewSchema(state);
+    state.db.sqlite.prepare('DELETE FROM manual_news_evidence WHERE lead_id = ?').run(state.leadId);
+
+    await expect(vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, 1, VOUCH_STATEMENT, 'vouch-key-1', 100,
+    )).resolves.toMatchObject({ ok: false, status: 409, error: 'lead_not_vouchable' });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId))
+      .toEqual({ count: 0 });
+  });
+
+  test('refuses a lead that already carries a verified assessment', async () => {
+    const state = await vouchFixture();
+    installSourceSupportReviewSchema(state);
+    addActiveVerification(state as unknown as ReturnType<typeof fixture>);
+
+    await expect(vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, 1, VOUCH_STATEMENT, 'vouch-key-1', 100,
+    )).resolves.toMatchObject({ ok: false, status: 409, error: 'lead_not_vouchable' });
+  });
+
+  test('refuses a stale version, a confirmed lead and an expired review window', async () => {
+    const state = await vouchFixture();
+    const frozen = await frozenVouchBatch(state);
+
+    await expect(vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 3, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-stale', 100,
+    )).resolves.toMatchObject({ ok: false, status: 409, error: 'lead_version_conflict' });
+    await expect(vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-expired',
+      Date.parse('2026-09-30T00:00:00.000Z'),
+    )).resolves.toMatchObject({ ok: false, status: 409, error: 'review_expired' });
+
+    await vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-key-1', 100,
+    );
+
+    await expect(vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 6, frozen.batch.batch_revision + 1, '阿里巴巴发布通义千问新模型。',
+      'vouch-key-3', 102,
+    )).resolves.toMatchObject({ ok: false, status: 409, error: 'lead_not_vouchable' });
+  });
+
+  test('vouches a failed lead that still has verifiable evidence', async () => {
+    const state = await vouchFixture('failed');
+    const frozen = await frozenVouchBatch(state);
+
+    const result = await vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-key-1', 100,
+    );
+
+    expect(result).toMatchObject({
+      ok: true, changed: true, lead: { status: 'needs_review', confirmed_at: 100 },
+    });
+    expect(state.db.sqlite.prepare(`SELECT from_status, to_status FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'vouch_candidate'`).get(state.leadId))
+      .toEqual({ from_status: 'failed', to_status: 'needs_review' });
+  });
+
+  test('writes the signed projection time when an earlier evidence id carries another date', async () => {
+    const state = await vouchFixture();
+    state.db.sqlite.prepare('DELETE FROM manual_news_evidence WHERE lead_id = ?').run(state.leadId);
+    const mirror = withSignedArticleTextV2Audit({
+      id: 'ev-aaa-mirror', url: `${VOUCH_URL}mirror/`, source_type: 'other',
+      publisher: 'mirror.example.com', published_at: '2026-08-01T00:00:00.000Z', retrieved_at: 12,
+      title: 'Mirror', excerpt: VOUCH_EXCERPT, claims_supported: [VOUCH_EXCERPT], reliable: false,
+    });
+    for (const item of [mirror, state.evidence[0]]) {
+      state.db.sqlite.prepare(`INSERT INTO manual_news_evidence (
+        lead_id, evidence_id, response_key_id, url, source_type, publisher, published_at, retrieved_at,
+        title, excerpt, claims_supported_json, fetch_audit_json, reliable
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        state.leadId, item.id, item.response_key_id, item.url, item.source_type, item.publisher,
+        item.published_at, item.retrieved_at, item.title, item.excerpt,
+        JSON.stringify(item.claims_supported), JSON.stringify(item.fetch_audit), item.reliable ? 1 : 0,
+      );
+    }
+    const frozen = await frozenVouchBatch(state);
+
+    await expect(vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-key-1', 100,
+    )).resolves.toMatchObject({ ok: true, changed: true });
+
+    expect(state.db.sqlite.prepare('SELECT published_at, url, author FROM items WHERE id = ?')
+      .get(`blog:manual:${state.leadId}`)).toEqual({
+      published_at: '2026-08-28T00:00:00.000Z', url: VOUCH_URL, author: 'OpenAI',
+    });
+    await expect(authorizeFormalNewsSet(
+      state.env, '2026-08-28', [`blog:manual:${state.leadId}`], 'owner-vouch-multi-evidence',
+    )).resolves.toMatchObject({
+      allowed_ids: [`blog:manual:${state.leadId}`],
+      decisions: [{ allowed: true, code: 'ALLOW_VERIFIED_MANUAL' }],
+    });
+  });
+
+  test('quarantines a tampered vouch proof before the formal gate', async () => {
+    const state = await vouchFixture();
+    const frozen = await frozenVouchBatch(state);
+    await vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-key-1', 100,
+    );
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications
+      SET verification_json = json_set(verification_json, '$.item_projection.title', '伪造的候选标题内容')
+      WHERE lead_id = ? AND status = 'active'`).run(state.leadId);
+
+    await expect(authorizeFormalNewsSet(
+      state.env, '2026-08-28', [`blog:manual:${state.leadId}`], 'owner-vouch-tamper',
+    )).resolves.toMatchObject({
+      allowed_ids: [], decisions: [{ allowed: false, code: 'DENY_UNVERIFIED_MANUAL' }],
+    });
+    expect(state.db.sqlite.prepare(`SELECT status, reason
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId))
+      .toMatchObject({ status: 'invalidated', reason: 'verification_integrity_invalid' });
+  });
+
+  test('rejects a vouch proof whose authorization audit no longer matches', async () => {
+    const state = await vouchFixture();
+    const frozen = await frozenVouchBatch(state);
+    await vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-key-1', 100,
+    );
+    state.db.sqlite.prepare(`UPDATE manual_news_lead_audit
+      SET metadata_json = json_set(metadata_json, '$.canonical_digest', ?)
+      WHERE lead_id = ? AND action = 'vouch_candidate'`).run('0'.repeat(64), state.leadId);
+
+    await expect(loadVerifiedManualCandidateProof(state.env, state.leadId)).resolves.toBeNull();
+  });
+
+  test('orders a vouched candidate by its vouch authorization, not by its confirmation', async () => {
+    const state = await vouchFixture();
+    const frozen = await frozenVouchBatch(state);
+
+    // 先制造一次「担保已写、确认撞版本」的中间态,让担保审计与确认审计之间夹进另一条线索。
+    await vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, frozen.batch.batch_revision + 5, VOUCH_STATEMENT, 'vouch-key-1', 100,
+    );
+    const second = await addSourceSupportLead(state, {
+      idempotencyKey: 'submit-source-support-after-vouch', owner: 'source-support-owner-b',
+      fact: 'Anthropic 开放 Model Hardware Standard（MHS）研究预览。',
+      excerpt: 'Anthropic is opening a research preview of the Model Hardware Standard (MHS), '
+        + 'a shared specification for AI agents to safely operate physical devices, '
+        + 'to a first group of scientific research labs and advanced manufacturers.',
+      url: 'https://www.anthropic.com/news/model-hardware-standard-research-preview',
+      evidenceId: 'ev-anthropic-mhs', publisher: 'Anthropic', now: 101,
+    });
+    await vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 5, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-key-2', 102,
+    );
+    await new D1ManualLeadProcessingStore(state.env, second.owner, 1)
+      .saveSourceSupportedCandidate(second.leadId, 4, second.payload);
+
+    const active = state.db.sqlite.prepare(`SELECT candidates_json FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28' AND is_current = 1`).get() as { candidates_json: string };
+    const manualIds = (JSON.parse(active.candidates_json) as Array<{ item_id: string }>)
+      .map((candidate) => candidate.item_id)
+      .filter((itemId) => itemId.startsWith('blog:manual:'));
+    expect(manualIds).toEqual([
+      `blog:manual:${state.leadId}`,
+      `blog:manual:${second.leadId}`,
+    ]);
   });
 });

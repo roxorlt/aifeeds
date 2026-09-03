@@ -19,6 +19,13 @@ import {
   type ManualNewsProcessedAssessment,
   type ManualNewsSourceSupportPayload,
 } from './manual-news-leads';
+import {
+  isCurrentManualNewsOwnerVouchProof,
+  MANUAL_NEWS_OWNER_VOUCH_AUDIT_ACTION,
+  MANUAL_NEWS_OWNER_VOUCH_POLICY,
+  ownerVouchCandidateFromPayload,
+  type ManualNewsOwnerVouchPayload,
+} from './manual-news-owner-vouch';
 
 interface ManualEvidenceRow {
   evidence_id: string;
@@ -82,7 +89,10 @@ export interface VerifiedPersistedManualAssessment {
 }
 
 export interface VerifiedPersistedManualCandidateProof {
-  policy_version: typeof MANUAL_LEAD_VERIFICATION_POLICY_VERSION | typeof MANUAL_NEWS_SOURCE_SUPPORT_POLICY;
+  policy_version:
+    | typeof MANUAL_LEAD_VERIFICATION_POLICY_VERSION
+    | typeof MANUAL_NEWS_SOURCE_SUPPORT_POLICY
+    | typeof MANUAL_NEWS_OWNER_VOUCH_POLICY;
   candidate: {
     item_id: string;
     title: string;
@@ -97,6 +107,7 @@ export interface VerifiedPersistedManualCandidateProof {
   evidence: ManualNewsEvidence[];
   assessment?: ManualNewsProcessedAssessment;
   source_support?: ManualNewsSourceSupportPayload;
+  owner_vouch?: ManualNewsOwnerVouchPayload;
 }
 
 type PersistedVerificationOutcome =
@@ -534,6 +545,52 @@ async function verifySourceSupportCandidateProofSnapshot(
   }
 }
 
+async function ownerVouchAuthorizationMatches(
+  env: Env,
+  row: ManualCandidateProofDispatchRow,
+  payload: ManualNewsOwnerVouchPayload,
+): Promise<boolean> {
+  if (payload.lead_id !== row.lead_id || payload.review_date !== row.review_date) return false;
+  // 担保这一步的授权凭据是 owner 自己的 vouch_candidate 审计行:它与 proof 行同一个
+  // batch 落盘,并把 canonical_digest 与陈述原文一起钉住。proof 行被单独改写(即使
+  // 拿得到密钥)也会因为找不到同摘要的授权行而失效。
+  const audits = await env.DB.prepare(
+    `/* manual_verification:owner_vouch_authorization */ SELECT metadata_json
+     FROM manual_news_lead_audit
+     WHERE lead_id = ? AND action = ?
+     ORDER BY id ASC LIMIT 5`,
+  ).bind(row.lead_id, MANUAL_NEWS_OWNER_VOUCH_AUDIT_ACTION).all<{ metadata_json: string }>();
+  return (audits.results || []).some((audit) => {
+    const metadata = parseJson<Record<string, unknown>>(audit.metadata_json, {});
+    return metadata.candidate_authorization === MANUAL_NEWS_OWNER_VOUCH_POLICY
+      && metadata.canonical_digest === row.canonical_digest
+      && metadata.statement === payload.statement;
+  });
+}
+
+async function verifyOwnerVouchCandidateProofSnapshot(
+  row: ManualCandidateProofDispatchRow,
+  payload: ManualNewsOwnerVouchPayload,
+  evidence: readonly ManualNewsEvidence[],
+  keyrings: { verificationKeys: ManualNewsKeyring; responseKeys: ManualNewsKeyring },
+): Promise<boolean> {
+  try {
+    return await createManualEvidenceDigest(evidence) === await createManualEvidenceDigest(payload.evidence)
+      && await isCurrentManualNewsOwnerVouchProof({
+        lead_id: row.lead_id,
+        assessment_version: Number(row.assessment_version),
+        payload,
+      }, {
+        policy_version: row.policy_version,
+        verification_key_id: row.verification_key_id,
+        canonical_digest: row.canonical_digest,
+        hmac_sha256: row.hmac_sha256,
+      }, keyrings.verificationKeys, keyrings.responseKeys);
+  } catch {
+    return false;
+  }
+}
+
 export async function loadVerifiedManualCandidateProof(
   env: Env,
   leadId: string,
@@ -541,7 +598,8 @@ export async function loadVerifiedManualCandidateProof(
   const row = await activeManualCandidateProofRow(env, leadId);
   if (!row) return null;
   if (row.policy_version !== MANUAL_LEAD_VERIFICATION_POLICY_VERSION
-    && row.policy_version !== MANUAL_NEWS_SOURCE_SUPPORT_POLICY) return null;
+    && row.policy_version !== MANUAL_NEWS_SOURCE_SUPPORT_POLICY
+    && row.policy_version !== MANUAL_NEWS_OWNER_VOUCH_POLICY) return null;
   if (row.policy_version === MANUAL_LEAD_VERIFICATION_POLICY_VERSION) {
     const legacy = await loadVerifiedManualAssessment(env, leadId);
     if (!legacy) return null;
@@ -567,6 +625,24 @@ export async function loadVerifiedManualCandidateProof(
   if (!keyrings
     || !keyrings.verificationKeys.keys.has(row.verification_key_id)
     || !await persistedKeyLineageAvailable(env, leadId, keyrings)) return null;
+  if (row.policy_version === MANUAL_NEWS_OWNER_VOUCH_POLICY) {
+    const vouchPayload = parseJson<ManualNewsOwnerVouchPayload | null>(row.verification_json, null);
+    const vouchEvidence = await loadManualNewsEvidence(env, leadId);
+    const vouchValid = !!vouchPayload
+      && await ownerVouchAuthorizationMatches(env, row, vouchPayload)
+      && await verifyOwnerVouchCandidateProofSnapshot(row, vouchPayload, vouchEvidence, keyrings);
+    if (!vouchValid || !vouchPayload) {
+      await quarantineInvalidManualAssessment(env, row, 'verification_integrity_invalid');
+      return null;
+    }
+    return {
+      policy_version: MANUAL_NEWS_OWNER_VOUCH_POLICY,
+      candidate: ownerVouchCandidateFromPayload(vouchPayload),
+      record: row,
+      evidence: vouchEvidence,
+      owner_vouch: vouchPayload,
+    };
+  }
   const payload = parseJson<ManualNewsSourceSupportPayload | null>(row.verification_json, null);
   const evidence = await loadManualNewsEvidence(env, leadId);
   let valid = false;
