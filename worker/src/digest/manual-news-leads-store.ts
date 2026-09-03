@@ -2632,6 +2632,9 @@ export async function vouchManualNewsLeadCandidate(
       // 就走不通，回 409 让 owner 看到「不能担保」，而不是把内部异常抛成 500。
       const message = error instanceof Error ? error.message : '';
       if (message === 'owner_vouch_payload_invalid' || message.startsWith('manual_news_evidence_')) {
+        // 只记错误名,不记证据内容:409 lead_not_vouchable 在 prod 上看不出是哪一环拒的,
+        // 没有这行日志就只能靠猜(2026-09-03 推文证据摘要误判即是如此)。
+        console.warn('[manual-news-vouch] evidence chain rejected', { lead_id: id, error: message });
         return { ok: false, status: 409, error: 'lead_not_vouchable', lead };
       }
       throw error;

@@ -28,6 +28,91 @@ function canonicalJson(value: unknown): string {
   return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(',')}}`;
 }
 
+/**
+ * 推文取证网关（dailyVideo 的 `manual-news-research-gateway.mjs`，`signTweetAudit`）
+ * 签的 `body_sha256` 覆盖的是**整个 JSON 响应体**（`JSON.stringify(tweet.document)`），
+ * 不是推文正文。夹具照抄这个语义：拿 `sha256(推文正文)` 冒充它会让证据链校验在测试里
+ * 成立、在 prod 上必然不成立（2026-09-03 vouch-candidate 409 事故就是这么漏过去的）。
+ */
+export interface TweetGatewayDocument {
+  tweet_id: string;
+  canonical_url: string;
+  text: string;
+  author?: string;
+  author_handle?: string;
+  published_at?: string | null;
+}
+
+/** 字段照抄 `fetchTweetEvidence` 从响应体里读的那些（`security/safe-url-fetch.ts`）。 */
+export function tweetGatewayResponseBody(document: TweetGatewayDocument): string {
+  return JSON.stringify({
+    tweet_id: document.tweet_id,
+    canonical_url: document.canonical_url,
+    author: document.author ?? '',
+    author_handle: document.author_handle ?? '',
+    published_at: document.published_at ?? null,
+    language: 'en',
+    text: document.text,
+    images: [],
+    metrics: {},
+  });
+}
+
+export function tweetGatewayBodySha256(document: TweetGatewayDocument): string {
+  return createHash('sha256').update(tweetGatewayResponseBody(document)).digest('hex');
+}
+
+/** 网关签名的推文 audit：`body_sha256` 走真实语义，`response_hmac` 用测试响应密钥。 */
+export function signedTweetEvidenceAudit(
+  document: TweetGatewayDocument,
+  overrides: Record<string, unknown> = {},
+) {
+  const unsigned = {
+    kind: 'tweet_api',
+    provider: 'scrapebadger',
+    tweet_id: document.tweet_id,
+    requested_url: document.canonical_url,
+    canonical_url: document.canonical_url,
+    fetched_at: '2026-09-03T04:05:07.000Z',
+    provider_status: 200,
+    protocol_version: 'tweet_evidence_v1',
+    request_nonce: 'a'.repeat(32),
+    request_timestamp: '2026-09-03T04:05:06.000Z',
+    body_sha256: tweetGatewayBodySha256(document),
+    ...overrides,
+  };
+  return {
+    ...unsigned,
+    response_hmac: createHmac('sha256', Buffer.from(TEST_MANUAL_NEWS_RESPONSE_SECRET, 'hex'))
+      .update(canonicalJson(unsigned)).digest('hex'),
+  };
+}
+
+/** 推文证据行：url 必须是规范化的 x.com status 链接，audit 由上面的真实语义夹具签出。 */
+export function withSignedTweetEvidenceAudit<T extends ManualNewsEvidence>(evidence: T): T & {
+  response_key_id: string;
+  fetch_audit: NonNullable<ManualNewsEvidence['fetch_audit']>;
+} {
+  const match = /^https:\/\/x\.com\/([A-Za-z0-9_]{1,15})\/status\/(\d{1,25})$/.exec(evidence.url);
+  if (!match) throw new Error('test fixture: 推文证据的 url 必须是规范化的 x.com status 链接');
+  return {
+    ...evidence,
+    response_key_id: TEST_MANUAL_NEWS_RESPONSE_KEY_ID,
+    claims_supported: [evidence.excerpt],
+    fetch_audit: signedTweetEvidenceAudit({
+      tweet_id: match[2],
+      canonical_url: evidence.url,
+      text: evidence.excerpt,
+      author: evidence.title,
+      author_handle: match[1],
+      published_at: evidence.published_at,
+    }),
+  } as unknown as T & {
+    response_key_id: string;
+    fetch_audit: NonNullable<ManualNewsEvidence['fetch_audit']>;
+  };
+}
+
 export function withSignedArticleTextV2Audit<T extends ManualNewsEvidence>(
   evidence: T,
   completeBody = evidence.excerpt,

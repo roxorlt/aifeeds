@@ -9,8 +9,16 @@ import { createHash, createHmac } from 'node:crypto';
 import { describe, expect, test } from 'vitest';
 
 import { extractManualNewsEvidence } from './manual-news-leads-runtime';
-import { normalizedSignedEvidenceProvenance } from './manual-news-leads';
+import {
+  assertManualNewsEvidenceBodyDigests,
+  normalizedSignedEvidenceProvenance,
+} from './manual-news-leads';
 import type { ManualNewsEvidence } from './manual-news-leads';
+import {
+  createManualNewsOwnerVouchPayload,
+  createManualNewsOwnerVouchProof,
+  isCurrentManualNewsOwnerVouchProof,
+} from './manual-news-owner-vouch';
 import {
   isTweetEvidenceAudit,
   verifyTweetEvidenceAuditResponseHmac,
@@ -19,10 +27,27 @@ import {
 import {
   TEST_MANUAL_NEWS_RESPONSE_KEY_ID,
   TEST_MANUAL_NEWS_RESPONSE_SECRET,
+  testManualNewsResponseKeyring,
+  testManualNewsVerificationKeyring,
+  tweetGatewayBodySha256,
 } from './manual-news-signed-evidence.test-fixture';
 
 const TWEET_URL = 'https://x.com/AnthropicAI/status/1234567890123456789';
 const TWEET_TEXT = 'Anthropic 发布了新模型,并公布了权重开放计划。';
+const TWEET_PUBLISHED_AT = '2026-09-03T04:05:06.000Z';
+
+/**
+ * 网关签的 body_sha256 覆盖的是整个 JSON 响应体(JSON.stringify(tweet.document)),
+ * 与 sha256(推文正文) 必然不同 —— 夹具照抄这个语义,别再用正文的哈希顶包。
+ */
+const TWEET_BODY_SHA256 = tweetGatewayBodySha256({
+  tweet_id: '1234567890123456789',
+  canonical_url: TWEET_URL,
+  text: TWEET_TEXT,
+  author: 'Anthropic',
+  author_handle: 'AnthropicAI',
+  published_at: TWEET_PUBLISHED_AT,
+});
 
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
@@ -43,7 +68,7 @@ function signedTweetAudit(overrides: Record<string, unknown> = {}) {
     protocol_version: 'tweet_evidence_v1',
     request_nonce: 'a'.repeat(32),
     request_timestamp: '2026-09-03T04:05:06.000Z',
-    body_sha256: createHash('sha256').update(TWEET_TEXT).digest('hex'),
+    body_sha256: TWEET_BODY_SHA256,
     ...overrides,
   };
   return {
@@ -164,6 +189,63 @@ describe('推文证据的持久化 provenance', () => {
   test('证据行必须指向 audit 里那条推文,不能挂到别的 URL 上', () => {
     expect(() => normalizedSignedEvidenceProvenance(tweetEvidence({ url: 'https://example.com/story' })))
       .toThrow('manual_news_evidence_provenance_invalid');
+  });
+
+  test('回归:真实网关语义下 body_sha256 与 sha256(推文正文) 不同,证据摘要校验必须放行', async () => {
+    // prod(2026-09-03)实测:sha256(excerpt)=d4b347cb… 而 body_sha256=31d01068…,
+    // 因为网关签的是整个 JSON 响应体。这条用例把「两者不相等」当前提钉死,
+    // 再断言 assertManualNewsEvidenceBodyDigests 通过 —— 旧断言在这里必然报
+    // manual_news_evidence_proof_excerpt_invalid。
+    const evidence = tweetEvidence();
+    const excerptDigest = createHash('sha256').update(TWEET_TEXT).digest('hex');
+    expect(TWEET_BODY_SHA256).not.toBe(excerptDigest);
+    await expect(assertManualNewsEvidenceBodyDigests([evidence], testManualNewsResponseKeyring()))
+      .resolves.toBeUndefined();
+  });
+
+  test('回归:审计签名字段被改动,证据摘要校验仍然拦下(完整性锚点是 HMAC)', async () => {
+    // excerpt 没有可比的签名摘要,推文证据的完整性锚点只剩审计 HMAC:
+    // audit 里任何被签字段被动过,签名就对不上。
+    const responseKeys = testManualNewsResponseKeyring();
+    // body_sha256 被改:形状仍然合法,只能靠 HMAC 拦。
+    await expect(assertManualNewsEvidenceBodyDigests([tweetEvidence({
+      fetch_audit: { ...signedTweetAudit(), body_sha256: 'e'.repeat(64) } as never,
+    })], responseKeys)).rejects.toThrow('manual_news_evidence_response_hmac_invalid');
+    // 整条推文被换成另一条(tweet_id 与 URL 一起换,绕过形状校验):同样只能靠 HMAC 拦。
+    const otherId = '1234567890123456780';
+    const otherUrl = `https://x.com/AnthropicAI/status/${otherId}`;
+    await expect(assertManualNewsEvidenceBodyDigests([tweetEvidence({
+      url: otherUrl,
+      fetch_audit: {
+        ...signedTweetAudit(),
+        tweet_id: otherId, requested_url: otherUrl, canonical_url: otherUrl,
+      } as never,
+    })], responseKeys)).rejects.toThrow('manual_news_evidence_response_hmac_invalid');
+  });
+
+  test('回归:推文证据线索能签出 owner 担保 payload 与 proof', async () => {
+    // prod 上 vouch-candidate 返回 409 lead_not_vouchable 的直接成因就是这一步抛异常。
+    const evidence = tweetEvidence();
+    const responseKeys = testManualNewsResponseKeyring();
+    const verificationKeys = testManualNewsVerificationKeyring('a'.repeat(64));
+    const input = {
+      lead_id: 'ml-20260903-abc123def456',
+      assessment_version: 4_900_000,
+    };
+    const payload = await createManualNewsOwnerVouchPayload({
+      lead: { id: input.lead_id, review_date: '2026-09-03' },
+      statement: 'Anthropic 发布新模型并公布权重开放计划。',
+      evidence: [evidence],
+      vouched_at: 1_756_000_000_000,
+    });
+    expect(payload.primary_evidence_id).toBe(evidence.id);
+    const proof = await createManualNewsOwnerVouchProof(
+      { ...input, payload }, verificationKeys, responseKeys,
+    );
+    expect(proof.policy_version).toBe('owner_vouched_v1');
+    expect(await isCurrentManualNewsOwnerVouchProof(
+      { ...input, payload }, proof, verificationKeys, responseKeys,
+    )).toBe(true);
   });
 
   test('变异验证:不补 tweet 分支时,推文 audit 会被当成直抓 audit 判为无效来源', () => {
