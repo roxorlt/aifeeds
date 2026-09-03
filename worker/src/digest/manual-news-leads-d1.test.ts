@@ -4236,6 +4236,29 @@ describe('manual news owner vouch', () => {
     ]);
   });
 
+  test('merges a pre-freeze vouched lead into the first frozen batch of the day', async () => {
+    const state = await vouchFixture();
+    installSourceSupportReviewSchema(state);
+    state.db.sqlite.prepare(`DELETE FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28'`).run();
+    installSourceSupportAutomaticPool(state, null);
+
+    await expect(vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, 0, VOUCH_STATEMENT, 'vouch-key-1', 100,
+    )).resolves.toMatchObject({ ok: true, pending_initial_freeze: true, batch: null });
+    const frozen = await freezeNewsReviewBatchFromPool(state.env, '2026-08-28', 200);
+
+    expect(frozen.batch.candidates.map((candidate) => candidate.item_id))
+      .toContain(`blog:manual:${state.leadId}`);
+    expect(frozen.batch.candidates.find(
+      (candidate) => candidate.item_id === `blog:manual:${state.leadId}`,
+    )).toMatchObject({ title: VOUCH_STATEMENT, summary: VOUCH_STATEMENT, score: null });
+    expect(state.db.sqlite.prepare('SELECT confirmed_batch_id FROM manual_news_leads WHERE id = ?')
+      .get(state.leadId)).toEqual({ confirmed_batch_id: frozen.batch.batch_id });
+    await expect(sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 200))
+      .resolves.toMatchObject({ changed: false });
+  });
+
   test('returns the same result when the vouch idempotency key is replayed', async () => {
     const state = await vouchFixture();
     const frozen = await frozenVouchBatch(state);

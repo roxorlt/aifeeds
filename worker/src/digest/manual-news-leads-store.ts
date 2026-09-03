@@ -2248,6 +2248,13 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     }
   }
 
+  /**
+   * ⚠️ 已知限制（2026-09-03，`owner_vouched_v1` 上线时确认并接受）：跨天事件去重的历史只
+   * 来自 `manual_news_event_assessments`（大模型评估）与自动候选的 `event_fingerprint`，
+   * **owner 担保的线索不参与**——它没有评估行，事件身份只绑主证据 URL。
+   * 影响面：同一件事今天被担保、明天走大模型评估补录时，不会被判成「已推送过的旧闻」。
+   * 同一天内的重复担保仍被 confirm 的事件占用检查（mutation_nonce 唯一索引）挡住。
+   */
   async listRecentPriorEvents(date: string, excludeLeadId: string): Promise<ManualLeadPriorEvent[]> {
     const sourceScanLimit = MANUAL_NEWS_PRIOR_EVENT_PROVIDER_LIMITS.max_events * 2;
     const manual = await this.env.DB.prepare(
