@@ -7553,15 +7553,20 @@ export async function assertManualNewsEvidenceBodyDigests(
       throw new Error('manual_news_evidence_provider_operation_identity_invalid');
     }
     // 推文 audit 没有 proof_excerpt(推文正文本身就是完整内容,不存在「摘取前缀」),
-    // 正文完整性由 body_sha256 保证 —— 网关签名覆盖的就是这个字段。
-    // 官方账号白名单(2026-09-03)之前推文永远 reliable=false,走不到 source_support,
-    // 这条分支缺失时会在 proof_excerpt 上崩;开了白名单就必须补齐。
-    if (provenance.protocol_version === 'tweet_evidence_v1') {
-      if (await sha256Hex(item.excerpt) !== provenance.body_sha256) {
-        throw new Error('manual_news_evidence_proof_excerpt_invalid');
-      }
-      continue;
-    }
+    // 也没有任何覆盖 excerpt 的签名摘要可比 —— 上面刚跑完的审计 HMAC
+    // (verifyTweetEvidenceAuditResponseHmac)就是推文证据的完整性锚点,与大模型核验路径
+    // (normalizedSignedEvidenceProvenance 的推文分支)同一套判定。
+    //
+    // 为什么不能拿 excerpt 和 body_sha256 比:网关(dailyVideo 的
+    // manual-news-research-gateway.mjs,signTweetAudit)签的 body_sha256 覆盖的是**整个 JSON
+    // 响应体**(JSON.stringify(tweet.document)),而 excerpt 只是 document.text 这一个字段,
+    // 两者本就不相等。那个响应体摘要在取证当时已由 security/safe-url-fetch.ts 的
+    // parseTweetEvidenceAudit 对原始 HTTP 响应体校验过(sha256Hex(bodyText) === body_sha256),
+    // 响应体本身不落库,事后无从重算。
+    //
+    // 后续加固方向:网关在签名 audit 里另加 text_sha256(推文正文摘要),先让云端接受这个
+    // 可选字段、再让网关下发,两边都上线后此处才能恢复成逐字比对正文。
+    if (provenance.protocol_version === 'tweet_evidence_v1') continue;
     const excerptBytes = new TextEncoder().encode(item.excerpt).byteLength;
     const excerptCodePoints = Array.from(item.excerpt).length;
     if (await sha256Hex(item.excerpt) !== provenance.proof_excerpt!.sha256

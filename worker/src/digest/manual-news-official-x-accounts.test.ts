@@ -14,6 +14,7 @@ import {
   OFFICIAL_X_ACCOUNT_ACTORS,
 } from './manual-news-leads-runtime';
 import { officialXAccountFirstPersonRewrite } from './manual-news-leads';
+import type { ManualNewsEvidence } from './manual-news-leads';
 import { manualNewsEvidenceDetail } from './manual-news-leads-api';
 import {
   buildManualNewsSourceSupportVerificationPrompt,
@@ -29,6 +30,7 @@ import {
   TEST_MANUAL_NEWS_RESPONSE_SECRET,
   testManualNewsResponseKeyring,
   testManualNewsVerificationKeyring,
+  tweetGatewayBodySha256,
 } from './manual-news-signed-evidence.test-fixture';
 
 const verificationSecret = 'a'.repeat(64);
@@ -55,7 +57,15 @@ function tweetDocument(handle: string, tweetId = '2095175881690173885'): PublicD
     protocol_version: 'tweet_evidence_v1',
     request_nonce: 'a'.repeat(32),
     request_timestamp: '2026-09-03T04:05:06.000Z',
-    body_sha256: createHash('sha256').update(TWEET_TEXT).digest('hex'),
+    // 网关（signTweetAudit）签的 body_sha256 覆盖整个 JSON 响应体，不是推文正文。
+    body_sha256: tweetGatewayBodySha256({
+      tweet_id: tweetId,
+      canonical_url: canonicalUrl,
+      text: TWEET_TEXT,
+      author: `X @${handle}`,
+      author_handle: handle,
+      published_at: '2026-09-03T04:05:06.000Z',
+    }),
   };
   const fetchAudit = {
     ...unsigned,
@@ -302,29 +312,51 @@ describe('第一人称主语替换', () => {
 });
 
 describe('推文证据的正文完整性', () => {
-  test('推文正文被改动后，证据摘要校验拦下', async () => {
-    const evidence = await extractManualNewsEvidence(tweetDocument('GoogleAI'));
-    const tamperedText = `${TWEET_TEXT} And more.`;
-    const tampered = { ...evidence!, excerpt: tamperedText, claims_supported: [tamperedText] };
-    const selection = { evidence_id: evidence!.id, quote: TWEET_TEXT };
-    await expect(createManualNewsSourceSupportProof(
+  // 推文证据没有任何覆盖 excerpt 的签名摘要:网关签的 body_sha256 覆盖整个 JSON 响应体
+  // （JSON.stringify(tweet.document)），excerpt 只是其中的 text 字段，两者本就不相等；
+  // 那个响应体摘要在取证当时由 parseTweetEvidenceAudit 校验过，响应体不落库。
+  // 所以「改 excerpt」这件事此处检不出来，能拦下篡改的是审计 HMAC。
+  async function sourceSupportProofFor(evidence: ManualNewsEvidence, quote: string) {
+    return createManualNewsSourceSupportProof(
       {
         lead_id: 'ml-20260903-tampered',
         assessment_version: 9,
         payload: await createManualNewsSourceSupportPayload({
           lead: {
             id: 'ml-20260903-tampered', review_date: '2026-09-03', input_type: 'text_url',
-            input_text: 'Google 已发布 Gemini 3.8 Flash。', input_url: evidence!.url, note: '',
+            input_text: 'Google 已发布 Gemini 3.8 Flash。', input_url: evidence.url, note: '',
           },
           authorization: {
             audit_id: 78, candidate_authorization: 'source_support_v1',
             submit_identity_digest: '4'.repeat(64), idempotency_key: 'submit-tampered',
           },
-          evidence: [tampered], selection,
-          verification: { supported: true, evidence_id: evidence!.id },
+          evidence: [evidence], selection: { evidence_id: evidence.id, quote },
+          verification: { supported: true, evidence_id: evidence.id },
         }),
       },
       testManualNewsVerificationKeyring(verificationSecret), testManualNewsResponseKeyring(),
-    )).rejects.toThrow('manual_news_evidence_proof_excerpt_invalid');
+    );
+  }
+
+  test('推文正文被改动，本函数检不出来（没有可比的签名摘要，这是已知边界）', async () => {
+    const evidence = await extractManualNewsEvidence(tweetDocument('GoogleAI'));
+    const tamperedText = `${TWEET_TEXT} And more.`;
+    const tampered = { ...evidence!, excerpt: tamperedText, claims_supported: [tamperedText] };
+    // 明确断言「通过」：旧断言（sha256(excerpt) === body_sha256）在真实网关语义下永远不成立，
+    // 会把所有合法推文证据一并挡掉 —— prod 上 vouch-candidate 409 就是这么来的。
+    // 补上正文摘要的加固方向是让网关在签名 audit 里另加 text_sha256。
+    await expect(sourceSupportProofFor(tampered, TWEET_TEXT)).resolves.toMatchObject({
+      hmac_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+  });
+
+  test('审计签名字段被改动，证据摘要校验拦下（完整性锚点是 HMAC）', async () => {
+    const evidence = await extractManualNewsEvidence(tweetDocument('GoogleAI'));
+    const tamperedAudit = {
+      ...evidence!,
+      fetch_audit: { ...(evidence!.fetch_audit as Record<string, unknown>), body_sha256: 'e'.repeat(64) },
+    } as ManualNewsEvidence;
+    await expect(sourceSupportProofFor(tamperedAudit, TWEET_TEXT))
+      .rejects.toThrow('manual_news_evidence_response_hmac_invalid');
   });
 });
