@@ -2624,7 +2624,18 @@ export async function vouchManualNewsLeadCandidate(
     if (!['needs_review', 'failed'].includes(lead.status) || lead.evidence.length < 1) {
       return { ok: false, status: 409, error: 'lead_not_vouchable', lead };
     }
-    const written = await writeOwnerVouchProof(env, lead, statement, idempotencyKey, now);
+    let written: Awaited<ReturnType<typeof writeOwnerVouchProof>>;
+    try {
+      written = await writeOwnerVouchProof(env, lead, statement, idempotencyKey, now);
+    } catch (error) {
+      // 证据链自己不成立(证据集非法 / response HMAC 或正文摘要对不上)时，担保这条路本来
+      // 就走不通，回 409 让 owner 看到「不能担保」，而不是把内部异常抛成 500。
+      const message = error instanceof Error ? error.message : '';
+      if (message === 'owner_vouch_payload_invalid' || message.startsWith('manual_news_evidence_')) {
+        return { ok: false, status: 409, error: 'lead_not_vouchable', lead };
+      }
+      throw error;
+    }
     if (!written.ok) return written;
   }
   return confirmManualNewsLeadCandidate(

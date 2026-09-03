@@ -4336,6 +4336,23 @@ describe('manual news owner vouch', () => {
       .toEqual({ count: 0 });
   });
 
+  test('refuses a lead whose signed evidence chain no longer verifies', async () => {
+    const state = await vouchFixture();
+    const frozen = await frozenVouchBatch(state);
+    state.db.sqlite.prepare(`UPDATE manual_news_evidence
+      SET fetch_audit_json = json_set(fetch_audit_json, '$.body_sha256', ?)
+      WHERE lead_id = ?`).run('0'.repeat(64), state.leadId);
+
+    await expect(vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-key-1', 100,
+    )).resolves.toMatchObject({ ok: false, status: 409, error: 'lead_not_vouchable' });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId))
+      .toEqual({ count: 0 });
+    expect(state.db.sqlite.prepare('SELECT version, confirmed_at FROM manual_news_leads WHERE id = ?')
+      .get(state.leadId)).toEqual({ version: 4, confirmed_at: null });
+  });
+
   test('refuses a lead that already carries a verified assessment', async () => {
     const state = await vouchFixture();
     installSourceSupportReviewSchema(state);
