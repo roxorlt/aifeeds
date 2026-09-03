@@ -51,6 +51,35 @@ describe('谓语动作词表与正则同步', () => {
     expect(actions('获得战略投资')).toEqual(['finance']);
   });
 
+  test('新增动作认得常见 AI 新闻动词', () => {
+    const actions = (value: string) => factActionOccurrences(value).map((item) => item.action);
+    expect(actions('更新')).toEqual(['update']);
+    expect(actions('升级')).toEqual(['update']);
+    expect(actions('updated')).toEqual(['update']);
+    expect(actions('部署')).toEqual(['deploy']);
+    expect(actions('deployed')).toEqual(['deploy']);
+    expect(actions('任命')).toEqual(['appoint']);
+    expect(actions('appoints')).toEqual(['appoint']);
+    expect(actions('离职')).toEqual(['depart']);
+    expect(actions('resigned')).toEqual(['depart']);
+    expect(actions('突破')).toEqual(['reach']);
+    expect(actions('surpassed')).toEqual(['reach']);
+    expect(actions('警告')).toEqual(['warn']);
+    expect(actions('warns')).toEqual(['warn']);
+    expect(actions('测试')).toEqual(['test']);
+    expect(actions('piloted')).toEqual(['test']);
+  });
+
+  test('新增动作不会被词内子串误命中', () => {
+    const actions = (value: string) => factActionOccurrences(value).map((item) => item.action);
+    expect(actions('deployment')).toEqual([]);
+    expect(actions('disappointed')).toEqual([]);
+    expect(actions('department')).toEqual([]);
+    expect(actions('outreach')).toEqual([]);
+    expect(actions('latest')).toEqual([]);
+    expect(actions('模型部署活动')).toEqual([]);
+  });
+
   test('中文写法只含中文，英文写法只含 ASCII', () => {
     for (const entry of FACT_ACTION_VOCABULARY) {
       for (const surface of entry.zh) expect(surface).toMatch(/\p{Script=Han}/u);

@@ -3686,7 +3686,8 @@ export type FactAction =
   | 'approve' | 'apply_approval' | 'reject' | 'disclose' | 'release' | 'request'
   | 'regulatory_require' | 'mandate' | 'order' | 'pause' | 'invest' | 'finance'
   | 'sign' | 'sue' | 'ban' | 'open_source' | 'train' | 'partner' | 'layoff'
-  | 'decide' | 'discuss' | 'deny' | 'open_access' | 'preview' | 'limit_scope';
+  | 'decide' | 'discuss' | 'deny' | 'open_access' | 'preview' | 'limit_scope'
+  | 'update' | 'deploy' | 'appoint' | 'depart' | 'reach' | 'warn' | 'test';
 
 interface FactActionOccurrence {
   action: FactAction;
@@ -3738,6 +3739,14 @@ const FACT_ACTION_PATTERNS: ReadonlyArray<FactActionPattern> = [
   ['deny', /(?:否认)|\b(?:den(?:y|ies|ied|ying))\b/giu, /^den(?:y|ies|ied|ying)/iu],
   ['open_access', /(?:开放(?!研究预览))|\b(?:open(?:s|ed|ing)?\s+(?:access|service))\b/giu, /^open(?:ing|ed|s)?\b/iu],
   ['preview', /(?:开放研究预览)|\b(?:open(?:s|ed|ing)?\s+(?:a\s+)?research\s+preview(?:\s+of)?)\b/giu, /^open(?:ing|ed|s)?\b/iu],
+  // 新增动作(2026-09-03):AI 新闻里高频但词表原来没有的动作。
+  ['update', /(?:更新|升级|迭代)|\b(?:updat(?:e|es|ed|ing)|upgrad(?:e|es|ed|ing))\b/giu, /^(?:updat(?:ing|ed|es|e)|upgrad(?:ing|ed|es|e))\b/iu],
+  ['deploy', /(?:部署)|\b(?:deploy(?:s|ed|ing)?)\b/giu, /^deploy(?:ing|ed|s)?\b/iu],
+  ['appoint', /(?:任命|聘请|出任)|\b(?:appoint(?:s|ed)?|hir(?:e|es|ed))\b/giu, /^(?:appoint(?:ed|s)?|hir(?:ed|es|e))\b/iu],
+  ['depart', /(?:离职|辞职)|\b(?:resign(?:s|ed)?|depart(?:s|ed)?|step(?:s|ped)?\s+down)\b/giu, /^(?:resign(?:ed|s)?|depart(?:ed|s)?|step(?:ped|s)?)\b/iu],
+  ['reach', /(?:达到|突破|超过)|\b(?:reach(?:es|ed)?|surpass(?:es|ed)?|exceed(?:s|ed)?)\b/giu, /^(?:reach(?:ed|es)?|surpass(?:ed|es)?|exceed(?:ed|s)?)\b/iu],
+  ['warn', /(?:警告)|\b(?:warn(?:s|ed)?)\b/giu, /^warn(?:ed|s)?\b/iu],
+  ['test', /(?:测试|试用)|\b(?:test(?:s|ed|ing)?|pilot(?:s|ed)?)\b/giu, /^(?:test(?:ing|ed|s)?|pilot(?:ed|s)?)\b/iu],
   ['limit_scope', /(?:受限|限定|限于|限制(?:为|在)?)|\b(?:limit(?:s|ed|ing)?\b|restrict(?:s|ed|ing)?\b|(?:cover|support)(?:s|ed|ing)?\s+[^.;,]{0,60}(?:\bonly\b|\bsupported\s+(?:models?|products?)\b))/giu, /^(?:limit(?:s|ed|ing)?|restrict(?:s|ed|ing)?|cover(?:s|ed|ing)?|support(?:s|ed|ing)?)/iu],
 ];
 
@@ -3787,6 +3796,13 @@ export const FACT_ACTION_VOCABULARY: ReadonlyArray<FactActionVocabularyEntry> = 
   { action: 'open_access', zh: ['开放访问'], en: ['opens access', 'opens service'] },
   { action: 'preview', zh: ['开放研究预览'], en: ['opens a research preview of'] },
   { action: 'limit_scope', zh: ['限制', '限定'], en: ['limits', 'restricts'] },
+  { action: 'update', zh: ['更新', '升级', '迭代'], en: ['updates', 'upgraded'] },
+  { action: 'deploy', zh: ['部署'], en: ['deploys', 'deployed'] },
+  { action: 'appoint', zh: ['任命', '聘请', '出任'], en: ['appoints', 'hired'] },
+  { action: 'depart', zh: ['离职', '辞职'], en: ['resigns', 'departed', 'steps down'] },
+  { action: 'reach', zh: ['达到', '突破', '超过'], en: ['reaches', 'surpassed', 'exceeded'] },
+  { action: 'warn', zh: ['警告'], en: ['warns', 'warned'] },
+  { action: 'test', zh: ['测试', '试用'], en: ['tests', 'piloted'] },
 ];
 
 function factActions(value: string): Set<FactAction> {
@@ -3796,6 +3812,7 @@ function factActions(value: string): Set<FactAction> {
 const OPPOSING_FACT_ACTIONS: ReadonlyArray<readonly [FactAction, FactAction]> = [
   ['acquire', 'sell'], ['expand', 'exit'], ['add', 'remove'], ['approve', 'reject'],
   ['release', 'pause'], ['request', 'mandate'], ['approve', 'apply_approval'],
+  ['appoint', 'depart'],
 ];
 
 function hasOpposingFactActions(candidate: string, quote: string): boolean {
@@ -3924,6 +3941,11 @@ export function factActionOccurrences(value: string): FactActionOccurrence[] {
       return false;
     }
     if (occurrence.action === 'train' && occurrence.surface === '训练'
+      && /^(?:政策|活动|数据|方法|能力|服务|系统|平台|流程|工具|计划)/u.test(value.slice(occurrence.end))) {
+      return false;
+    }
+    // 「模型部署活动」这类是名词性短语,不是「部署」这个动作,与上面的「训练」同理。
+    if (occurrence.action === 'deploy' && occurrence.surface === '部署'
       && /^(?:政策|活动|数据|方法|能力|服务|系统|平台|流程|工具|计划)/u.test(value.slice(occurrence.end))) {
       return false;
     }
@@ -4160,6 +4182,7 @@ const GOVERNED_ACTION_COMPLEMENTS: Readonly<Record<FactAction, readonly FactActi
   acquire: [], sell: [], expand: [], exit: [], add: [], remove: [], support: [], approve: [], release: [],
   apply_approval: [], invest: [], finance: [], sign: [], sue: [], open_source: [], train: [], partner: [],
   layoff: [], discuss: [], open_access: [], preview: [], limit_scope: [],
+  update: [], deploy: [], appoint: [], depart: [], reach: [], warn: [], test: [],
 };
 const STRICT_CONTROL_CHAIN_ROOTS: ReadonlySet<FactAction> = new Set([
   'order', 'mandate', 'regulatory_require', 'request', 'ban',
