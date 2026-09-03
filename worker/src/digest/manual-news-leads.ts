@@ -4052,6 +4052,9 @@ const ORGANIZATION_ENTITY_REGISTRY: Readonly<Record<string, readonly string[]>> 
   amazon: ['amazon', 'aws'], xai: ['xai'], baidu: ['百度'], tencent: ['腾讯'],
   alibaba: ['alibaba', '阿里', '阿里巴巴'], bytedance: ['字节', '字节跳动'], huawei: ['华为'],
   zhipu: ['智谱', '智谱ai'], moonshot: ['月之暗面'], deepseek: ['deepseek', '深度求索'],
+  // 官方 X 账号白名单里的 Actor 必须都能被认出来,否则第一人称绑定后的主体无从比对。
+  mistral: ['mistral', 'mistral ai'], huggingface: ['hugging face', 'huggingface'],
+  github: ['github'], perplexity: ['perplexity', 'perplexity ai'], cohere: ['cohere'],
 };
 const PRODUCT_ENTITY_REGISTRY: Readonly<Record<string, readonly string[]>> = {
   gpt: ['gpt'], claude: ['claude'], kimi: ['kimi'], gemini: ['gemini'], codex: ['codex'],
@@ -6547,6 +6550,33 @@ function sourceSupportEvidence(input: {
   return selected;
 }
 
+// 官方 X 账号白名单(2026-09-03)。放在核心模块而不是 runtime,是因为「官方第一人称绑定」
+// 也要用它;runtime 只负责读 env 并覆盖(见 officialXAccountActors)。
+export interface OfficialXAccountActor {
+  /** 用于「官方第一人称」绑定的实体名,必须能被下面的实体登记认出来。 */
+  actor: string;
+  /** 给人看的账号归属名(日志 / 面板)。 */
+  label: string;
+}
+
+export const OFFICIAL_X_ACCOUNT_ACTORS: ReadonlyMap<string, OfficialXAccountActor> = new Map([
+  ['googleai', { actor: 'Google', label: 'Google AI' }],
+  ['googledeepmind', { actor: 'Google DeepMind', label: 'Google DeepMind' }],
+  ['openai', { actor: 'OpenAI', label: 'OpenAI' }],
+  ['anthropicai', { actor: 'Anthropic', label: 'Anthropic' }],
+  ['aiatmeta', { actor: 'Meta', label: 'AI at Meta' }],
+  ['xai', { actor: 'xAI', label: 'xAI' }],
+  ['mistralai', { actor: 'Mistral AI', label: 'Mistral AI' }],
+  ['alibaba_qwen', { actor: 'Alibaba Qwen', label: 'Alibaba Qwen' }],
+  ['deepseek_ai', { actor: 'DeepSeek', label: 'DeepSeek' }],
+  ['nvidia', { actor: 'NVIDIA', label: 'NVIDIA' }],
+  ['huggingface', { actor: 'Hugging Face', label: 'Hugging Face' }],
+  ['microsoft', { actor: 'Microsoft', label: 'Microsoft' }],
+  ['github', { actor: 'GitHub', label: 'GitHub' }],
+  ['perplexity_ai', { actor: 'Perplexity', label: 'Perplexity' }],
+  ['cohere', { actor: 'Cohere', label: 'Cohere' }],
+]);
+
 const ANTHROPIC_MHS_RESEARCH_PREVIEW_URL =
   'https://www.anthropic.com/news/model-hardware-standard-research-preview';
 const ANTHROPIC_FIRST_PERSON_PREVIEW_PREFIXES = [
@@ -6556,11 +6586,115 @@ const ANTHROPIC_FIRST_PERSON_PREVIEW_PREFIXES = [
 ] as const;
 const OFFICIAL_PRIMARY_FIRST_PERSON_ACTOR_BINDING =
   'official_primary_first_person_actor_v1' as const;
+const OFFICIAL_X_ACCOUNT_FIRST_PERSON_ACTOR_BINDING =
+  'official_x_account_first_person_actor_v1' as const;
+
+type FirstPersonActorBindingContract =
+  | typeof OFFICIAL_PRIMARY_FIRST_PERSON_ACTOR_BINDING
+  | typeof OFFICIAL_X_ACCOUNT_FIRST_PERSON_ACTOR_BINDING;
 
 interface OfficialPrimaryFirstPersonActorBinding {
-  binding_contract: typeof OFFICIAL_PRIMARY_FIRST_PERSON_ACTOR_BINDING;
+  binding_contract: FirstPersonActorBindingContract;
   verification_quote: string;
 }
+
+interface FirstPersonActorBindingInput {
+  selected: ManualNewsEvidence;
+  rawQuote: string;
+  parsedFact: ReturnType<typeof parsedManualNewsSourceSupportFact>;
+  publisher: string;
+}
+
+interface FirstPersonActorBindingRule {
+  binding_contract: FirstPersonActorBindingContract;
+  /** 返回替换主语后的核验句;任何一处不满足都必须返回 null(fail closed)。 */
+  resolve(input: FirstPersonActorBindingInput): string | null;
+}
+
+/** fact 的主语必须与绑定要用的 Actor 指向同一个已登记实体,否则不允许替换。 */
+function firstPersonFactSubjectMatches(
+  parsedFact: FirstPersonActorBindingInput['parsedFact'],
+  actor: string,
+): boolean {
+  const identity = canonicalSubjectIdentity(actor);
+  if (!identity || parsedFact.slots.actor !== identity) return false;
+  const actions = factActionOccurrences(parsedFact.verification_fact);
+  if (actions.length !== 1) return false;
+  const subject = leadingFactUnitSubject(parsedFact.verification_fact, actions[0]);
+  return !!subject && canonicalSubjectIdentity(subject) === identity;
+}
+
+// 第一人称开头:「(Today,) We're / We are / We've / We have / We + 动词」。
+const FIRST_PERSON_SOURCE_SUPPORT_PREFIX =
+  /^(?<lead>today,?\s+)?(?<pronoun>we(?:['\u2019]re|\s+are)|we(?:['\u2019]ve|\s+have)|we)\s+/iu;
+
+/** 把第一人称主语换成 Actor,并保持时态:we're → is、we've → has、we → 原形。 */
+export function officialXAccountFirstPersonRewrite(rawQuote: string, actor: string): string | null {
+  const match = FIRST_PERSON_SOURCE_SUPPORT_PREFIX.exec(rawQuote);
+  if (!match) return null;
+  const pronoun = (match.groups?.pronoun || '').toLowerCase().replace(/\s+/gu, ' ');
+  const auxiliary = /^we(?:['\u2019]re| are)$/u.test(pronoun)
+    ? 'is '
+    : /^we(?:['\u2019]ve| have)$/u.test(pronoun) ? 'has ' : '';
+  const lead = match.groups?.lead || '';
+  return `${lead}${actor} ${auxiliary}${rawQuote.slice(match[0].length)}`;
+}
+
+const OFFICIAL_X_ACCOUNT_STATUS_URL =
+  /^https:\/\/(?:x\.com|twitter\.com)\/([A-Za-z0-9_]{1,20})\/status\/(\d{1,25})$/u;
+
+/** 严格解析推文 URL 并取白名单 Actor:https、无凭证、无端口、无 query/hash。 */
+function officialXAccountActorForUrl(value: string): OfficialXAccountActor | undefined {
+  const match = OFFICIAL_X_ACCOUNT_STATUS_URL.exec(value);
+  if (!match) return undefined;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== 'https:' || url.username || url.password || url.port
+    || url.search || url.hash
+    || !['x.com', 'twitter.com'].includes(url.hostname)
+    || url.hostname !== url.host) return undefined;
+  return OFFICIAL_X_ACCOUNT_ACTORS.get(match[1].toLowerCase());
+}
+
+const FIRST_PERSON_ACTOR_BINDING_RULES: ReadonlyArray<FirstPersonActorBindingRule> = [
+  {
+    binding_contract: OFFICIAL_PRIMARY_FIRST_PERSON_ACTOR_BINDING,
+    resolve({ selected, rawQuote, parsedFact, publisher }) {
+      if (publisher.toLowerCase() !== 'anthropic.com'
+        || selected.url !== ANTHROPIC_MHS_RESEARCH_PREVIEW_URL) return null;
+      let url: URL;
+      try {
+        url = new URL(selected.url);
+      } catch {
+        return null;
+      }
+      if (url.protocol !== 'https:' || url.username || url.password || url.port
+        || url.hostname !== 'www.anthropic.com' || url.host !== 'www.anthropic.com'
+        || url.pathname !== '/news/model-hardware-standard-research-preview'
+        || url.search || url.hash) return null;
+      const factActions = factActionOccurrences(parsedFact.verification_fact);
+      const factSubject = factActions.length === 1
+        ? leadingFactUnitSubject(parsedFact.verification_fact, factActions[0])
+        : null;
+      if (parsedFact.slots.actor !== 'anthropic' || factSubject !== 'Anthropic') return null;
+      const prefix = ANTHROPIC_FIRST_PERSON_PREVIEW_PREFIXES.find((value) => rawQuote.startsWith(value));
+      if (!prefix) return null;
+      return `Anthropic is opening a research preview of ${rawQuote.slice(prefix.length)}`;
+    },
+  },
+  {
+    binding_contract: OFFICIAL_X_ACCOUNT_FIRST_PERSON_ACTOR_BINDING,
+    resolve({ selected, rawQuote, parsedFact }) {
+      const account = officialXAccountActorForUrl(selected.url);
+      if (!account || !firstPersonFactSubjectMatches(parsedFact, account.actor)) return null;
+      return officialXAccountFirstPersonRewrite(rawQuote, account.actor);
+    },
+  },
+];
 
 function officialPrimaryFirstPersonActorBinding(
   selected: ManualNewsEvidence,
@@ -6571,41 +6705,25 @@ function officialPrimaryFirstPersonActorBinding(
     || MANUAL_NEWS_SOURCE_SUPPORT_UNSAFE_UNICODE.test(selected.publisher)) return null;
   const publisher = selected.publisher
     .replace(/^[\u0009\u000a\u000d\u0020]+|[\u0009\u000a\u000d\u0020]+$/gu, '');
-  if (!/^[\x00-\x7f]+$/u.test(publisher) || publisher.toLowerCase() !== 'anthropic.com'
-    || selected.url !== ANTHROPIC_MHS_RESEARCH_PREVIEW_URL) return null;
-  let url: URL;
-  try {
-    url = new URL(selected.url);
-  } catch {
-    return null;
-  }
-  if (url.protocol !== 'https:' || url.username || url.password || url.port
-    || url.hostname !== 'www.anthropic.com' || url.host !== 'www.anthropic.com'
-    || url.pathname !== '/news/model-hardware-standard-research-preview'
-    || url.search || url.hash) return null;
-  const factActions = factActionOccurrences(parsedFact.verification_fact);
-  const factSubject = factActions.length === 1
-    ? leadingFactUnitSubject(parsedFact.verification_fact, factActions[0])
-    : null;
-  if (parsedFact.slots.actor !== 'anthropic' || factSubject !== 'Anthropic') return null;
+  if (!/^[\x00-\x7f]+$/u.test(publisher)) return null;
+  // quote 必须位于 excerpt 的首个非空白位置 —— 只有正文开头的第一人称才指向发布者本人。
   let excerptStart = 0;
   while (excerptStart < selected.excerpt.length
     && /[\u0009\u000a\u000d\u0020]/u.test(selected.excerpt[excerptStart])) excerptStart += 1;
   if (selected.excerpt.indexOf(rawQuote) !== excerptStart) return null;
-  const prefix = ANTHROPIC_FIRST_PERSON_PREVIEW_PREFIXES.find((value) => rawQuote.startsWith(value));
-  if (!prefix) return null;
-  const verificationQuote = normalizeManualNewsSourceSupportText(
-    `Anthropic is opening a research preview of ${rawQuote.slice(prefix.length)}`,
-  );
-  if (factActionOccurrences(verificationQuote).length !== 1) return null;
-  return {
-    binding_contract: OFFICIAL_PRIMARY_FIRST_PERSON_ACTOR_BINDING,
-    verification_quote: verificationQuote,
-  };
+  for (const rule of FIRST_PERSON_ACTOR_BINDING_RULES) {
+    const rewritten = rule.resolve({ selected, rawQuote, parsedFact, publisher });
+    if (!rewritten) continue;
+    const verificationQuote = normalizeManualNewsSourceSupportText(rewritten);
+    // 替换后必须仍然只有一个动作,否则不是「只换了主语」。
+    if (factActionOccurrences(verificationQuote).length !== 1) continue;
+    return { binding_contract: rule.binding_contract, verification_quote: verificationQuote };
+  }
+  return null;
 }
 
 function isFirstPersonSourceSupportQuote(rawQuote: string): boolean {
-  return /^We(?:[’']re|\s)/u.test(rawQuote);
+  return FIRST_PERSON_SOURCE_SUPPORT_PREFIX.test(rawQuote);
 }
 
 export function validateManualNewsSourceSupportSelection(
@@ -7427,6 +7545,16 @@ async function assertManualNewsEvidenceBodyDigests(
         provenance.retrieval_generation,
       )) {
       throw new Error('manual_news_evidence_provider_operation_identity_invalid');
+    }
+    // 推文 audit 没有 proof_excerpt(推文正文本身就是完整内容,不存在「摘取前缀」),
+    // 正文完整性由 body_sha256 保证 —— 网关签名覆盖的就是这个字段。
+    // 官方账号白名单(2026-09-03)之前推文永远 reliable=false,走不到 source_support,
+    // 这条分支缺失时会在 proof_excerpt 上崩;开了白名单就必须补齐。
+    if (provenance.protocol_version === 'tweet_evidence_v1') {
+      if (await sha256Hex(item.excerpt) !== provenance.body_sha256) {
+        throw new Error('manual_news_evidence_proof_excerpt_invalid');
+      }
+      continue;
     }
     const excerptBytes = new TextEncoder().encode(item.excerpt).byteLength;
     const excerptCodePoints = Array.from(item.excerpt).length;

@@ -14,7 +14,12 @@ import {
   type TrustedGatewayFetcher,
   type TrustedResearchService,
 } from '../security/safe-url-fetch';
-import type { ManualNewsEvidence, ManualEvidenceSourceType } from './manual-news-leads';
+import {
+  OFFICIAL_X_ACCOUNT_ACTORS,
+  type ManualNewsEvidence,
+  type ManualEvidenceSourceType,
+  type OfficialXAccountActor,
+} from './manual-news-leads';
 import {
   processManualNewsLead,
   type ManualLeadProcessingAdapters,
@@ -104,30 +109,8 @@ const INDEPENDENT_MEDIA_DOMAINS = new Set([
 // 厂商官方账号发的推文就是一手公告,与官网 blog 同级;其余账号维持 reliable=false / 'other'。
 // handle 只能从**已签名**的 audit.canonical_url 里取(见 extractManualNewsEvidence),
 // 不能用 provider 返回的裸 author_handle —— 那个字段没进签名,可被伪造。
-export interface OfficialXAccountActor {
-  /** 用于「官方第一人称」绑定的实体名,必须能被 manual-news-leads 的实体登记认出来。 */
-  actor: string;
-  /** 给人看的账号归属名(日志 / 面板)。 */
-  label: string;
-}
-
-export const OFFICIAL_X_ACCOUNT_ACTORS: ReadonlyMap<string, OfficialXAccountActor> = new Map([
-  ['googleai', { actor: 'Google', label: 'Google AI' }],
-  ['googledeepmind', { actor: 'Google DeepMind', label: 'Google DeepMind' }],
-  ['openai', { actor: 'OpenAI', label: 'OpenAI' }],
-  ['anthropicai', { actor: 'Anthropic', label: 'Anthropic' }],
-  ['aiatmeta', { actor: 'Meta', label: 'AI at Meta' }],
-  ['xai', { actor: 'xAI', label: 'xAI' }],
-  ['mistralai', { actor: 'Mistral AI', label: 'Mistral AI' }],
-  ['alibaba_qwen', { actor: 'Alibaba Qwen', label: 'Alibaba Qwen' }],
-  ['deepseek_ai', { actor: 'DeepSeek', label: 'DeepSeek' }],
-  ['nvidia', { actor: 'NVIDIA', label: 'NVIDIA' }],
-  ['huggingface', { actor: 'Hugging Face', label: 'Hugging Face' }],
-  ['microsoft', { actor: 'Microsoft', label: 'Microsoft' }],
-  ['github', { actor: 'GitHub', label: 'GitHub' }],
-  ['perplexity_ai', { actor: 'Perplexity', label: 'Perplexity' }],
-  ['cohere', { actor: 'Cohere', label: 'Cohere' }],
-]);
+// 名单本身定义在 manual-news-leads.ts(官方第一人称绑定也要用),这里只做 env 覆盖。
+export { OFFICIAL_X_ACCOUNT_ACTORS, type OfficialXAccountActor } from './manual-news-leads';
 
 const OFFICIAL_X_HANDLE_SHAPE = /^[a-z0-9_]{1,15}$/u;
 const OFFICIAL_X_ACTOR_SHAPE = /^[\p{L}\p{N}][\p{L}\p{N} .&'’-]{0,63}$/u;

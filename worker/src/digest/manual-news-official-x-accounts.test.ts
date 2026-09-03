@@ -13,14 +13,27 @@ import {
   officialXAccountActors,
   OFFICIAL_X_ACCOUNT_ACTORS,
 } from './manual-news-leads-runtime';
+import { officialXAccountFirstPersonRewrite } from './manual-news-leads';
 import { manualNewsEvidenceDetail } from './manual-news-leads-api';
+import {
+  buildManualNewsSourceSupportVerificationPrompt,
+  createManualNewsSourceSupportPayload,
+  createManualNewsSourceSupportProof,
+  isCurrentManualNewsSourceSupportProof,
+  validateManualNewsSourceSupportSelection,
+  validateManualNewsSourceSupportVerification,
+} from './manual-news-leads';
 import type { PublicDocument } from '../security/safe-url-fetch';
 import {
   TEST_MANUAL_NEWS_RESPONSE_KEY_ID,
   TEST_MANUAL_NEWS_RESPONSE_SECRET,
+  testManualNewsResponseKeyring,
+  testManualNewsVerificationKeyring,
 } from './manual-news-signed-evidence.test-fixture';
 
-const TWEET_TEXT = 'We are rolling out Gemini 3.8 Flash to all users today.';
+const verificationSecret = 'a'.repeat(64);
+
+const TWEET_TEXT = 'We\u2019ve released Gemini 3.8 Flash.';
 
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
@@ -170,5 +183,148 @@ describe('证据列表里的来源标签', () => {
       source_type: 'other',
       reliable: false,
     });
+  });
+});
+
+describe('官方 X 账号的第一人称放行（source_support_v1 全链路）', () => {
+  const fact = 'Google 已发布 Gemini 3.8 Flash。';
+
+  async function officialTweetEvidence(handle: string) {
+    const evidence = await extractManualNewsEvidence(tweetDocument(handle));
+    return evidence!;
+  }
+
+  test('@GoogleAI 的第一人称推文可以支持 owner 写的事实，一路走到 proof', async () => {
+    const evidence = await officialTweetEvidence('GoogleAI');
+    const selection = validateManualNewsSourceSupportSelection(
+      { evidence_id: evidence.id, quote: TWEET_TEXT },
+      { fact, evidence: [evidence] },
+    );
+    expect(selection).toEqual({ evidence_id: evidence.id, quote: TWEET_TEXT });
+
+    const verification = validateManualNewsSourceSupportVerification(
+      { supported: true, evidence_id: evidence.id }, selection,
+    );
+    const payload = await createManualNewsSourceSupportPayload({
+      lead: {
+        id: 'ml-20260903-googleai-flash', review_date: '2026-09-03', input_type: 'text_url',
+        input_text: fact, input_url: evidence.url, note: '',
+      },
+      authorization: {
+        audit_id: 77,
+        candidate_authorization: 'source_support_v1',
+        submit_identity_digest: '3'.repeat(64),
+        idempotency_key: 'submit-googleai-flash',
+      },
+      evidence: [evidence], selection, verification,
+    });
+    // 绑定只作用于送给模型的核验句，不写进签名载荷。
+    expect(JSON.stringify(payload)).not.toContain('official_x_account_first_person_actor_v1');
+    expect(JSON.stringify(payload)).not.toContain('verification_quote');
+
+    const proofInput = {
+      lead_id: 'ml-20260903-googleai-flash', assessment_version: 9, payload,
+    };
+    const proof = await createManualNewsSourceSupportProof(
+      proofInput,
+      testManualNewsVerificationKeyring(verificationSecret), testManualNewsResponseKeyring(),
+    );
+    await expect(isCurrentManualNewsSourceSupportProof(
+      proofInput, proof,
+      testManualNewsVerificationKeyring(verificationSecret), testManualNewsResponseKeyring(),
+    )).resolves.toBe(true);
+  });
+
+  test('核验提示词声明了官方 X 账号的绑定契约', async () => {
+    const evidence = await officialTweetEvidence('GoogleAI');
+    const selection = validateManualNewsSourceSupportSelection(
+      { evidence_id: evidence.id, quote: TWEET_TEXT }, { fact, evidence: [evidence] },
+    );
+    const prompt = buildManualNewsSourceSupportVerificationPrompt({
+      fact, evidence: [evidence], selection,
+    });
+    expect(prompt.system).toContain('official_x_account_first_person_actor_v1');
+    const body = JSON.parse(prompt.user) as {
+      selected_evidence: { verification_quote?: string; binding_contract?: string };
+    };
+    expect(body.selected_evidence.verification_quote)
+      .toBe('Google has released Gemini 3.8 Flash.');
+    expect(body.selected_evidence.binding_contract).toBe('official_x_account_first_person_actor_v1');
+  });
+
+  test('同一条推文换成不在白名单的账号，证据不可靠，直接拒绝', async () => {
+    const evidence = await officialTweetEvidence('officiallogank');
+    expect(() => validateManualNewsSourceSupportSelection(
+      { evidence_id: evidence.id, quote: TWEET_TEXT }, { fact, evidence: [evidence] },
+    )).toThrow('source_support_evidence_invalid');
+  });
+
+  test('即使证据被标成一手，handle 不在白名单也不给第一人称绑定', async () => {
+    // 纵深防御：证据形状（reliable / official_primary）与 URL 里的 handle 是两道独立的闸门，
+    // 只有其中一道被绕过时，第一人称仍然不放行。
+    const ordinary = await officialTweetEvidence('officiallogank');
+    const forged = { ...ordinary, source_type: 'official_primary' as const, reliable: true };
+    expect(() => validateManualNewsSourceSupportSelection(
+      { evidence_id: forged.id, quote: TWEET_TEXT }, { fact, evidence: [forged] },
+    )).toThrow('source_support_fact_invalid:fact_verification_action_mismatch');
+  });
+
+  test('白名单账号但事实主体对不上时，第一人称不放行', async () => {
+    const evidence = await officialTweetEvidence('GoogleAI');
+    expect(() => validateManualNewsSourceSupportSelection(
+      { evidence_id: evidence.id, quote: TWEET_TEXT },
+      { fact: 'OpenAI 已发布 Gemini 3.8 Flash。', evidence: [evidence] },
+    )).toThrow('source_support_fact_invalid:fact_verification_action_mismatch');
+  });
+});
+
+describe('第一人称主语替换', () => {
+  test('保持时态：we\u2019re → is、we\u2019ve → has、we → 原形', () => {
+    expect(officialXAccountFirstPersonRewrite('We\u2019re rolling out Gemini 3.8 Flash.', 'Google'))
+      .toBe('Google is rolling out Gemini 3.8 Flash.');
+    expect(officialXAccountFirstPersonRewrite('We are rolling out Gemini 3.8 Flash.', 'Google'))
+      .toBe('Google is rolling out Gemini 3.8 Flash.');
+    expect(officialXAccountFirstPersonRewrite('We\u2019ve released Gemini 3.8 Flash.', 'Google'))
+      .toBe('Google has released Gemini 3.8 Flash.');
+    expect(officialXAccountFirstPersonRewrite('We have released Gemini 3.8 Flash.', 'Google'))
+      .toBe('Google has released Gemini 3.8 Flash.');
+    expect(officialXAccountFirstPersonRewrite('We released Gemini 3.8 Flash.', 'Google'))
+      .toBe('Google released Gemini 3.8 Flash.');
+    // 句首的「Today,」保留，不能悄悄丢内容。
+    expect(officialXAccountFirstPersonRewrite('Today, we released Gemini 3.8 Flash.', 'Google'))
+      .toBe('Today, Google released Gemini 3.8 Flash.');
+  });
+
+  test('不是第一人称开头就不替换', () => {
+    expect(officialXAccountFirstPersonRewrite('Google released Gemini 3.8 Flash.', 'Google')).toBeNull();
+    expect(officialXAccountFirstPersonRewrite('Weather models improved.', 'Google')).toBeNull();
+  });
+});
+
+describe('推文证据的正文完整性', () => {
+  test('推文正文被改动后，证据摘要校验拦下', async () => {
+    const evidence = await extractManualNewsEvidence(tweetDocument('GoogleAI'));
+    const tamperedText = `${TWEET_TEXT} And more.`;
+    const tampered = { ...evidence!, excerpt: tamperedText, claims_supported: [tamperedText] };
+    const selection = { evidence_id: evidence!.id, quote: TWEET_TEXT };
+    await expect(createManualNewsSourceSupportProof(
+      {
+        lead_id: 'ml-20260903-tampered',
+        assessment_version: 9,
+        payload: await createManualNewsSourceSupportPayload({
+          lead: {
+            id: 'ml-20260903-tampered', review_date: '2026-09-03', input_type: 'text_url',
+            input_text: 'Google 已发布 Gemini 3.8 Flash。', input_url: evidence!.url, note: '',
+          },
+          authorization: {
+            audit_id: 78, candidate_authorization: 'source_support_v1',
+            submit_identity_digest: '4'.repeat(64), idempotency_key: 'submit-tampered',
+          },
+          evidence: [tampered], selection,
+          verification: { supported: true, evidence_id: evidence!.id },
+        }),
+      },
+      testManualNewsVerificationKeyring(verificationSecret), testManualNewsResponseKeyring(),
+    )).rejects.toThrow('manual_news_evidence_proof_excerpt_invalid');
   });
 });
