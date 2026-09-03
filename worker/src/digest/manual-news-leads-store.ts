@@ -516,6 +516,87 @@ export async function listManualNewsLeads(env: Env, date: string): Promise<Manua
   }));
 }
 
+export interface ManualNewsCandidateAuthorizationView {
+  candidate_authorization: 'llm_verified' | typeof MANUAL_NEWS_SOURCE_SUPPORT_POLICY
+    | typeof MANUAL_NEWS_OWNER_VOUCH_POLICY | null;
+  vouch: { statement: string; vouched_at: number } | null;
+}
+
+interface ManualNewsCandidateAuthorizationRow {
+  lead_id?: string;
+  policy_version: string;
+  vouch_statement: string | null;
+  vouched_at: number | null;
+}
+
+/**
+ * 呈现用的放行方式。**不是授权判定** —— 是否真的能进候选池由
+ * loadVerifiedManualCandidateProof 与正式新闻门决定，这里只把当前 active 验证行的
+ * policy 与担保陈述展示给 owner，未知 policy 一律显示为 null。
+ */
+function manualNewsCandidateAuthorizationView(
+  row: ManualNewsCandidateAuthorizationRow | null,
+): ManualNewsCandidateAuthorizationView {
+  if (!row) return { candidate_authorization: null, vouch: null };
+  if (row.policy_version === MANUAL_LEAD_VERIFICATION_POLICY_VERSION) {
+    return { candidate_authorization: 'llm_verified', vouch: null };
+  }
+  if (row.policy_version === MANUAL_NEWS_SOURCE_SUPPORT_POLICY) {
+    return { candidate_authorization: MANUAL_NEWS_SOURCE_SUPPORT_POLICY, vouch: null };
+  }
+  if (row.policy_version !== MANUAL_NEWS_OWNER_VOUCH_POLICY) {
+    return { candidate_authorization: null, vouch: null };
+  }
+  const vouchedAt = Number(row.vouched_at);
+  return {
+    candidate_authorization: MANUAL_NEWS_OWNER_VOUCH_POLICY,
+    vouch: typeof row.vouch_statement === 'string' && row.vouch_statement
+      && Number.isSafeInteger(vouchedAt) && vouchedAt > 0
+      ? { statement: row.vouch_statement, vouched_at: vouchedAt }
+      : null,
+  };
+}
+
+const MANUAL_NEWS_CANDIDATE_AUTHORIZATION_COLUMNS = `v.policy_version,
+  CASE WHEN v.policy_version = ? THEN json_extract(v.verification_json, '$.statement') END
+    AS vouch_statement,
+  CASE WHEN v.policy_version = ? THEN json_extract(v.verification_json, '$.vouched_at') END
+    AS vouched_at`;
+
+export async function getManualNewsCandidateAuthorization(
+  env: Env,
+  leadId: string,
+): Promise<ManualNewsCandidateAuthorizationView> {
+  const row = await env.DB.prepare(
+    `/* manual_lead:candidate_authorization */ SELECT ${MANUAL_NEWS_CANDIDATE_AUTHORIZATION_COLUMNS}
+     FROM manual_news_assessment_verifications v
+     WHERE v.lead_id = ? AND v.status = 'active'
+     ORDER BY v.created_at DESC LIMIT 1`,
+  ).bind(MANUAL_NEWS_OWNER_VOUCH_POLICY, MANUAL_NEWS_OWNER_VOUCH_POLICY, leadId)
+    .first<ManualNewsCandidateAuthorizationRow>();
+  return manualNewsCandidateAuthorizationView(row);
+}
+
+export async function listManualNewsCandidateAuthorizations(
+  env: Env,
+  date: string,
+): Promise<Map<string, ManualNewsCandidateAuthorizationView>> {
+  const result = await env.DB.prepare(
+    `/* manual_lead:candidate_authorization_by_date */ SELECT v.lead_id,
+       ${MANUAL_NEWS_CANDIDATE_AUTHORIZATION_COLUMNS}
+     FROM manual_news_assessment_verifications v
+     JOIN manual_news_leads l ON l.id = v.lead_id
+     WHERE l.review_date = ? AND v.status = 'active'
+     ORDER BY v.lead_id ASC LIMIT 200`,
+  ).bind(MANUAL_NEWS_OWNER_VOUCH_POLICY, MANUAL_NEWS_OWNER_VOUCH_POLICY, date)
+    .all<ManualNewsCandidateAuthorizationRow>();
+  const views = new Map<string, ManualNewsCandidateAuthorizationView>();
+  for (const row of result.results || []) {
+    if (typeof row.lead_id === 'string') views.set(row.lead_id, manualNewsCandidateAuthorizationView(row));
+  }
+  return views;
+}
+
 export async function getManualNewsLeadCandidateState(
   env: Env,
   date: string,

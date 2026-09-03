@@ -30,6 +30,8 @@ import {
 import {
   claimManualNewsLeadProcessing,
   D1ManualLeadProcessingStore,
+  getManualNewsCandidateAuthorization,
+  listManualNewsCandidateAuthorizations,
   failManualNewsLeadAfterExhaustion,
   getManualNewsLead,
   markManualNewsLeadEnqueueFailure,
@@ -4421,6 +4423,53 @@ describe('manual news owner vouch', () => {
       WHERE lead_id = ? AND action = 'vouch_candidate'`).run('0'.repeat(64), state.leadId);
 
     await expect(loadVerifiedManualCandidateProof(state.env, state.leadId)).resolves.toBeNull();
+  });
+
+  test('reports the candidate authorization and vouch statement for the API views', async () => {
+    const state = await vouchFixture();
+    const frozen = await frozenVouchBatch(state);
+    await vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-key-1', 100,
+    );
+    const second = await addSourceSupportLead(state, {
+      idempotencyKey: 'submit-source-support-authorization-view', owner: 'source-support-owner-b',
+      fact: 'Anthropic 开放 Model Hardware Standard（MHS）研究预览。',
+      excerpt: 'Anthropic is opening a research preview of the Model Hardware Standard (MHS), '
+        + 'a shared specification for AI agents to safely operate physical devices, '
+        + 'to a first group of scientific research labs and advanced manufacturers.',
+      url: 'https://www.anthropic.com/news/model-hardware-standard-research-preview',
+      evidenceId: 'ev-anthropic-mhs', publisher: 'Anthropic', now: 101,
+    });
+    await new D1ManualLeadProcessingStore(state.env, second.owner, 1)
+      .saveSourceSupportedCandidate(second.leadId, 4, second.payload);
+
+    await expect(getManualNewsCandidateAuthorization(state.env, state.leadId)).resolves.toEqual({
+      candidate_authorization: 'owner_vouched_v1',
+      vouch: { statement: VOUCH_STATEMENT, vouched_at: 100 },
+    });
+    await expect(getManualNewsCandidateAuthorization(state.env, second.leadId)).resolves.toEqual({
+      candidate_authorization: 'source_support_v1', vouch: null,
+    });
+    await expect(getManualNewsCandidateAuthorization(state.env, 'ml-20260828-000000000000'))
+      .resolves.toEqual({ candidate_authorization: null, vouch: null });
+    const listed = await listManualNewsCandidateAuthorizations(state.env, '2026-08-28');
+    expect(listed.get(state.leadId)).toEqual({
+      candidate_authorization: 'owner_vouched_v1',
+      vouch: { statement: VOUCH_STATEMENT, vouched_at: 100 },
+    });
+    expect(listed.get(second.leadId)).toEqual({
+      candidate_authorization: 'source_support_v1', vouch: null,
+    });
+  });
+
+  test('reports an unrecognized verification policy as no candidate authorization', async () => {
+    const state = await vouchFixture();
+    installSourceSupportReviewSchema(state);
+    addActiveVerification(state as unknown as ReturnType<typeof fixture>);
+
+    await expect(getManualNewsCandidateAuthorization(state.env, state.leadId)).resolves.toEqual({
+      candidate_authorization: null, vouch: null,
+    });
   });
 
   test('orders a vouched candidate by its vouch authorization, not by its confirmation', async () => {

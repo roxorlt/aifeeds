@@ -5,14 +5,18 @@ import {
 } from '../security/manual-news-keyring';
 import {
   confirmManualNewsLeadCandidate,
+  getManualNewsCandidateAuthorization,
   getManualNewsLead,
   getManualNewsLeadCandidateState,
   listManualNewsLeads,
   manualNewsLeadProcessingOwner,
   markManualNewsLeadEnqueueFailure,
   recoverStaleManualNewsLeads,
+  listManualNewsCandidateAuthorizations,
   retryManualNewsLead,
   submitManualNewsLead,
+  vouchManualNewsLeadCandidate,
+  type ManualNewsCandidateAuthorizationView,
 } from './manual-news-leads-store';
 import { newsReviewSecret } from './news-review';
 import {
@@ -49,10 +53,18 @@ function manualNewsLeadBase(lead: ManualNewsListInput) {
   };
 }
 
-function manualNewsLeadSummary(lead: ManualNewsListInput) {
+const UNAUTHORIZED_CANDIDATE_VIEW: ManualNewsCandidateAuthorizationView = {
+  candidate_authorization: null, vouch: null,
+};
+
+function manualNewsLeadSummary(
+  lead: ManualNewsListInput,
+  authorization: ManualNewsCandidateAuthorizationView = UNAUTHORIZED_CANDIDATE_VIEW,
+) {
   return {
     ...manualNewsLeadBase(lead),
     evidence_count: 'evidence_count' in lead ? lead.evidence_count : lead.evidence.length,
+    ...authorization,
   };
 }
 
@@ -76,11 +88,12 @@ function manualNewsEvidenceDetail(item: ManualNewsEvidence) {
   };
 }
 
-function manualNewsLeadDetail(lead: ManualNewsLeadRecord) {
+async function manualNewsLeadDetail(env: Env, lead: ManualNewsLeadRecord) {
   return {
     response_profile: 'manual_news_lead_detail_v1' as const,
     schema_version: 1 as const,
     ...manualNewsLeadBase(lead),
+    ...await getManualNewsCandidateAuthorization(env, lead.id),
     ...(lead.assessment_generation ? { assessment_generation: lead.assessment_generation } : {}),
     ...(lead.provider_failure ? { provider_failure: lead.provider_failure } : {}),
     assessment: lead.assessment,
@@ -92,10 +105,13 @@ function manualNewsLeadDetail(lead: ManualNewsLeadRecord) {
   };
 }
 
-function manualNewsMutationResult<T extends { lead?: ManualNewsLeadRecord }>(result: T) {
+async function manualNewsMutationResult<T extends { lead?: ManualNewsLeadRecord }>(
+  env: Env,
+  result: T,
+) {
   return {
     ...result,
-    ...(result.lead ? { lead: manualNewsLeadDetail(result.lead) } : {}),
+    ...(result.lead ? { lead: await manualNewsLeadDetail(env, result.lead) } : {}),
   };
 }
 
@@ -220,16 +236,17 @@ async function handleManualNewsLeadsApiInternal(
         ? await recoverStaleManualNewsLeads(env, date, now)
         : [];
       for (const lead of recovered) scheduleLeadProcessing(env, ctx, lead);
-      const [leads, candidateBatch] = await Promise.all([
+      const [leads, candidateBatch, authorizations] = await Promise.all([
         listManualNewsLeads(env, date),
         getManualNewsLeadCandidateState(env, date),
+        listManualNewsCandidateAuthorizations(env, date),
       ]);
       return response({
         ok: true,
         response_profile: 'manual_news_leads_summary_v1',
         schema_version: 1,
         date,
-        leads: leads.slice(0, 50).map(manualNewsLeadSummary),
+        leads: leads.slice(0, 50).map((lead) => manualNewsLeadSummary(lead, authorizations.get(lead.id))),
         candidate_batch: candidateBatch,
       });
     }
@@ -254,21 +271,21 @@ async function handleManualNewsLeadsApiInternal(
       }, key, now);
       if (result.created) scheduleLeadProcessing(env, ctx, result.lead);
       return response({
-        ok: true, created: result.created, lead: manualNewsLeadDetail(result.lead),
+        ok: true, created: result.created, lead: await manualNewsLeadDetail(env, result.lead),
       }, result.created ? 202 : 200);
     } catch (error) {
       return requestErrorResponse(error);
     }
   }
 
-  const match = /^\/(ml-\d{8}-[a-f0-9]{12})(?:\/(retry|confirm-candidate))?$/.exec(suffix);
+  const match = /^\/(ml-\d{8}-[a-f0-9]{12})(?:\/(retry|confirm-candidate|vouch-candidate))?$/.exec(suffix);
   if (!match) return response({ ok: false, error: 'not_found' }, 404);
   const [, leadId, action] = match;
   if (!action) {
     if (request.method !== 'GET') return response({ ok: false, error: 'method_not_allowed' }, 405);
     const lead = await getManualNewsLead(env, leadId);
     return lead
-      ? response({ ok: true, lead: manualNewsLeadDetail(lead) })
+      ? response({ ok: true, lead: await manualNewsLeadDetail(env, lead) })
       : response({ ok: false, error: 'manual_news_lead_not_found' }, 404);
   }
   if (request.method !== 'POST') return response({ ok: false, error: 'method_not_allowed' }, 405);
@@ -287,20 +304,24 @@ async function handleManualNewsLeadsApiInternal(
   if (action === 'retry') {
     if (!processingDependenciesAvailable(env)) return response({ ok: false, error: 'dependency_unavailable' }, 503);
     const result = await retryManualNewsLead(env, leadId, expectedVersion, key, now);
-    if (!result.ok) return response(manualNewsMutationResult(result), result.status);
+    if (!result.ok) return response(await manualNewsMutationResult(env, result), result.status);
     if (result.changed) scheduleLeadProcessing(env, ctx, result.lead);
-    return response(manualNewsMutationResult(result), result.changed ? 202 : 200);
+    return response(await manualNewsMutationResult(env, result), result.changed ? 202 : 200);
   }
   const expectedBatchRevision = Number(body.expected_batch_revision);
   if (!Number.isInteger(expectedBatchRevision) || expectedBatchRevision < 0) {
     return response({ ok: false, error: 'invalid_expected_batch_revision' }, 400);
   }
-  const result = await confirmManualNewsLeadCandidate(
-    env, leadId, expectedVersion, expectedBatchRevision, key, now,
-  );
+  const result = action === 'vouch-candidate'
+    ? await vouchManualNewsLeadCandidate(
+      env, leadId, expectedVersion, expectedBatchRevision, body.statement, key, now,
+    )
+    : await confirmManualNewsLeadCandidate(
+      env, leadId, expectedVersion, expectedBatchRevision, key, now,
+    );
   return result.ok
-    ? response(manualNewsMutationResult(result))
-    : response(manualNewsMutationResult(result), result.status);
+    ? response(await manualNewsMutationResult(env, result))
+    : response(await manualNewsMutationResult(env, result), result.status);
 }
 
 export async function handleManualNewsLeadsApi(
