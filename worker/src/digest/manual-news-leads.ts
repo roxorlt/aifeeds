@@ -3681,7 +3681,7 @@ function exactStructuredAnchorPresent(anchor: string, text: string): boolean {
   return actual.some((_token, index) => expected.every((token, offset) => actual[index + offset] === token));
 }
 
-type FactAction =
+export type FactAction =
   | 'acquire' | 'sell' | 'expand' | 'exit' | 'add' | 'remove' | 'support'
   | 'approve' | 'apply_approval' | 'reject' | 'disclose' | 'release' | 'request'
   | 'regulatory_require' | 'mandate' | 'order' | 'pause' | 'invest' | 'finance'
@@ -3739,6 +3739,54 @@ const FACT_ACTION_PATTERNS: ReadonlyArray<FactActionPattern> = [
   ['limit_scope', /(?:受限|限定|限于|限制(?:为|在)?)|\b(?:limit(?:s|ed|ing)?\b|restrict(?:s|ed|ing)?\b|(?:cover|support)(?:s|ed|ing)?\s+[^.;,]{0,60}(?:\bonly\b|\bsupported\s+(?:models?|products?)\b))/giu, /^(?:limit(?:s|ed|ing)?|restrict(?:s|ed|ing)?|cover(?:s|ed|ing)?|support(?:s|ed|ing)?)/iu],
 ];
 
+export const FACT_ACTION_IDS: ReadonlyArray<FactAction> =
+  FACT_ACTION_PATTERNS.map(([action]) => action);
+
+// 谓语动作词表(2026-09-03):校验器一直只认 FACT_ACTION_PATTERNS 里的动作,但提示词从来没
+// 把这份词表告诉模型,导致 8/13 起 54 次评估调用 0 次通过。这张表是「模型可见的规范写法」,
+// 由 buildManualLeadAssessmentPrompt 原样喂给模型,并由守护测试钉死「表里每个写法都恰好
+// 命中同一个动作」,保证词表与正则永远同步。
+export interface FactActionVocabularyEntry {
+  action: FactAction;
+  zh: readonly string[];
+  en: readonly string[];
+}
+
+export const FACT_ACTION_VOCABULARY: ReadonlyArray<FactActionVocabularyEntry> = [
+  { action: 'apply_approval', zh: ['申请审批'], en: ['applies for approval', 'seeks approval'] },
+  { action: 'acquire', zh: ['收购', '并购'], en: ['acquires', 'acquired'] },
+  { action: 'sell', zh: ['出售', '售出'], en: ['sells', 'sold'] },
+  { action: 'expand', zh: ['扩大', '扩展'], en: ['expands', 'extends'] },
+  { action: 'exit', zh: ['退出', '撤出'], en: ['exits', 'withdraws'] },
+  { action: 'add', zh: ['新增', '增加'], en: ['adds', 'includes'] },
+  { action: 'remove', zh: ['移除', '删除'], en: ['removes', 'deletes'] },
+  { action: 'support', zh: ['支持', '提供'], en: ['supports', 'provides'] },
+  { action: 'approve', zh: ['批准', '获批'], en: ['approves', 'approved'] },
+  { action: 'reject', zh: ['拒绝', '否决'], en: ['rejects', 'refuses'] },
+  { action: 'disclose', zh: ['披露', '说明'], en: ['discloses', 'states'] },
+  { action: 'release', zh: ['发布', '推出', '上线'], en: ['releases', 'launches'] },
+  { action: 'request', zh: ['呼吁', '建议', '敦促'], en: ['requests', 'urges'] },
+  { action: 'regulatory_require', zh: ['要求', '监管要求'], en: ['requires'] },
+  { action: 'mandate', zh: ['强制', '必须'], en: ['mandates', 'must'] },
+  { action: 'order', zh: ['下令', '命令'], en: ['orders', 'ordered'] },
+  { action: 'pause', zh: ['暂停', '停止'], en: ['pauses', 'stops'] },
+  { action: 'invest', zh: ['投资'], en: ['invests', 'invested'] },
+  { action: 'finance', zh: ['融资'], en: ['financing', 'raised funding'] },
+  { action: 'sign', zh: ['签署', '签订'], en: ['signs', 'signed'] },
+  { action: 'sue', zh: ['起诉', '提起诉讼'], en: ['sues', 'filed a lawsuit'] },
+  { action: 'ban', zh: ['禁止', '禁用'], en: ['bans', 'prohibits'] },
+  { action: 'open_source', zh: ['开源'], en: ['open-sources', 'open-sourced'] },
+  { action: 'train', zh: ['训练'], en: ['trains', 'trained'] },
+  { action: 'partner', zh: ['合作'], en: ['partners', 'collaborates'] },
+  { action: 'layoff', zh: ['裁员'], en: ['lays off', 'laid off'] },
+  { action: 'decide', zh: ['决定'], en: ['decides', 'decided'] },
+  { action: 'discuss', zh: ['讨论', '磋商'], en: ['discusses', 'deliberates'] },
+  { action: 'deny', zh: ['否认'], en: ['denies', 'denied'] },
+  { action: 'open_access', zh: ['开放访问'], en: ['opens access', 'opens service'] },
+  { action: 'preview', zh: ['开放研究预览'], en: ['opens a research preview of'] },
+  { action: 'limit_scope', zh: ['限制', '限定'], en: ['limits', 'restricts'] },
+];
+
 function factActions(value: string): Set<FactAction> {
   return new Set(factActionOccurrences(value).map((item) => item.action));
 }
@@ -3782,7 +3830,7 @@ function actionModality(value: string, index: number, surface: string): FactActi
   return 'asserted';
 }
 
-function factActionOccurrences(value: string): FactActionOccurrence[] {
+export function factActionOccurrences(value: string): FactActionOccurrence[] {
   const occurrences: FactActionOccurrence[] = [];
   for (const [action, pattern, englishFiniteHead] of FACT_ACTION_PATTERNS) {
     for (const match of value.matchAll(pattern)) {
