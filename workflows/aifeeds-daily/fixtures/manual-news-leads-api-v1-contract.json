@@ -4,91 +4,19 @@
     "response_profile": "manual_news_leads_summary_v1",
     "schema_version": 1,
     "route": "/api/digest/daily-news-leads?date=YYYY-MM-DD",
-    "top_level_fields": [
-      "ok",
-      "response_profile",
-      "schema_version",
-      "date",
-      "leads",
-      "candidate_batch"
-    ],
-    "lead_fields": [
-      "id",
-      "review_date",
-      "input_type",
-      "input_text",
-      "input_url",
-      "note",
-      "status",
-      "version",
-      "error_code",
-      "error_message",
-      "processing_owner",
-      "processing_attempt",
-      "processing_lease_until",
-      "confirmed_batch_id",
-      "confirmed_at",
-      "created_at",
-      "updated_at",
-      "evidence_count",
-      "candidate_authorization",
-      "vouch"
-    ]
+    "top_level_fields": ["ok", "response_profile", "schema_version", "date", "leads", "candidate_batch"],
+    "lead_fields": ["id", "review_date", "input_type", "input_text", "input_url", "note", "status", "version", "error_code", "error_message", "processing_owner", "processing_attempt", "processing_lease_until", "confirmed_batch_id", "confirmed_at", "created_at", "updated_at", "evidence_count", "candidate_authorization", "vouch"]
   },
   "detail": {
     "response_profile": "manual_news_lead_detail_v1",
     "schema_version": 1,
     "route": "/api/digest/daily-news-leads/:lead_id",
-    "top_level_fields": [
-      "ok",
-      "lead"
-    ],
-    "lead_required_fields": [
-      "response_profile",
-      "schema_version",
-      "id",
-      "review_date",
-      "input_type",
-      "input_text",
-      "input_url",
-      "note",
-      "status",
-      "version",
-      "error_code",
-      "error_message",
-      "processing_owner",
-      "processing_attempt",
-      "processing_lease_until",
-      "confirmed_batch_id",
-      "confirmed_at",
-      "created_at",
-      "updated_at",
-      "assessment",
-      "evidence",
-      "candidate_authorization",
-      "vouch"
-    ],
-    "evidence_fields": [
-      "id",
-      "url",
-      "source_type",
-      "evidence_kind",
-      "source_label",
-      "publisher",
-      "published_at",
-      "retrieved_at",
-      "title",
-      "excerpt",
-      "reliable"
-    ]
+    "top_level_fields": ["ok", "lead"],
+    "lead_required_fields": ["response_profile", "schema_version", "id", "review_date", "input_type", "input_text", "input_url", "note", "status", "version", "error_code", "error_message", "processing_owner", "processing_attempt", "processing_lease_until", "confirmed_batch_id", "confirmed_at", "created_at", "updated_at", "assessment", "evidence", "candidate_authorization", "vouch"],
+    "evidence_fields": ["id", "url", "source_type", "evidence_kind", "source_label", "publisher", "published_at", "retrieved_at", "title", "excerpt", "reliable"]
   },
   "mutations": {
-    "routes": [
-      "submit",
-      "retry",
-      "confirm-candidate",
-      "vouch-candidate"
-    ],
+    "routes": ["submit", "retry", "confirm-candidate", "vouch-candidate"],
     "lead_profile": "manual_news_lead_detail_v1",
     "preserve_status_and_conflict_semantics": true
   }
