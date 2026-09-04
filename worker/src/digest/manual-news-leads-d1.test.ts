@@ -5038,28 +5038,113 @@ describe('manual news owner asserted', () => {
   });
 });
 
-// ── 手工候选校验并发化（2026-09-04 审核区「打开所选日期」等太久）────────────────
-// 读路径最贵的一步是逐条 confirmedManualCandidateById（读 proof + 校 HMAC + 核证据
-// 摘要）。改成并发发起后，两条手工候选必须同时在途；顺序与判定结果一律不变。
-describe('news review sanitize manual candidate concurrency', () => {
-  test('两条手工候选的校验同时在途，不再逐条排队', async () => {
+// ── 读路径不再逐条重算手工候选（2026-09-04 审核区「打开所选日期」等太久）──────────
+// 验签是「确认」那一步的写入门禁；每次查列表再重算一遍，等于把 9 次 D1 往返 ×
+// 每条候选压在读路径上。现在读路径只做一次批量廉价复核，完整重算留给对不上的那几条。
+describe('news review sanitize manual candidate fast path', () => {
+  async function twoAssertedCandidates() {
     const state = await stuckZeroEvidenceFixture();
     const frozen = await frozenAssertedBatch(state);
     const first = await assertManualNewsLeadCandidate(state.env, {
       date: '2026-08-28', text: ASSERTED_STATEMENT,
       expected_batch_revision: frozen.batch.batch_revision,
-    }, 'concurrency-entry-1', 100);
+    }, 'fast-path-1', 100);
     const second = await assertManualNewsLeadCandidate(state.env, {
       date: '2026-08-28', text: 'Anthropic发布Claude5',
       expected_batch_revision: frozen.batch.batch_revision + 1,
-    }, 'concurrency-entry-2', 101);
+    }, 'fast-path-2', 101);
     expect(first.ok && second.ok).toBe(true);
-    const firstLeadId = first.ok ? first.lead.id : '';
-    const secondLeadId = second.ok ? second.lead.id : '';
+    return {
+      state,
+      frozen,
+      firstLeadId: first.ok ? first.lead.id : '',
+      secondLeadId: second.ok ? second.lead.id : '',
+    };
+  }
+
+  function countPrepared(state: { db: SqliteD1 }, marker: string): number {
+    return state.db.preparedSql.filter((sql) => sql.includes(marker)).length;
+  }
+
+  test('快照与签名一致时，一次批量查询搞定，零次逐条完整验签', async () => {
+    const { state, firstLeadId, secondLeadId } = await twoAssertedCandidates();
     const beforeRow = state.db.sqlite.prepare(`SELECT candidates_json, batch_revision
       FROM daily_news_review_batches WHERE review_date = '2026-08-28' AND is_current = 1`)
       .get() as { candidates_json: string; batch_revision: number };
     const before = JSON.parse(beforeRow.candidates_json) as Array<Record<string, unknown>>;
+    state.db.preparedSql.length = 0;
+
+    const sanitized = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 200);
+
+    expect(countPrepared(state, 'news_review:manual_candidate_proof_bulk')).toBe(1);
+    // 完整重算的入口：一次都不许走。
+    expect(countPrepared(state, 'news_review:confirmed_manual_candidate_by_id')).toBe(0);
+    expect(countPrepared(state, 'manual_verification:policy_dispatch')).toBe(0);
+    expect(countPrepared(state, 'manual_evidence:list')).toBe(0);
+    expect(countPrepared(state, 'manual_verification:key_lineage')).toBe(0);
+    // 廉价复核不许改变结果。
+    expect(sanitized.changed).toBe(false);
+    expect(sanitized.dropped_ids).toEqual([]);
+    expect(sanitized.batch.batch_revision).toBe(beforeRow.batch_revision);
+    expect(sanitized.batch.candidates).toEqual(before);
+    expect(sanitized.manual_verifications.map((entry) => entry.lead_id))
+      .toEqual([firstLeadId, secondLeadId]);
+    expect(sanitized.manual_verifications.map((entry) => entry.verification.policy_version))
+      .toEqual(['owner_asserted_v1', 'owner_asserted_v1']);
+  });
+
+  test('单条签名被改：只有那一条走完整验签并被剔除，其余原样留下', async () => {
+    const { state, firstLeadId, secondLeadId } = await twoAssertedCandidates();
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications SET hmac_sha256 = ?
+      WHERE lead_id = ? AND status = 'active'`).run('0'.repeat(64), secondLeadId);
+    state.db.preparedSql.length = 0;
+
+    const sanitized = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 200);
+
+    expect(countPrepared(state, 'news_review:manual_candidate_proof_bulk')).toBe(1);
+    // 只对不上的那一条落到完整重算。
+    expect(countPrepared(state, 'news_review:confirmed_manual_candidate_by_id')).toBe(1);
+    expect(sanitized.changed).toBe(true);
+    expect(sanitized.dropped_ids).toEqual([`blog:manual:${secondLeadId}`]);
+    expect(sanitized.batch.candidates.map((candidate) => candidate.item_id))
+      .toContain(`blog:manual:${firstLeadId}`);
+    expect(sanitized.batch.candidates.map((candidate) => candidate.item_id))
+      .not.toContain(`blog:manual:${secondLeadId}`);
+    expect(sanitized.manual_verifications.map((entry) => entry.lead_id)).toEqual([firstLeadId]);
+    // 完整重算照旧作废那份 proof。
+    expect(state.db.sqlite.prepare(`SELECT status, reason FROM manual_news_assessment_verifications
+      WHERE lead_id = ?`).get(secondLeadId)).toEqual({
+      status: 'invalidated', reason: 'verification_integrity_invalid',
+    });
+  });
+
+  test('批次快照与签名投影对不上时，也落到完整重算', async () => {
+    const { state, secondLeadId } = await twoAssertedCandidates();
+    // 只改批次快照里的标题：proof 行本身没动，签名照样能过，但投影对不上。
+    const row = state.db.sqlite.prepare(`SELECT candidates_json FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28' AND is_current = 1`).get() as { candidates_json: string };
+    const tampered = (JSON.parse(row.candidates_json) as Array<Record<string, unknown>>)
+      .map((candidate) => (candidate.lead_id === secondLeadId
+        ? { ...candidate, title: '被改过的标题' } : candidate));
+    state.db.sqlite.prepare(`UPDATE daily_news_review_batches SET candidates_json = ?
+      WHERE review_date = '2026-08-28' AND is_current = 1`).run(JSON.stringify(tampered));
+    state.db.preparedSql.length = 0;
+
+    const sanitized = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 200);
+
+    expect(countPrepared(state, 'news_review:confirmed_manual_candidate_by_id')).toBe(1);
+    // 完整重算拿回真正的投影，快照被改回去，批次版本 bump 一次。
+    expect(sanitized.changed).toBe(true);
+    expect(sanitized.dropped_ids).toEqual([]);
+    expect(sanitized.batch.candidates.find(
+      (candidate) => candidate.lead_id === secondLeadId,
+    )?.title).toBe('Anthropic发布Claude5');
+  });
+
+  test('多条都要完整重算时，仍然并发发起，不逐条排队', async () => {
+    const { state } = await twoAssertedCandidates();
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications
+      SET verification_key_id = 'unknown-key'`).run();
 
     // 到齐 2 个 confirmed_manual_candidate_by_id 才放行：逐条 await 时第一条会一直卡住。
     const barrier = state.db.pauseNextFirstCalls('news_review:confirmed_manual_candidate_by_id', 2);
@@ -5072,26 +5157,12 @@ describe('news review sanitize manual candidate concurrency', () => {
     const sanitized = await sanitizing;
 
     expect(arrival).toBe('concurrent');
-    // 并发化不许动结果：候选原样、不 bump 版本、证明按候选顺序排列。
-    expect(sanitized.changed).toBe(false);
-    expect(sanitized.dropped_ids).toEqual([]);
-    expect(sanitized.batch.batch_revision).toBe(beforeRow.batch_revision);
-    expect(sanitized.batch.candidates).toEqual(before);
-    expect(sanitized.manual_verifications.map((entry) => entry.lead_id))
-      .toEqual([firstLeadId, secondLeadId]);
+    expect(sanitized.batch.candidates.some((candidate) => candidate.origin === 'manual_lead'))
+      .toBe(false);
   });
 
-  test('并发校验后连续两次 sanitize 仍不 bump 批次版本', async () => {
-    const state = await stuckZeroEvidenceFixture();
-    const frozen = await frozenAssertedBatch(state);
-    await assertManualNewsLeadCandidate(state.env, {
-      date: '2026-08-28', text: ASSERTED_STATEMENT,
-      expected_batch_revision: frozen.batch.batch_revision,
-    }, 'concurrency-stable-1', 100);
-    await assertManualNewsLeadCandidate(state.env, {
-      date: '2026-08-28', text: 'Anthropic发布Claude5',
-      expected_batch_revision: frozen.batch.batch_revision + 1,
-    }, 'concurrency-stable-2', 101);
+  test('走廉价复核后连续两次 sanitize 仍不 bump 批次版本', async () => {
+    const { state, frozen } = await twoAssertedCandidates();
 
     const firstSanitize = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 200);
     const secondSanitize = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 201);
@@ -5100,49 +5171,5 @@ describe('news review sanitize manual candidate concurrency', () => {
     expect(secondSanitize.changed).toBe(false);
     expect(secondSanitize.batch.batch_id).toBe(firstSanitize.batch.batch_id);
     expect(secondSanitize.batch.batch_revision).toBe(frozen.batch.batch_revision + 2);
-  });
-
-  test('一条手工候选校验抛错时，抛出的仍是候选顺序上第一个失败的那条', async () => {
-    const state = await stuckZeroEvidenceFixture();
-    const frozen = await frozenAssertedBatch(state);
-    const first = await assertManualNewsLeadCandidate(state.env, {
-      date: '2026-08-28', text: ASSERTED_STATEMENT,
-      expected_batch_revision: frozen.batch.batch_revision,
-    }, 'concurrency-error-1', 100);
-    await assertManualNewsLeadCandidate(state.env, {
-      date: '2026-08-28', text: 'Anthropic发布Claude5',
-      expected_batch_revision: frozen.batch.batch_revision + 1,
-    }, 'concurrency-error-2', 101);
-    const firstLeadId = first.ok ? first.lead.id : '';
-    // 第二条晚一点才失败：并发下它先被发起，但抛出的必须还是第一条的错。
-    const failures = new Map([
-      [firstLeadId, 0],
-    ]);
-    const original = state.db.sqlite.prepare.bind(state.db.sqlite);
-    vi.spyOn(state.db, 'prepare').mockImplementation(((sql: string) => {
-      const statement = original(sql);
-      let bindings: unknown[] = [];
-      const prepared: Record<string, unknown> = {
-        bind: (...values: unknown[]) => { bindings = values; return prepared; },
-        first: async () => {
-          if (sql.includes('news_review:confirmed_manual_candidate_by_id')) {
-            const leadId = String(bindings[0]);
-            const delay = failures.has(leadId) ? 20 : 0;
-            await new Promise((resolve) => { setTimeout(resolve, delay); });
-            throw new Error(`lookup_failed:${leadId}`);
-          }
-          return (statement as any).get(...(bindings as any)) ?? null;
-        },
-        all: async () => ({ results: (statement as any).all(...(bindings as any)), success: true, meta: {} }),
-        run: async () => {
-          const result = (statement as any).run(...(bindings as any));
-          return { success: true, meta: { changes: Number(result.changes) } };
-        },
-      };
-      return prepared;
-    }) as never);
-
-    await expect(sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 200))
-      .rejects.toThrow(`lookup_failed:${firstLeadId}`);
   });
 });

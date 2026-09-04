@@ -647,6 +647,142 @@ async function verifyOwnerAssertedCandidateProofSnapshot(
   }
 }
 
+/** 一次 SQL 能覆盖的线索条数；审核批次最多 50 条手工候选，所以最多 3 次查询。 */
+const MANUAL_CANDIDATE_SIGNED_SNAPSHOT_CHUNK_SIZE = 20;
+
+export interface ManualCandidateSignedSnapshot {
+  lead_id: string;
+  policy_version:
+    | typeof MANUAL_NEWS_SOURCE_SUPPORT_POLICY
+    | typeof MANUAL_NEWS_OWNER_VOUCH_POLICY
+    | typeof MANUAL_NEWS_OWNER_ASSERTED_POLICY;
+  candidate: VerifiedPersistedManualCandidateProof['candidate'];
+  record: PersistedManualVerificationRow;
+}
+
+function proofSnapshotFields(row: ManualCandidateProofDispatchRow) {
+  return {
+    policy_version: row.policy_version,
+    verification_key_id: row.verification_key_id,
+    canonical_digest: row.canonical_digest,
+    hmac_sha256: row.hmac_sha256,
+  };
+}
+
+async function signedManualCandidateFromRow(
+  row: ManualCandidateProofDispatchRow,
+  keyrings: { verificationKeys: ManualNewsKeyring; responseKeys: ManualNewsKeyring },
+): Promise<ManualCandidateSignedSnapshot | null> {
+  if (!keyrings.verificationKeys.keys.has(row.verification_key_id)) return null;
+  const proof = proofSnapshotFields(row);
+  try {
+    if (row.policy_version === MANUAL_NEWS_OWNER_VOUCH_POLICY) {
+      const payload = parseJson<ManualNewsOwnerVouchPayload | null>(row.verification_json, null);
+      if (!payload || payload.lead_id !== row.lead_id || payload.review_date !== row.review_date) return null;
+      if (!await isCurrentManualNewsOwnerVouchProof({
+        lead_id: row.lead_id, assessment_version: Number(row.assessment_version), payload,
+      }, proof, keyrings.verificationKeys, keyrings.responseKeys)) return null;
+      return {
+        lead_id: row.lead_id,
+        policy_version: MANUAL_NEWS_OWNER_VOUCH_POLICY,
+        candidate: ownerVouchCandidateFromPayload(payload),
+        record: row,
+      };
+    }
+    if (row.policy_version === MANUAL_NEWS_OWNER_ASSERTED_POLICY) {
+      const payload = parseJson<ManualNewsOwnerAssertedPayload | null>(row.verification_json, null);
+      if (!payload || payload.lead_id !== row.lead_id || payload.review_date !== row.review_date) return null;
+      if (!await isCurrentManualNewsOwnerAssertedProof({
+        lead_id: row.lead_id, input_url: row.input_url || '',
+        assessment_version: Number(row.assessment_version), payload,
+      }, proof, keyrings.verificationKeys, keyrings.responseKeys)) return null;
+      return {
+        lead_id: row.lead_id,
+        policy_version: MANUAL_NEWS_OWNER_ASSERTED_POLICY,
+        candidate: ownerAssertedCandidateFromPayload(payload),
+        record: row,
+      };
+    }
+    if (row.policy_version === MANUAL_NEWS_SOURCE_SUPPORT_POLICY) {
+      const payload = parseJson<ManualNewsSourceSupportPayload | null>(row.verification_json, null);
+      if (!payload) return null;
+      if (!await isCurrentManualNewsSourceSupportProof({
+        lead_id: row.lead_id, assessment_version: Number(row.assessment_version), payload,
+      }, proof, keyrings.verificationKeys, keyrings.responseKeys)) return null;
+      return {
+        lead_id: row.lead_id,
+        policy_version: MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
+        candidate: { ...payload.item_projection, event_key: payload.event_identity.event_key },
+        record: row,
+      };
+    }
+    // v11 旧策略的候选要靠 assessment 行 + 证据行重建，没有纯计算的廉价路径。
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 读路径的批量廉价复核：一条 SQL 拿回整批手工候选的 active proof 行，然后**纯计算**
+ * 地重算 canonical_digest 并验 HMAC，把签名里的候选投影交回给调用方。
+ *
+ * 为什么读路径可以只做这一步：验签是「确认」（confirm / vouch / assert）那一步的写入
+ * 门禁，那时已经把整份 payload（含证据快照）验过并落盘，canonical_digest + hmac_sha256
+ * 把它钉死。每次查列表再逐条重算一遍，等于把写入门禁搬到读路径上 —— 每条候选 9 次
+ * D1 往返，prod 实测约 1.8s/条。所以读路径信任的是确认时已验签并落盘的摘要。
+ *
+ * 这里刻意**不读**证据行、授权审计行与密钥世系，因此它只回答「这份签名还是确认时那一份
+ * 吗」，不回答「证据行事后有没有被单独改动」。完整重算（loadVerifiedManualCandidateProof，
+ * 含证据摘要比对与失效隔离）留给调用方：凡是这里没返回、或返回的投影跟批次快照对不上的
+ * 线索，都必须落回完整重算。发布授权（authorizeFormalNewsSet）那条线仍走完整校验。
+ */
+export async function loadSignedManualCandidateSnapshots(
+  env: Env,
+  leadIds: readonly string[],
+): Promise<Map<string, ManualCandidateSignedSnapshot>> {
+  const matched = new Map<string, ManualCandidateSignedSnapshot>();
+  const uniqueLeadIds = [...new Set(leadIds)];
+  if (!uniqueLeadIds.length) return matched;
+  const keyrings = configuredKeyrings(env);
+  if (!keyrings) return matched;
+  for (let offset = 0;
+    offset < uniqueLeadIds.length;
+    offset += MANUAL_CANDIDATE_SIGNED_SNAPSHOT_CHUNK_SIZE) {
+    const chunk = uniqueLeadIds.slice(offset, offset + MANUAL_CANDIDATE_SIGNED_SNAPSHOT_CHUNK_SIZE);
+    const result = await env.DB.prepare(
+      `/* news_review:manual_candidate_proof_bulk */ WITH requested(lead_id) AS (
+         VALUES ${chunk.map(() => '(?)').join(', ')}
+       ) SELECT
+         v.verification_id, v.lead_id, v.assessment_version, v.policy_version,
+         v.verification_key_id, v.canonical_digest, v.hmac_sha256, v.verification_json,
+         v.processing_owner, v.processing_attempt, v.creation_nonce, v.status, v.reason,
+         v.created_at, v.invalidation_nonce, v.invalidated_at,
+         l.review_date, l.input_type, l.input_text, l.input_url, l.note,
+         l.submit_idempotency_key, l.status AS lead_status,
+         l.confirmed_at AS lead_confirmed_at, l.version AS lead_version
+       FROM requested r
+       JOIN manual_news_leads l ON l.id = r.lead_id
+         AND l.confirmed_at IS NOT NULL AND l.status IN ('recommended', 'needs_review')
+       JOIN manual_news_assessment_verifications v ON v.lead_id = l.id AND v.status = 'active'`,
+    ).bind(...chunk).all<ManualCandidateProofDispatchRow>();
+    const rowsByLead = new Map<string, ManualCandidateProofDispatchRow[]>();
+    for (const row of result.results || []) {
+      const bucket = rowsByLead.get(row.lead_id);
+      if (bucket) bucket.push(row);
+      else rowsByLead.set(row.lead_id, [row]);
+    }
+    for (const [leadId, rows] of rowsByLead) {
+      // 同一条线索有多行 active 时，「当前那一份」要按 created_at 排序才定得下来。
+      // 这里不猜，直接交给完整重算。
+      if (rows.length !== 1) continue;
+      const signed = await signedManualCandidateFromRow(rows[0], keyrings);
+      if (signed) matched.set(leadId, signed);
+    }
+  }
+  return matched;
+}
+
 export async function loadVerifiedManualCandidateProof(
   env: Env,
   leadId: string,

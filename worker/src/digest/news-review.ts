@@ -18,6 +18,7 @@ import {
   type FormalNewsAuthorizationResult,
 } from './news-source-policy';
 import {
+  loadSignedManualCandidateSnapshots,
   loadVerifiedManualCandidateProof,
   MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL,
   manualVerificationSnapshotGuardBindings,
@@ -1156,15 +1157,34 @@ async function sanitizeCurrentNewsReviewBatchAttempt(
       .filter((candidate) => !isManualCandidateSnapshot(candidate))
       .map((candidate) => candidate.item_id),
   );
-  // 手工候选的校验是读路径最贵的一步(读 proof + 校 HMAC + 核证据摘要,prod 实测约
-  // 1.8s/条)。先按原下标并发取回全部快照,再在下面的循环里按原顺序回放判定 ——
-  // 候选顺序、droppedIds 顺序、各判定分支都与逐条 await 时逐字一致。
+  // 手工候选原本每条都要走一遍完整重算(9 次 D1 往返,prod 实测约 1.8s/条),等于把
+  // 「确认」那一步的写入门禁搬到了每次查列表上。现在改成:一次批量廉价复核拿回整批
+  // 签名快照(纯计算验 HMAC,零逐条往返),签名投影与批次快照逐字一致的直接放行;
+  // 缺行、签名过不去、或投影对不上的,才落回完整重算(仍并发发起)。
+  // 下面的循环按原下标回放,候选顺序、droppedIds 顺序、各判定分支逐字不变。
   const manualLeadIds = current.candidates.map((candidate) => (
     isManualCandidateSnapshot(candidate) ? manualCandidateLeadId(candidate) : null
   ));
-  const manualLookupIndexes = manualLeadIds
-    .map((leadId, index) => (leadId ? index : -1))
-    .filter((index) => index >= 0);
+  const signedSnapshots = await loadSignedManualCandidateSnapshots(
+    env, manualLeadIds.filter((leadId): leadId is string => !!leadId),
+  );
+  const verifiedByIndex = new Map<number, VerifiedManualCandidateSnapshot>();
+  const manualLookupIndexes: number[] = [];
+  manualLeadIds.forEach((leadId, index) => {
+    if (!leadId) return;
+    const signed = signedSnapshots.get(leadId);
+    const rebuilt = signed
+      ? { ...signed.candidate, origin: 'manual_lead' as const, lead_id: leadId }
+      : null;
+    // 签名投影与批次快照逐字一致 = 这条候选自确认以来没变过，读路径就此打住。
+    if (rebuilt && signed && stableJson(rebuilt) === stableJson(current.candidates[index])) {
+      verifiedByIndex.set(index, {
+        candidate: rebuilt, lead_id: leadId, verification: signed.record,
+      });
+      return;
+    }
+    manualLookupIndexes.push(index);
+  });
   const manualLookups = await settleWithConcurrency(
     manualLookupIndexes.map((index) => () => confirmedManualCandidateById(
       env, manualLeadIds[index] as string,
@@ -1190,7 +1210,7 @@ async function sanitizeCurrentNewsReviewBatchAttempt(
     // 逐条串行时,前一条抛错就不会再查后一条 —— 这里把错误按原下标回放,
     // 抛出的仍是候选顺序上第一个失败的那条。
     if (lookup && !lookup.ok) throw lookup.error;
-    const snapshot = lookup ? lookup.value : null;
+    const snapshot = verifiedByIndex.get(index) || (lookup ? lookup.value : null);
     if (!snapshot) {
       droppedIds.push(candidate.item_id);
       continue;
