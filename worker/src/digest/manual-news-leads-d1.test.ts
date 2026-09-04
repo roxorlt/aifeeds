@@ -46,7 +46,7 @@ import {
   loadVerifiedManualCandidateProof,
 } from './manual-news-leads-verification';
 import { ManualNewsProviderError } from './manual-news-provider';
-import { runManualLeadEnrichment } from './manual-lead-enrichment';
+import { backfillManualLeadEnrichment, runManualLeadEnrichment } from './manual-lead-enrichment';
 import { authorizeFormalNewsSet } from './news-source-policy';
 import {
   durableConfirmedManualCandidates,
@@ -5239,6 +5239,309 @@ describe('manual lead enrichment', () => {
     expect(state.db.sqlite.prepare(
       'SELECT COUNT(*) AS n FROM items WHERE id = ?',
     ).get('blog:manual:ml-20260828-deadbeefdead')).toEqual({ n: 0 });
+  });
+
+  // -------------------------------------------------------------------------
+  // 出片之前的补取（2026-09-04）
+  //
+  // 提交时那次取材失败就没有第二次机会，写口播词时素材照旧是空的。补取在组装 payload
+  // 之前把当天还空着的候选再取一遍。守的是：只补该补的、补取伤不到已经入池的候选、
+  // 任何一条炸了都不牵连其他条与出片本身。
+  // -------------------------------------------------------------------------
+  describe('出片前的补取', () => {
+    function currentBatchRevision(state: { db: SqliteD1 }): number {
+      const row = state.db.sqlite.prepare(`SELECT batch_revision FROM daily_news_review_batches
+        WHERE review_date = '2026-08-28' AND is_current = 1`).get() as { batch_revision: number };
+      return Number(row.batch_revision);
+    }
+
+    async function assertedPool(entries: ReadonlyArray<{ text: string; url?: string }>) {
+      const state = await stuckZeroEvidenceFixture();
+      await frozenAssertedBatch(state);
+      const leadIds: string[] = [];
+      for (const [index, entry] of entries.entries()) {
+        const result = await assertManualNewsLeadCandidate(state.env, {
+          date: '2026-08-28', text: entry.text, url: entry.url || '',
+          expected_batch_revision: currentBatchRevision(state),
+        }, `backfill-entry-${index}`, 100 + index);
+        expect(result.ok).toBe(true);
+        leadIds.push(result.ok ? result.lead.id : '');
+      }
+      return { state, leadIds, itemIds: leadIds.map((id) => `blog:manual:${id}`) };
+    }
+
+    function evidenceTextOf(state: { db: SqliteD1 }, itemId: string): unknown {
+      const row = state.db.sqlite.prepare('SELECT extra FROM items WHERE id = ?')
+        .get(itemId) as { extra: string | null } | undefined;
+      return (JSON.parse(row?.extra || '{}') as Record<string, unknown>).manual_evidence_text;
+    }
+
+    // 背景文字带上这条线索自己的描述,才能在并发跑完之后分辨出「哪条候选拿到了哪份素材」。
+    function countingAdapters(label = (query: string) => `${query} 的背景。`) {
+      const requests: Array<Record<string, unknown>> = [];
+      return {
+        requests,
+        adapters: {
+          fetchPlainText: async (input: Record<string, unknown>) => {
+            requests.push(input);
+            return {
+              text: label(String(input.query || '')), url: 'https://techcrunch.com/a',
+              publisher: 'techcrunch.com', kind: 'document' as const,
+            };
+          },
+          compress: async (material: { text: string }) => material.text,
+        },
+      };
+    }
+
+    test('当天还空着的候选逐条补上,请求里链接与描述都在', async () => {
+      const { state, itemIds } = await assertedPool([
+        { text: 'OpenAI发布Astra', url: 'https://openai.com/index/astra/' },
+        { text: 'Anthropic发布Claude' },
+      ]);
+      const { requests, adapters } = countingAdapters();
+
+      await expect(backfillManualLeadEnrichment(state.env, '2026-08-28', adapters))
+        .resolves.toMatchObject({ scanned: 2, written: 2, empty: 0, failed: 0 });
+
+      expect(evidenceTextOf(state, itemIds[0])).toBe('OpenAI发布Astra 的背景。');
+      expect(evidenceTextOf(state, itemIds[1])).toBe('Anthropic发布Claude 的背景。');
+      expect(requests).toContainEqual({
+        url: 'https://openai.com/index/astra/', query: 'OpenAI发布Astra',
+      });
+      expect(requests).toContainEqual({ query: 'Anthropic发布Claude' });
+    });
+
+    test('已经有素材的候选跳过,不再打扰网关', async () => {
+      const { state, leadIds, itemIds } = await assertedPool([
+        { text: 'OpenAI发布Astra' }, { text: 'Anthropic发布Claude' },
+      ]);
+      await runManualLeadEnrichment(state.env, {
+        leadId: leadIds[0], itemId: itemIds[0], url: null, text: 'OpenAI发布Astra',
+      }, {
+        fetchPlainText: async () => ({
+          text: '正文', url: 'https://openai.com/a', publisher: 'OpenAI', kind: 'document' as const,
+        }),
+        compress: async () => '第一次取回来的背景。',
+      }, { now: 100 });
+
+      const { requests, adapters } = countingAdapters(() => '补取的背景。');
+      await expect(backfillManualLeadEnrichment(state.env, '2026-08-28', adapters))
+        .resolves.toMatchObject({ scanned: 1, written: 1 });
+
+      expect(requests).toHaveLength(1);
+      expect(evidenceTextOf(state, itemIds[0])).toBe('第一次取回来的背景。');
+      expect(evidenceTextOf(state, itemIds[1])).toBe('补取的背景。');
+    });
+
+    test('别的日期与还没确认的线索一概不碰', async () => {
+      const { state, itemIds } = await assertedPool([{ text: 'OpenAI发布Astra' }]);
+      const pending = await submitManualNewsLead(state.env, {
+        date: '2026-08-28', text: '还在核验的线索', url: '', note: '',
+      }, 'backfill-pending', 200);
+      const { requests, adapters } = countingAdapters();
+
+      await expect(backfillManualLeadEnrichment(state.env, '2026-08-29', adapters))
+        .resolves.toMatchObject({ scanned: 0, written: 0 });
+      expect(requests).toHaveLength(0);
+
+      // 还没确认的线索本来就没有 items 行,再给它造一行(线索被撤回、行残留下来的形状),
+      // 确认状态那道条件才是真的在挡人,而不是靠 JOIN 顺手挡住。
+      const pendingItemId = `blog:manual:${pending.lead.id}`;
+      const columns = (state.db.sqlite.prepare('PRAGMA table_info(items)').all() as Array<{ name: string }>)
+        .map((column) => column.name);
+      const template = state.db.sqlite.prepare('SELECT * FROM items WHERE id = ?')
+        .get(itemIds[0]) as Record<string, unknown>;
+      state.db.sqlite.prepare(
+        `INSERT INTO items (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`,
+      ).run(...columns.map((column) => (
+        column === 'id' ? pendingItemId : template[column]
+      ) as SQLInputValue));
+
+      await expect(backfillManualLeadEnrichment(state.env, '2026-08-28', adapters))
+        .resolves.toMatchObject({ scanned: 1, written: 1 });
+      expect(evidenceTextOf(state, itemIds[0])).toBe('OpenAI发布Astra 的背景。');
+      expect(evidenceTextOf(state, pendingItemId)).toBeUndefined();
+    });
+
+    test('一条取材炸了不牵连其他条,统计如实报出来', async () => {
+      const { state, itemIds } = await assertedPool([
+        { text: 'OpenAI发布Astra' }, { text: 'Anthropic发布Claude' },
+      ]);
+
+      await expect(backfillManualLeadEnrichment(state.env, '2026-08-28', {
+        fetchPlainText: async (input: Record<string, unknown>) => {
+          if (String(input.query).startsWith('OpenAI')) throw new Error('gateway_502');
+          return {
+            text: '正文', url: 'https://a.example/x', publisher: 'A', kind: 'document' as const,
+          };
+        },
+        compress: async () => '补取的背景。',
+      })).resolves.toMatchObject({ scanned: 2, written: 1, empty: 1, failed: 0 });
+
+      expect(evidenceTextOf(state, itemIds[0])).toBeUndefined();
+      expect(evidenceTextOf(state, itemIds[1])).toBe('补取的背景。');
+    });
+
+    test('并发不超过 3 条,不把一批候选一次全压给网关', async () => {
+      const { state } = await assertedPool([
+        { text: 'OpenAI发布Astra' }, { text: 'Anthropic发布Claude' }, { text: 'Google发布Gemini' },
+        { text: 'Meta发布Llama' }, { text: 'xAI发布Grok' },
+      ]);
+      let inFlight = 0;
+      let peak = 0;
+
+      await backfillManualLeadEnrichment(state.env, '2026-08-28', {
+        fetchPlainText: async () => {
+          inFlight += 1;
+          peak = Math.max(peak, inFlight);
+          await new Promise((resolve) => { setTimeout(resolve, 1); });
+          inFlight -= 1;
+          return { text: '正文', url: 'https://a.example/x', publisher: 'A', kind: 'document' as const };
+        },
+        compress: async () => '补取的背景。',
+      });
+
+      expect(peak).toBeLessThanOrEqual(3);
+      expect(peak).toBeGreaterThan(1);
+    });
+
+    test('总预算到点就停,已经补上的照旧算数', async () => {
+      const { state, itemIds } = await assertedPool([
+        { text: 'OpenAI发布Astra' }, { text: 'Anthropic发布Claude' },
+      ]);
+      let calls = 0;
+      let clock = 0;
+
+      const stats = await backfillManualLeadEnrichment(state.env, '2026-08-28', {
+        fetchPlainText: async () => {
+          calls += 1;
+          clock += 90_000;
+          return { text: '正文', url: 'https://a.example/x', publisher: 'A', kind: 'document' as const };
+        },
+        compress: async () => '补取的背景。',
+      }, { now: () => clock, budgetMs: 60_000, concurrency: 1 });
+
+      // 谁先谁后由 lead id 的排序决定,与录入顺序无关,所以只断言「恰好补上了一条」。
+      expect(calls).toBe(1);
+      expect(stats).toMatchObject({ scanned: 2, written: 1 });
+      expect(itemIds.filter((itemId) => evidenceTextOf(state, itemId) !== undefined)).toHaveLength(1);
+    });
+
+    test('数据库挂掉时不抛,出片流程拿到的是一份零统计', async () => {
+      const { state } = await assertedPool([{ text: 'OpenAI发布Astra' }]);
+      const brokenEnv = {
+        ...state.env,
+        DB: { prepare() { throw new Error('D1_ERROR: too many subrequests'); } },
+      } as unknown as Env;
+
+      await expect(backfillManualLeadEnrichment(brokenEnv, '2026-08-28', {
+        fetchPlainText: async () => null,
+        compress: async () => null,
+      })).resolves.toMatchObject({ scanned: 0, written: 0, failed: 0 });
+    });
+
+    test('补取写完之后,正式新闻门仍放行且 sanitize 连续两次都不判 drift', async () => {
+      const { state, itemIds } = await assertedPool([{ text: 'OpenAI发布Astra' }]);
+      const before = state.db.sqlite.prepare(
+        'SELECT title, content, content_translated, author, url, published_at, extra FROM items WHERE id = ?',
+      ).get(itemIds[0]) as Record<string, unknown>;
+      const revisionBefore = currentBatchRevision(state);
+
+      await backfillManualLeadEnrichment(state.env, '2026-08-28', countingAdapters().adapters);
+
+      const after = state.db.sqlite.prepare(
+        'SELECT title, content, content_translated, author, url, published_at, extra FROM items WHERE id = ?',
+      ).get(itemIds[0]) as Record<string, unknown>;
+      // 被门禁绑定的列逐字未变,extra 里除两个新键之外的内容也一字未动。
+      for (const column of ['title', 'content', 'content_translated', 'author', 'url', 'published_at']) {
+        expect(after[column]).toEqual(before[column]);
+      }
+      const beforeExtra = JSON.parse(String(before.extra || '{}')) as Record<string, unknown>;
+      const afterExtra = JSON.parse(String(after.extra || '{}')) as Record<string, unknown>;
+      const { manual_evidence_text: text, manual_evidence_source: source, ...rest } = afterExtra;
+      expect(rest).toEqual(beforeExtra);
+      expect(typeof text).toBe('string');
+      expect(source).toMatchObject({ kind: 'document' });
+
+      await expect(authorizeFormalNewsSet(
+        state.env, '2026-08-28', itemIds, 'backfill-gate',
+      )).resolves.toMatchObject({
+        allowed_ids: itemIds,
+        decisions: [{ allowed: true, code: 'ALLOW_VERIFIED_MANUAL' }],
+      });
+
+      const first = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 100);
+      const second = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 100);
+      expect(first.changed).toBe(false);
+      expect(second.changed).toBe(false);
+      // 补取与两次 sanitize 都没让当前批次翻版本:批次里那条候选一字未改。
+      expect(second.batch.batch_revision).toBe(revisionBefore);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 素材缺失时的可见性：审核卡片要在这一步就看得出「口播只能依据你写的这句话」，
+  // 而不是等视频出来才发现口播单薄。
+  // -------------------------------------------------------------------------
+  describe('详情里的素材状态', () => {
+    async function detailOf(state: { env: Env }, leadId: string) {
+      const response = await handleManualNewsLeadsApi(new Request(
+        `https://api.example.test/api/digest/daily-news-leads/${leadId}`,
+        { headers: { Authorization: 'Bearer owner-asserted-review-secret' } },
+      ), { ...state.env, DAILY_NEWS_REVIEW_ENABLED: '1' } as Env, { waitUntil() {} } as never);
+      expect(response.status).toBe(200);
+      return (await response.json() as { lead: Record<string, unknown> }).lead;
+    }
+
+    test('还没取到素材时 evidence_material 为 null', async () => {
+      const { state, leadId } = await assertedCandidate();
+      expect(await detailOf(state, leadId)).toMatchObject({ evidence_material: null });
+    });
+
+    test('取到素材后报出字数与每一份来源', async () => {
+      const { state, leadId, itemId } = await assertedCandidate('https://openai.com/index/astra/');
+      await runManualLeadEnrichment(state.env, {
+        leadId, itemId, url: 'https://openai.com/index/astra/', text: ASSERTED_STATEMENT,
+      }, {
+        fetchPlainText: async () => ({
+          text: '链接正文。\n\n搜索素材。', url: 'https://openai.com/index/astra/',
+          publisher: 'openai.com', kind: 'document' as const,
+          sources: [
+            { url: 'https://openai.com/index/astra/', publisher: 'openai.com', kind: 'document' as const },
+            { url: 'https://techcrunch.com/a', publisher: 'techcrunch.com', kind: 'search+document' as const },
+          ],
+        }),
+        compress: async () => '取回来的背景素材。',
+      }, { now: 100 });
+
+      expect(await detailOf(state, leadId)).toMatchObject({
+        evidence_material: {
+          chars: 9,
+          sources: [
+            { url: 'https://openai.com/index/astra/', publisher: 'openai.com', kind: 'document' },
+            { url: 'https://techcrunch.com/a', publisher: 'techcrunch.com', kind: 'search+document' },
+          ],
+        },
+      });
+    });
+
+    test('只有一份素材时来源退回主来源那一条', async () => {
+      const { state, leadId, itemId } = await assertedCandidate();
+      await runManualLeadEnrichment(state.env, {
+        leadId, itemId, url: null, text: ASSERTED_STATEMENT,
+      }, {
+        fetchPlainText: async () => material,
+        compress: async () => '搜来的背景。',
+      }, { now: 100 });
+
+      expect(await detailOf(state, leadId)).toMatchObject({
+        evidence_material: {
+          chars: 6,
+          sources: [{ url: 'https://openai.com/index/astra/', publisher: 'OpenAI', kind: 'document' }],
+        },
+      });
+    });
   });
 
   test('数据库读失败时回 failed,异常不外泄给确认流程', async () => {

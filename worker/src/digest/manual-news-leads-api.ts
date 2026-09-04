@@ -22,6 +22,7 @@ import {
 import {
   manualLeadNeedsEnrichment,
   runManualLeadEnrichment,
+  type ManualEvidenceMaterialSource,
 } from './manual-lead-enrichment';
 import { createManualLeadEnrichmentAdapters } from './manual-lead-enrichment-runtime';
 import { newsReviewSecret } from './news-review';
@@ -99,12 +100,55 @@ export function manualNewsEvidenceDetail(item: ManualNewsEvidence) {
   };
 }
 
+/**
+ * 这条线索到底有没有背景素材,以及素材来自哪几家。
+ *
+ * owner 直接录入的候选,标题与卡片文字都是他自己写的那一句话;口播能不能写得比那一句话
+ * 厚,全看入池之后有没有补到素材。补不到的时候审核阶段就该看见,而不是等视频出来才发现
+ * 口播单薄——所以详情里带上这一项。读的是 extra 里那两个补充键,与门禁绑定的东西无关。
+ */
+async function manualNewsLeadEvidenceMaterial(
+  env: Env,
+  leadId: string,
+): Promise<{ chars: number; sources: ManualEvidenceMaterialSource[] } | null> {
+  try {
+    const row = await env.DB.prepare(
+      `/* manual_lead:detail_evidence_material */ SELECT extra FROM items WHERE id = ?`,
+    ).bind(`blog:manual:${leadId}`).first<{ extra: string | null }>();
+    if (!row?.extra) return null;
+    const extra = JSON.parse(row.extra) as Record<string, unknown>;
+    const text = typeof extra.manual_evidence_text === 'string' ? extra.manual_evidence_text.trim() : '';
+    if (!text) return null;
+    const source = (extra.manual_evidence_source && typeof extra.manual_evidence_source === 'object'
+      && !Array.isArray(extra.manual_evidence_source))
+      ? extra.manual_evidence_source as Record<string, unknown>
+      : {};
+    // 合并了多份素材时逐份列出来;只有一份时(以及老行)退回主来源那一条。
+    const listed = Array.isArray(source.sources) ? source.sources as Record<string, unknown>[] : [];
+    const entries = listed.length ? listed : [source];
+    return {
+      chars: Array.from(text).length,
+      sources: entries
+        .filter((entry) => entry && typeof entry === 'object' && typeof entry.url === 'string')
+        .map((entry) => ({
+          url: String(entry.url || ''),
+          publisher: String(entry.publisher || ''),
+          kind: String(entry.kind || 'document'),
+        } as ManualEvidenceMaterialSource)),
+    };
+  } catch {
+    // 这一项只是给审核看的提示,读不出来就当没有,详情本身不能因此挂掉。
+    return null;
+  }
+}
+
 async function manualNewsLeadDetail(env: Env, lead: ManualNewsLeadRecord) {
   return {
     response_profile: 'manual_news_lead_detail_v1' as const,
     schema_version: 1 as const,
     ...manualNewsLeadBase(lead),
     ...await getManualNewsCandidateAuthorization(env, lead.id),
+    evidence_material: await manualNewsLeadEvidenceMaterial(env, lead.id),
     ...(lead.assessment_generation ? { assessment_generation: lead.assessment_generation } : {}),
     ...(lead.provider_failure ? { provider_failure: lead.provider_failure } : {}),
     assessment: lead.assessment,
