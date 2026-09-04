@@ -1101,6 +1101,40 @@ export async function getVerifiedNewsReviewSelectionSnapshot(
   };
 }
 
+/** 手工候选校验的并发上限：够快，又不至于把 D1 一次打满。 */
+export const MANUAL_CANDIDATE_VERIFY_CONCURRENCY = 8;
+
+export type SettledTaskResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: unknown };
+
+/**
+ * 限流并发跑一组任务，结果按任务下标返回（与完成先后无关）；单个任务抛错只落在
+ * 它自己的下标上，由调用方决定在哪一步把它抛出来。
+ */
+export async function settleWithConcurrency<T>(
+  tasks: readonly (() => Promise<T>)[],
+  limit: number,
+): Promise<SettledTaskResult<T>[]> {
+  const results = new Array<SettledTaskResult<T>>(tasks.length);
+  let cursor = 0;
+  const workerCount = Math.min(Math.max(1, limit), tasks.length);
+  const workers = Array.from({ length: workerCount }, async () => {
+    for (;;) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= tasks.length) return;
+      try {
+        results[index] = { ok: true, value: await tasks[index]() };
+      } catch (error) {
+        results[index] = { ok: false, error };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 async function sanitizeCurrentNewsReviewBatchAttempt(
   env: Env,
   date: string,
@@ -1122,7 +1156,26 @@ async function sanitizeCurrentNewsReviewBatchAttempt(
       .filter((candidate) => !isManualCandidateSnapshot(candidate))
       .map((candidate) => candidate.item_id),
   );
-  for (const candidate of current.candidates) {
+  // 手工候选的校验是读路径最贵的一步(读 proof + 校 HMAC + 核证据摘要,prod 实测约
+  // 1.8s/条)。先按原下标并发取回全部快照,再在下面的循环里按原顺序回放判定 ——
+  // 候选顺序、droppedIds 顺序、各判定分支都与逐条 await 时逐字一致。
+  const manualLeadIds = current.candidates.map((candidate) => (
+    isManualCandidateSnapshot(candidate) ? manualCandidateLeadId(candidate) : null
+  ));
+  const manualLookupIndexes = manualLeadIds
+    .map((leadId, index) => (leadId ? index : -1))
+    .filter((index) => index >= 0);
+  const manualLookups = await settleWithConcurrency(
+    manualLookupIndexes.map((index) => () => confirmedManualCandidateById(
+      env, manualLeadIds[index] as string,
+    )),
+    MANUAL_CANDIDATE_VERIFY_CONCURRENCY,
+  );
+  const manualLookupByIndex = new Map(
+    manualLookupIndexes.map((index, slot) => [index, manualLookups[slot]] as const),
+  );
+  for (let index = 0; index < current.candidates.length; index += 1) {
+    const candidate = current.candidates[index];
     if (!isManualCandidateSnapshot(candidate)) {
       // Keep the id-only guard for snapshots whose backing row has disappeared,
       // and use the batch-read shared SQL predicate whenever durable identity exists.
@@ -1133,10 +1186,11 @@ async function sanitizeCurrentNewsReviewBatchAttempt(
       }
       continue;
     }
-    const leadId = manualCandidateLeadId(candidate);
-    const snapshot = leadId
-      ? await confirmedManualCandidateById(env, leadId)
-      : null;
+    const lookup = manualLookupByIndex.get(index);
+    // 逐条串行时,前一条抛错就不会再查后一条 —— 这里把错误按原下标回放,
+    // 抛出的仍是候选顺序上第一个失败的那条。
+    if (lookup && !lookup.ok) throw lookup.error;
+    const snapshot = lookup ? lookup.value : null;
     if (!snapshot) {
       droppedIds.push(candidate.item_id);
       continue;
