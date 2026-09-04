@@ -45,6 +45,10 @@ export interface RenderedItem {
   guests?: string[]; // 播客本集嘉宾名(LLM 抽取);仅 podcast 且抽到嘉宾时有
   intro?: string; // 内容简介:图文新闻→excerpt_zh / 播客→shownotes_zh(比一句话 summary 更完整);仅行业新闻有
   timeline?: Array<{ ts: string; topic: string; speaker?: string; point: string }>; // 话题脉络:仅有原生时间戳文字稿的 podcast 有
+  // 手工补录线索的补充素材(extra.manual_evidence_text):owner 的陈述之外,入池后另抓回来的
+  // 一段背景,只给口播当补充证据。summary / summary_full 不受它影响 —— 卡片与静态页显示的
+  // 仍是 owner 自己写的那句话。无素材时省略字段,payload 逐字节不变。
+  evidence_note?: string;
 }
 
 export function cleanText(s: string): string {
@@ -671,6 +675,10 @@ export function renderItem(source: DigestSource, row: RenderRow, rank: number, a
   // 行业新闻专属:内容简介(图文→excerpt_zh / 播客→shownotes_zh)+ 话题脉络(有原生时间戳文字稿的播客)
   let intro: string | undefined;
   let timeline: RenderedItem['timeline'];
+  // 手工补录的补充素材:只有行业新闻板块会有(手工线索一律落 blog:manual:*)。
+  const evidenceNote = source === 'news' && typeof ex.manual_evidence_text === 'string'
+    ? clampSentences(cleanText(ex.manual_evidence_text), 800)
+    : '';
   if (source === 'news') {
     // 真播客 extra 有 show_key;无音频文字项改判 blog 后 extra 是 feed_key、无 show_key。
     // 不用 id 前缀(`podcast:`)判断 —— 改判项保留 podcast: 前缀作来源痕迹(不断分享链/防重),
@@ -704,5 +712,6 @@ export function renderItem(source: DigestSource, row: RenderRow, rank: number, a
     ...(guests.length ? { guests } : {}),
     ...(intro ? { intro } : {}),
     ...(timeline && timeline.length ? { timeline } : {}),
+    ...(evidenceNote ? { evidence_note: evidenceNote } : {}),
   };
 }

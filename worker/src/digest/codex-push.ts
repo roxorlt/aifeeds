@@ -78,10 +78,12 @@ interface CodexItem {
   guests?: string[]; // 播客本集嘉宾名,仅 podcast 且抽到时有
   intro?: string; // 内容简介:图文→excerpt_zh / 播客→shownotes_zh
   timeline?: RenderedItem['timeline']; // 话题脉络:有原生时间戳文字稿的 podcast 才有
+  // 手工补录线索入池后另抓回来的背景素材,口播拿它当补充证据;无素材时不出现在 payload 里
+  evidence_note?: string;
   raw: { media: RenderedItem['media']; logo: string | null };
 }
 
-function toCodexItem(r: RenderedItem): CodexItem {
+export function toCodexItem(r: RenderedItem): CodexItem {
   return {
     rank: r.rank,
     source: r.source,
@@ -97,6 +99,7 @@ function toCodexItem(r: RenderedItem): CodexItem {
     ...(r.guests && r.guests.length ? { guests: r.guests } : {}),
     ...(r.intro ? { intro: r.intro } : {}),
     ...(r.timeline && r.timeline.length ? { timeline: r.timeline } : {}),
+    ...(r.evidence_note ? { evidence_note: r.evidence_note } : {}),
     raw: { media: r.media, logo: r.logo },
   };
 }

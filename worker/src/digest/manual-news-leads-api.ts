@@ -19,6 +19,11 @@ import {
   vouchManualNewsLeadCandidate,
   type ManualNewsCandidateAuthorizationView,
 } from './manual-news-leads-store';
+import {
+  manualLeadNeedsEnrichment,
+  runManualLeadEnrichment,
+} from './manual-lead-enrichment';
+import { createManualLeadEnrichmentAdapters } from './manual-lead-enrichment-runtime';
 import { newsReviewSecret } from './news-review';
 import {
   MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
@@ -136,6 +141,37 @@ function scheduleLeadProcessing(
     await markManualNewsLeadEnqueueFailure(env, lead.id, lead.version, owner, error);
   });
   ctx.waitUntil(pending);
+}
+
+/**
+ * 入池成功之后去补一段背景素材。
+ *
+ * **用 `ctx.waitUntil` 而不是派发 Workflow**：Workflow 那条路要先在库里占一个
+ * `processing_owner` 租约、失败要回写 `error_code`，那整套是为「取证决定线索能不能入池」
+ * 设计的。补充素材决定不了任何事 —— 它成不成功，候选都已经在池子里了 —— 给它一份带状态
+ * 机的重试机制只会让一条已经确认的线索显示成失败。`waitUntil` 正好是「响应发出去之后
+ * 顺手做完，做不成就算了」。
+ *
+ * 三道保险保证它伤不到刚完成的那次确认：这里的 try / catch 挡住同步异常，`.catch` 挡住
+ * 异步异常，`runManualLeadEnrichment` 自己还会把失败收敛成一个返回值。
+ */
+function scheduleLeadEnrichment(
+  env: Env,
+  ctx: Pick<ExecutionContext, 'waitUntil'>,
+  outcome: { ok: boolean; lead?: ManualNewsLeadRecord },
+): void {
+  try {
+    const lead = outcome.ok ? outcome.lead : undefined;
+    if (!lead || !manualLeadNeedsEnrichment(lead)) return;
+    ctx.waitUntil(runManualLeadEnrichment(env, {
+      leadId: lead.id,
+      itemId: `blog:manual:${lead.id}`,
+      url: lead.input_url || null,
+      text: lead.input_text || '',
+    }, createManualLeadEnrichmentAdapters(env)).then(() => undefined, () => undefined));
+  } catch (error) {
+    console.warn('[manual-lead-enrichment] schedule failed:', String((error as Error)?.message || error).slice(0, 200));
+  }
 }
 
 /**
@@ -292,6 +328,7 @@ async function handleManualNewsLeadsApiInternal(
             ? { expected_batch_revision: body.expected_batch_revision }
             : {}),
         }, key, now);
+        scheduleLeadEnrichment(env, ctx, asserted);
         return response(
           await manualNewsMutationResult(env, asserted),
           asserted.ok ? 200 : asserted.status,
@@ -363,6 +400,8 @@ async function handleManualNewsLeadsApiInternal(
     : await confirmManualNewsLeadCandidate(
       env, leadId, expectedVersion, expectedBatchRevision, key, now,
     );
+  // 只给担保这条路补素材：确认走的是取证跑完的线索，它的摘要本来就是核验过的正文。
+  if (action === 'vouch-candidate') scheduleLeadEnrichment(env, ctx, result);
   return result.ok
     ? response(await manualNewsMutationResult(env, result))
     : response(await manualNewsMutationResult(env, result), result.status);
