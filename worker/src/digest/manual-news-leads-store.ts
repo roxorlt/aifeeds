@@ -58,7 +58,9 @@ import {
   loadVerifiedManualSourceSupportProofs,
   loadVerifiedManualAssessment,
   MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL,
+  MANUAL_VERIFICATION_SNAPSHOT_SET_GUARD_SQL,
   manualVerificationSnapshotGuardBindings,
+  manualVerificationSnapshotSetGuardBinding,
   type PersistedManualVerificationRow,
 } from './manual-news-leads-verification';
 import type {
@@ -1401,11 +1403,9 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       if (!Number.isSafeInteger(generation) || generation < 0) {
         throw new Error('invalid_news_review_candidate_generation');
       }
-      const existingProofGuard = existingManual.length
-        ? existingManual.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
-        : '1 = 1';
-      const existingProofBindings = existingManual.flatMap((entry) =>
-        manualVerificationSnapshotGuardBindings(entry.lead_id, entry.verification));
+      // 整批已确认快照只占 1 个绑参 —— 按条数展开会随当天候选条数撞 D1 100 个绑参上限。
+      const existingProofGuard = MANUAL_VERIFICATION_SNAPSHOT_SET_GUARD_SQL;
+      const existingProofBindings = [manualVerificationSnapshotSetGuardBinding(existingManual)];
       const sharedGate = `EXISTS (
         SELECT 1 FROM manual_news_leads l
         WHERE l.id = ? AND l.version = ? AND l.status = 'verifying'
@@ -1590,11 +1590,9 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     const inheritedSelectionHash = inheritsHumanSelection
       ? await newsReviewSelectionHash(merged.default_selected_ids)
       : null;
-    const existingProofGuard = existingManual.length
-      ? existingManual.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
-      : '1 = 1';
-    const existingProofBindings = existingManual.flatMap((entry) =>
-      manualVerificationSnapshotGuardBindings(entry.lead_id, entry.verification));
+    // 同上：整批已确认快照打成一个 JSON 绑参。
+    const existingProofGuard = MANUAL_VERIFICATION_SNAPSHOT_SET_GUARD_SQL;
+    const existingProofBindings = [manualVerificationSnapshotSetGuardBinding(existingManual)];
     const activeSnapshotGuard = `EXISTS (
       SELECT 1 FROM daily_news_review_batches b
       WHERE b.review_date = ? AND b.lineage_id = ? AND b.batch_id = ?
@@ -3401,11 +3399,9 @@ export async function confirmManualNewsLeadCandidate(
     ? await newsReviewSelectionHash(merged.default_selected_ids)
     : null;
   const existingManualVerifications = activeSanitization?.manual_verifications || [];
-  const existingManualGuard = existingManualVerifications.length
-    ? existingManualVerifications.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
-    : '1 = 1';
-  const existingManualBindings = existingManualVerifications.flatMap((snapshot) =>
-    manualVerificationSnapshotGuardBindings(snapshot.lead_id, snapshot.verification));
+  // 同上：整批已确认快照打成一个 JSON 绑参。
+  const existingManualGuard = MANUAL_VERIFICATION_SNAPSHOT_SET_GUARD_SQL;
+  const existingManualBindings = [manualVerificationSnapshotSetGuardBinding(existingManualVerifications)];
 
   const statements = [
     confirmedLeadItemStatement(
@@ -3580,9 +3576,8 @@ function confirmedLeadItemStatement(
          AND (SELECT COUNT(*) FROM manual_news_leads
            WHERE review_date = ? AND confirmed_at IS NOT NULL) < ${MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT}`
       : '';
-  const existingManualGuard = requiredManualVerifications.length
-    ? requiredManualVerifications.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
-    : '1 = 1';
+  // 同上：整批已确认快照打成一个 JSON 绑参。
+  const existingManualGuard = MANUAL_VERIFICATION_SNAPSHOT_SET_GUARD_SQL;
   const values: unknown[] = [
     candidate.item_id,
     `manual:${lead.id}`,
@@ -3597,8 +3592,7 @@ function confirmedLeadItemStatement(
     lead.id,
     expectedVersion,
     ...manualVerificationSnapshotGuardBindings(lead.id, verification),
-    ...requiredManualVerifications.flatMap((snapshot) =>
-      manualVerificationSnapshotGuardBindings(snapshot.lead_id, snapshot.verification)),
+    manualVerificationSnapshotSetGuardBinding(requiredManualVerifications),
   ];
   if (expectedActiveBatch) {
     values.push(lead.review_date, lead.review_date, expectedActiveBatch.batch_id, expectedActiveBatch.batch_revision);
