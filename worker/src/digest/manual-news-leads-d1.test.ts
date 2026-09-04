@@ -5711,6 +5711,78 @@ describe('manual news atomic write bind budget', () => {
     expect(manualIds).toHaveLength(14);
   }, 60_000);
 
+  test('证据取满 8 条的线索，担保确认照样能写进去', async () => {
+    // 证据快照门禁原本每条证据展开 13 个绑参，取满 8 条(MANUAL_NEWS_EVIDENCE_MAX_COUNT)
+    // 光这一段就 104 个，同样越过 D1 单语句 100 个的上限。
+    const state = await vouchFixture('failed', 8);
+    const frozen = await frozenVouchBatch(state);
+
+    const result = await vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-8-evidence', 100,
+    );
+
+    expect(result).toMatchObject({
+      ok: true, changed: true, lead: { status: 'needs_review', confirmed_at: 100 },
+    });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM
+      manual_news_assessment_verifications WHERE lead_id = ? AND status = 'active'`)
+      .get(state.leadId)).toEqual({ count: 1 });
+  }, 60_000);
+
+  test('证据的 published_at 为空时门禁仍要成立（NULL 安全的 IS，不能退化成 =）', async () => {
+    // 证据表的 published_at 可空。逐条展开时这一列用的是 NULL 安全的 `IS ?`，
+    // 换成 json_each 之后必须还是 `IS`：退化成 `=` 会让「没有发布时间的证据」永远对不上，
+    // 门禁整体不成立，担保确认直接 409。
+    const state = await vouchFixture('failed', 8);
+    const frozen = await frozenVouchBatch(state);
+    state.db.sqlite.prepare('DELETE FROM manual_news_evidence WHERE lead_id = ?').run(state.leadId);
+    const evidence = Array.from({ length: 8 }, (_, index) => withSignedArticleTextV2Audit({
+      id: index === 0 ? 'ev-openai-gpt-6' : `ev-openai-mirror-${index}`,
+      url: index === 0 ? VOUCH_URL : `${VOUCH_URL}mirror-${index}/`,
+      source_type: index === 0 ? 'official_primary' : 'other',
+      publisher: index === 0 ? 'OpenAI' : 'mirror.example.com',
+      // 第 3 条没有发布时间 —— 这一列在库里是 NULL。
+      published_at: index === 3 ? null : '2026-08-28T00:00:00.000Z',
+      retrieved_at: 11 + index,
+      title: 'Introducing GPT-6', excerpt: VOUCH_EXCERPT,
+      claims_supported: [VOUCH_EXCERPT], reliable: index === 0,
+    } as ManualNewsEvidence));
+    for (const item of evidence) {
+      state.db.sqlite.prepare(`INSERT INTO manual_news_evidence (
+        lead_id, evidence_id, response_key_id, url, source_type, publisher, published_at, retrieved_at,
+        title, excerpt, claims_supported_json, fetch_audit_json, reliable
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        state.leadId, item.id, item.response_key_id, item.url, item.source_type, item.publisher,
+        item.published_at, item.retrieved_at, item.title, item.excerpt,
+        JSON.stringify(item.claims_supported), JSON.stringify(item.fetch_audit), item.reliable ? 1 : 0,
+      );
+    }
+
+    await expect(vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-null-published', 100,
+    )).resolves.toMatchObject({ ok: true, changed: true });
+  }, 60_000);
+
+  test('8 条证据里第 6 条在读写之间被改动后，担保确认必须失败', async () => {
+    // 证据快照门禁是 CAS：读到的那一份必须与写入瞬间库里的那一份逐字相同。
+    // 取满 8 条时把其中一条在 batch 执行前改掉，门禁必须整体不成立。
+    const state = await vouchFixture('failed', 8);
+    const frozen = await frozenVouchBatch(state);
+
+    const gate = state.db.pauseNextBatch();
+    const vouching = vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-8-tampered', 100,
+    );
+    await gate.entered;
+    state.db.sqlite.prepare(`UPDATE manual_news_evidence SET publisher = publisher || '-tampered'
+      WHERE lead_id = ? AND evidence_id = 'ev-openai-mirror-5'`).run(state.leadId);
+    gate.release();
+
+    await expect(vouching).resolves.toMatchObject({ ok: false });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM
+      manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId)).toEqual({ count: 0 });
+  }, 60_000);
+
   test('直接录入的绑参峰值不随已确认候选条数增长', async () => {
     const light = await directEntryPeakBindings(2);
     const heavy = await directEntryPeakBindings(12);
