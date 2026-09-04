@@ -22,6 +22,8 @@ import type { Env } from '../index';
 export const MANUAL_EVIDENCE_TEXT_MAX_CODE_POINTS = 400;
 /** 单条线索的取材总预算。超时就放弃，候选保持原样。 */
 export const MANUAL_LEAD_ENRICHMENT_BUDGET_MS = 60_000;
+/** 网关 `/v1/plain-text` 的 query 上限（UTF-16 长度）。超了整个请求会被 400 掉。 */
+export const MANUAL_LEAD_ENRICHMENT_QUERY_MAX_LENGTH = 200;
 
 export type ManualEvidenceKind = 'tweet' | 'document' | 'search+document';
 
@@ -31,14 +33,40 @@ export interface ManualEnrichmentMaterial {
   url: string;
   publisher: string;
   kind: ManualEvidenceKind;
+  /** 合并进这份正文的每一份素材的出处；网关只取到一份时可以没有。 */
+  sources?: ManualEvidenceMaterialSource[];
 }
 
-/** 落进 `extra.manual_evidence_source` 的来源记录，供排查与将来在卡片上标注来源。 */
+/**
+ * 发给网关的取材请求。**有链接时 url 与 query 一起发**（2026-09-04 owner 纠正）：
+ * 链接给的是这条消息本身，描述是找同一件事其他报道的依据，写口播词要的是两者合起来的
+ * 背景。上一版二选一，给了链接就不搜，素材常常薄到只够复述 owner 的那一句话。
+ */
+export interface ManualEnrichmentRequest {
+  url?: string;
+  query?: string;
+}
+
+/** 一份素材的出处。网关合并了「链接正文 + 搜索素材」时会逐份列出来。 */
+export interface ManualEvidenceMaterialSource {
+  url: string;
+  publisher: string;
+  kind: ManualEvidenceKind;
+}
+
+/**
+ * 落进 `extra.manual_evidence_source` 的来源记录，供排查与在审核卡片上标注来源。
+ *
+ * 顶层三个字段说的是主来源（有链接时就是 owner 给的那条链接）。`sources` 只在网关真的
+ * 合并了不止一份素材时才写：单份素材的形状与补充上线之初逐字一致，读老行的地方不用改。
+ * 写进 extra 的键始终只有 `manual_evidence_text` 与 `manual_evidence_source` 两个。
+ */
 export interface ManualEvidenceSource {
   url: string;
   publisher: string;
   fetched_at: string;
   kind: ManualEvidenceKind;
+  sources?: ManualEvidenceMaterialSource[];
 }
 
 export interface ManualLeadEnrichmentResult {
@@ -48,10 +76,10 @@ export interface ManualLeadEnrichmentResult {
 
 export interface ManualLeadEnrichmentAdapters {
   /**
-   * 一次调用覆盖三条取材路径：给 `url` 就抓那一条（X status 链接由网关自己转推文接口），
-   * 给 `query` 就先搜再抓第一条能抓到的结果。抓不到回 `null`。
+   * 一次调用覆盖全部取材路径：带 `url` 就抓那一条（X status 链接由网关自己转推文接口），
+   * 带 `query` 就按描述搜索，两者都带就两路并发、网关合并后回一份。抓不到回 `null`。
    */
-  fetchPlainText(input: { url: string } | { query: string }): Promise<ManualEnrichmentMaterial | null>;
+  fetchPlainText(input: ManualEnrichmentRequest): Promise<ManualEnrichmentMaterial | null>;
   /** 把正文压成 2–4 句中文背景。压不出来回 `null`。 */
   compress(material: ManualEnrichmentMaterial): Promise<string | null>;
 }
@@ -59,6 +87,26 @@ export interface ManualLeadEnrichmentAdapters {
 export function clampEnrichmentText(value: unknown): string {
   const collapsed = String(value ?? '').replace(/\s+/g, ' ').trim();
   return Array.from(collapsed).slice(0, MANUAL_EVIDENCE_TEXT_MAX_CODE_POINTS).join('');
+}
+
+/**
+ * 组装发给网关的取材请求：有什么给什么，两样都没有回 `null`。
+ *
+ * 描述按网关的 200 上限截断 —— owner 的陈述常常比这长，整条请求被 400 掉的话这条线索
+ * 就一份素材都拿不到，截断至少还能搜到东西。
+ */
+export function manualLeadEnrichmentRequest(
+  clue: { url?: string | null; text?: string | null },
+): ManualEnrichmentRequest | null {
+  const url = String(clue.url || '').trim();
+  const collapsed = String(clue.text || '').replace(/\s+/g, ' ').trim();
+  let query = '';
+  for (const char of collapsed) {
+    if (query.length + char.length > MANUAL_LEAD_ENRICHMENT_QUERY_MAX_LENGTH) break;
+    query += char;
+  }
+  if (!url && !query) return null;
+  return { ...(url ? { url } : {}), ...(query ? { query } : {}) };
 }
 
 /**
@@ -91,16 +139,18 @@ export async function collectManualLeadEnrichment(
   const now = opts.now ?? Date.now();
   const budgetMs = opts.budgetMs ?? MANUAL_LEAD_ENRICHMENT_BUDGET_MS;
   const url = String(clue.url || '').trim();
-  const text = String(clue.text || '').trim();
   // 既没链接也没文字就没有任何取材依据，连网关都不必打扰。
-  if (!url && !text) return null;
-  const request = url ? { url } : { query: text };
+  const request = manualLeadEnrichmentRequest(clue);
+  if (!request) return null;
 
   const work = (async (): Promise<ManualLeadEnrichmentResult | null> => {
     const material = await adapters.fetchPlainText(request);
     if (!material || !String(material.text || '').trim()) return null;
     const compressed = clampEnrichmentText(await adapters.compress(material));
     if (!compressed) return null;
+    // 只有真的合并了不止一份素材才记 sources：一份素材时留着这个键，只会让「来源」看起来
+    // 比实际丰富，也让老行与新行的形状白白分叉。
+    const materialSources = Array.isArray(material.sources) ? material.sources : [];
     return {
       text: compressed,
       source: {
@@ -108,6 +158,7 @@ export async function collectManualLeadEnrichment(
         publisher: String(material.publisher || '').trim() || '未知来源',
         fetched_at: new Date(now).toISOString(),
         kind: material.kind,
+        ...(materialSources.length > 1 ? { sources: materialSources } : {}),
       },
     };
   })();
