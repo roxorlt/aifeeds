@@ -26,6 +26,14 @@
 - [ ] 担保线索不参与跨天事件去重、事件身份只绑主证据 URL（PR #242 已知限制）；`integrate` 动作因既有逗号复合防线放弃（PR #243）
 - [ ] latest 页面担保按钮随 9/4 首次 finalize 渲染生效（render release 613da866 已上线）；上线后核对 `assessment_validation_failed` 原因文案与错误码中文文案（模板字面量反斜杠修复）
 
+**9/4 owner 直接录入 `owner_asserted_v1`（规格 `docs/plans/2026-09-04-owner-asserted-direct-entry-spec.md` 第 2 节，分支 `cc/20260904-owner-asserted-entry`）**：
+
+- [x] 云端：`POST /api/digest/daily-news-leads` 增 `owner_asserted`，一步入池不派发 Workflow、不做取证；`vouch-candidate` 去掉「至少一条证据」，零证据分派到 `owner_asserted_v1`；陈述校验放宽为「内容 token 数 ≥ 3」（`OpenAI发布Astra` 这类中英混写不再被拒）
+- [ ] **直接录入的候选不参与跨天事件去重**（事件身份绑线索 id，同 `owner_vouched_v1` 的已知限制）：owner 自己把同一件事录两遍会出现两条候选，页面上没有提示。要不要补一个「今天已录过相似陈述」的软提醒，等实际用一段时间再定。
+- [ ] `docs/operations.md` 补录节要补：新增的 `owner_asserted` 请求字段、`assert_candidate` 审计动作、`owner_asserted_v1` 放行方式（本分支按约定未改运维文档，合并前由主 session 补）
+- [ ] 面板侧（dailyVideo `cc/20260902-review-ux-and-baton-race`）的陈述校验必须与云端同口径：4 个汉字 / 3 个英文单词 / 3 个内容 token 三选一，任一满足即通过。只按「3 个 token」实现会把 `阿里发布模型` 这类单汉字段陈述在页面上拦下、而服务端接受。
+- [ ] prod 验收：对 9/4 卡住的三条线索（`d1eb1d` / `48a005` / `3aab72`）调 `vouch-candidate` 使其入池；再用「直接加入」新提交一条走完全程
+
 ### A9. Admin 看板渐进加载（2026-07-24，已上线）
 
 - [x] 生产浏览器抓包复现：HTML / ECharts 缓存命中且页面壳约 0.5 秒完成，但页面随后同一时刻
