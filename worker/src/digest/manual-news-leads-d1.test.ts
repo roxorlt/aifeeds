@@ -5480,6 +5480,70 @@ describe('manual lead enrichment', () => {
     });
   });
 
+  // -------------------------------------------------------------------------
+  // 素材缺失时的可见性：审核卡片要在这一步就看得出「口播只能依据你写的这句话」，
+  // 而不是等视频出来才发现口播单薄。
+  // -------------------------------------------------------------------------
+  describe('详情里的素材状态', () => {
+    async function detailOf(state: { env: Env }, leadId: string) {
+      const response = await handleManualNewsLeadsApi(new Request(
+        `https://api.example.test/api/digest/daily-news-leads/${leadId}`,
+        { headers: { Authorization: 'Bearer owner-asserted-review-secret' } },
+      ), { ...state.env, DAILY_NEWS_REVIEW_ENABLED: '1' } as Env, { waitUntil() {} } as never);
+      expect(response.status).toBe(200);
+      return (await response.json() as { lead: Record<string, unknown> }).lead;
+    }
+
+    test('还没取到素材时 evidence_material 为 null', async () => {
+      const { state, leadId } = await assertedCandidate();
+      expect(await detailOf(state, leadId)).toMatchObject({ evidence_material: null });
+    });
+
+    test('取到素材后报出字数与每一份来源', async () => {
+      const { state, leadId, itemId } = await assertedCandidate('https://openai.com/index/astra/');
+      await runManualLeadEnrichment(state.env, {
+        leadId, itemId, url: 'https://openai.com/index/astra/', text: ASSERTED_STATEMENT,
+      }, {
+        fetchPlainText: async () => ({
+          text: '链接正文。\n\n搜索素材。', url: 'https://openai.com/index/astra/',
+          publisher: 'openai.com', kind: 'document' as const,
+          sources: [
+            { url: 'https://openai.com/index/astra/', publisher: 'openai.com', kind: 'document' as const },
+            { url: 'https://techcrunch.com/a', publisher: 'techcrunch.com', kind: 'search+document' as const },
+          ],
+        }),
+        compress: async () => '取回来的背景素材。',
+      }, { now: 100 });
+
+      expect(await detailOf(state, leadId)).toMatchObject({
+        evidence_material: {
+          chars: 9,
+          sources: [
+            { url: 'https://openai.com/index/astra/', publisher: 'openai.com', kind: 'document' },
+            { url: 'https://techcrunch.com/a', publisher: 'techcrunch.com', kind: 'search+document' },
+          ],
+        },
+      });
+    });
+
+    test('只有一份素材时来源退回主来源那一条', async () => {
+      const { state, leadId, itemId } = await assertedCandidate();
+      await runManualLeadEnrichment(state.env, {
+        leadId, itemId, url: null, text: ASSERTED_STATEMENT,
+      }, {
+        fetchPlainText: async () => material,
+        compress: async () => '搜来的背景。',
+      }, { now: 100 });
+
+      expect(await detailOf(state, leadId)).toMatchObject({
+        evidence_material: {
+          chars: 6,
+          sources: [{ url: 'https://openai.com/index/astra/', publisher: 'OpenAI', kind: 'document' }],
+        },
+      });
+    });
+  });
+
   test('数据库读失败时回 failed,异常不外泄给确认流程', async () => {
     const { state, leadId, itemId } = await assertedCandidate();
     const brokenEnv = {
