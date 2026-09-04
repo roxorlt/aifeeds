@@ -5180,3 +5180,122 @@ describe('news review sanitize manual candidate fast path', () => {
     expect(secondSanitize.batch.batch_revision).toBe(frozen.batch.batch_revision + 2);
   });
 });
+
+// ── 只读用途的手工候选授权走批量廉价复核（2026-09-04）─────────────────────────
+// authorizeFormalNewsSet 对每条手工候选原本要跑两遍完整验签（authorizeManualItem 里
+// 一遍、最终守卫前的循环里再一遍），一次审核页请求里被完整跑好几轮。按 purpose 白名单
+// 分流：只读投影走批量复核，写入 / 发布 / 投递一律保持完整验签。
+describe('formal news authorization manual fast path', () => {
+  async function twoAuthorizedManualItems() {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+    const first = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+      expected_batch_revision: frozen.batch.batch_revision,
+    }, 'policy-fast-1', 100);
+    const second = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: 'Anthropic发布Claude5',
+      expected_batch_revision: frozen.batch.batch_revision + 1,
+    }, 'policy-fast-2', 101);
+    expect(first.ok && second.ok).toBe(true);
+    const ids = [
+      `blog:manual:${first.ok ? first.lead.id : ''}`,
+      `blog:manual:${second.ok ? second.lead.id : ''}`,
+    ];
+    return { state, ids };
+  }
+
+  function countPrepared(state: { db: SqliteD1 }, marker: string): number {
+    return state.db.preparedSql.filter((sql) => sql.includes(marker)).length;
+  }
+
+  async function authorizeWith(state: { db: SqliteD1; env: Env }, ids: string[], purpose: string) {
+    state.db.preparedSql.length = 0;
+    const result = await authorizeFormalNewsSet(state.env, '2026-08-28', ids, purpose);
+    return {
+      result,
+      fullVerifications: countPrepared(state, 'manual_verification:policy_dispatch'),
+      bulkReads: countPrepared(state, 'news_review:manual_candidate_proof_bulk'),
+    };
+  }
+
+  test('只读投影零次完整验签，判定结果与完整验签逐字相同', async () => {
+    const { state, ids } = await twoAuthorizedManualItems();
+
+    const fast = await authorizeWith(state, ids, 'review_api_final_projection');
+    const full = await authorizeWith(state, ids, 'review_submit_final_guard');
+
+    expect(fast.fullVerifications).toBe(0);
+    expect(fast.bulkReads).toBe(1);
+    expect(full.fullVerifications).toBeGreaterThan(0);
+    // 同一批数据两条路径对拍。
+    expect(fast.result.allowed_ids).toEqual(ids);
+    expect(fast.result.allowed_ids).toEqual(full.result.allowed_ids);
+    expect(JSON.stringify(fast.result.decisions)).toBe(JSON.stringify(full.result.decisions));
+  });
+
+  test('daily_api_snapshot 这一类纯读取同样走批量复核', async () => {
+    const { state, ids } = await twoAuthorizedManualItems();
+
+    for (const purpose of [
+      'daily_api_snapshot', 'daily_api_snapshot_final_projection', 'historical_review_api',
+    ]) {
+      const fast = await authorizeWith(state, ids, purpose);
+      expect(fast.fullVerifications).toBe(0);
+      expect(fast.result.allowed_ids).toEqual(ids);
+    }
+  });
+
+  test('发布 / 投递 / 写入这一侧保持完整验签', async () => {
+    const { state, ids } = await twoAuthorizedManualItems();
+
+    for (const purpose of [
+      'codex_finalize_locked', 'email_delivery', 'daily_release_final_guard',
+      'review_freeze_write_guard', 'published_selection',
+    ]) {
+      const full = await authorizeWith(state, ids, purpose);
+      expect(full.fullVerifications).toBeGreaterThan(0);
+      expect(full.bulkReads).toBe(0);
+      expect(full.result.allowed_ids).toEqual(ids);
+    }
+  });
+
+  test('没登记过的新 purpose 默认落到完整验签这一侧', async () => {
+    const { state, ids } = await twoAuthorizedManualItems();
+
+    const unknown = await authorizeWith(state, ids, 'some_purpose_added_later');
+
+    expect(unknown.fullVerifications).toBeGreaterThan(0);
+    expect(unknown.bulkReads).toBe(0);
+  });
+
+  test('proof 行被篡改时，只读用途照样剔除，结果与完整验签一致', async () => {
+    const { state, ids } = await twoAuthorizedManualItems();
+    const tamperedLeadId = ids[1].slice('blog:manual:'.length);
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications SET hmac_sha256 = ?
+      WHERE lead_id = ? AND status = 'active'`).run('0'.repeat(64), tamperedLeadId);
+
+    const fast = await authorizeWith(state, ids, 'review_api_final_projection');
+    // 对不上的那一条回退完整验签，其余仍走廉价路径。
+    expect(fast.fullVerifications).toBe(1);
+    expect(fast.result.allowed_ids).toEqual([ids[0]]);
+    expect(fast.result.decisions.map((decision) => [decision.item_id, decision.code])).toEqual([
+      [ids[0], 'ALLOW_VERIFIED_MANUAL'],
+      [ids[1], 'DENY_UNVERIFIED_MANUAL'],
+    ]);
+  });
+
+  test('线索本身失效（proof 行没了）时，只读用途也回退完整验签并剔除', async () => {
+    const { state, ids } = await twoAuthorizedManualItems();
+    const droppedLeadId = ids[0].slice('blog:manual:'.length);
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications
+      SET status = 'invalidated' WHERE lead_id = ?`).run(droppedLeadId);
+
+    const fast = await authorizeWith(state, ids, 'review_api_final_projection');
+    const full = await authorizeWith(state, ids, 'review_submit_final_guard');
+
+    expect(fast.fullVerifications).toBe(1);
+    expect(fast.result.allowed_ids).toEqual([ids[1]]);
+    expect(JSON.stringify(fast.result.decisions)).toBe(JSON.stringify(full.result.decisions));
+  });
+});

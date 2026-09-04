@@ -118,18 +118,59 @@ prod 实测约 1.8s/条，与「每多一条候选加约 1.8s」完全对上。
 改造后一次点击（0 条手工候选、无漂移）：**1 + 3 + 4 + 4 = 12 次**，且 #3 与手工批量复核、
 #7/#8 与 #9 各自并发，串行深度从 19 降到约 8。2 条手工候选时不再额外加 18 次，只加 1 次。
 
-#### C. 没有合并、留给实测判断的项
+#### C. 按 purpose 分流的手工候选授权（owner 2026-09-04 追加，已实现）
 
-- `authorizeFormalNewsSet` 在一次 date-only 请求里被完整跑了 3 遍（sanitize 一次、已发布
-  选择一次、对外投影一次），每遍 3 次查询。三者的 `candidateIds` 不同（定时候选 / 已发布
-  选择 / 全部候选），合并需要重构 `authorizeFormalNewsSet` 的入参口径，风险高于收益。
-- **`authorizeFormalNewsSet` 里对手工候选仍是 N+1 完整重算**（`news-source-policy.ts:899`
-  的 `for` 循环里 `await loadVerifiedManualCandidateProof`，以及 `authorizeManualItem`
-  `:368` 里的两次读）。这条是发布授权的安全底线，owner 明确要求保留完整校验，故未动；
-  但它同样跑在读路径上，是手工候选日期仍会偏慢的主要剩余来源。要不要给它一条同样的
-  批量廉价通道，**等 prod 实测分布出来后由 owner 拍板**。
-- `readRawPublishedNewsReviewSelection` 的「找前一版批次」查询（`news-review.ts:415`）
-  只在 `applied_selected_ids` 为 null 时才跑，不是常态热点。
+`authorizeFormalNewsSet` 对**每条**手工候选原本要跑**两遍**完整验签：
+
+1. `collectFormalNewsPreflight` → `authorizeManualItem`（`news-source-policy.ts:368`）里 1 次线索行查询 + 1 次 `loadVerifiedManualCandidateProof`（8 次往返）；
+2. 最终守卫前的 `for` 循环（同文件 `:899`）里再 1 次 `loadVerifiedManualCandidateProof`。
+
+合计约 17 次串行往返/条。实测（2 条手工候选）：一次 `authorizeFormalNewsSet` 触发 4 次
+`manual_verification:policy_dispatch`。
+
+**改法**：显式白名单常量 `READ_ONLY_FORMAL_NEWS_PURPOSES`（`news-source-policy.ts`），
+只读用途走一次 `loadSignedManualCandidateSnapshots` 批量预载，两处调用点共用同一份；
+预载里缺行 / 签名对不上 / 旧策略 / 线索行字段不全的，**对这几条**回退完整验签。
+
+| purpose | 分流 | 理由 |
+|---|---|---|
+| `review_api_final_projection` | 廉价 | 审核页展示投影 |
+| `historical_review_api` | 廉价 | 历史批次展示投影 |
+| `daily_api_snapshot` | 廉价 | 只读快照 API |
+| `daily_api_snapshot_final_projection` | 廉价 | 同上 |
+| `review_sanitizer` | 完整 | 结果决定是否改写批次（且这一路本来就把手工候选过滤掉了） |
+| `published_selection` | 完整 | 结果经 `publishedChanged` → `appliedSelected` 决定批次改写 |
+| `applied_selection_final_projection` | 完整 | 喂 codex 构建 |
+| `review_freeze_final_guard` / `_write_guard` / `_cas_failure_guard` / `_unchanged_guard` / `_existing_guard` / `review_freeze_from_pool` | 完整 | 冻结批次写入 |
+| `review_submit_final_guard` / `_write_guard` / `_unchanged_guard` | 完整 | 提交选择写入 |
+| `review_sanitize_write_guard` / `verified_selection_final_guard` | 完整 | sanitize 写入 / finalize 快照 |
+| `codex_v1_build` / `codex_staged_build` / `codex_finalize_locked` / `codex_pre_http_attempt` | 完整 | push 与 finalize |
+| `email_delivery` / `email_delivery_final_attempt` | 完整 | 邮件投递 |
+| `daily_page_reservation` / `daily_release_final_guard` | 完整 | 静态页与发布 |
+
+**登记制**：没列进白名单的 purpose（包括将来新加的）一律落到完整验签这一侧。
+
+#### C2. 重复调用能不能去重：不能
+
+实测一次 date-only 请求里 `authorizeFormalNewsSet` 跑 3 轮，但**三轮的 id 集合互不相同**
+（12 条候选、其中 2 条手工的批次）：
+
+| 轮次 | purpose | id 集合 | 条数 |
+|---|---|---|---|
+| 1（sanitize 内） | `review_sanitizer` | 只有定时候选（手工候选被 `readScheduledNewsItemPolicy` 过滤掉） | 10 |
+| 2（sanitize 内） | `published_selection` | 已发布选择 | ≤5 |
+| 3（投影） | `review_api_final_projection` | 全部候选 | 12 |
+
+以 `(date, ids, purpose)` 为键的同请求缓存命中率为 0，加了只是空壳。合并需要重构
+`authorizeFormalNewsSet` 的入参口径（把三种语义并成一次超集授权再各自取子集），风险高于
+收益，**本次不做**。真正省下的是第 3 轮里手工候选的完整验签（本节 C）。
+
+#### C3. 仍然留在完整验签这一侧的读路径成本
+
+`published_selection` 跑在 sanitize 内、结果会引出批次改写，所以留在完整验签这一侧。
+如果 owner 选中的 5 条里含手工候选，这一轮仍会为每条付约 17 次往返。要不要给
+「读取已发布选择」和「据此决定改写」拆成两步（前者廉价、后者在真要写时才完整验签），
+**等 prod 实测分布出来再定**。
 
 #### D. 实测埋点
 
@@ -145,6 +186,10 @@ prod 实测约 1.8s/条，与「每多一条候选加约 1.8s」完全对上。
 | `sanitize.candidate_policy` | 定时候选授权 + 手工签名批量复核（并发） |
 | `sanitize.manual_full_recheck` | 落回完整重算的那几条（正常为 0 条，不打点） |
 | `sanitize.published_selection` | sanitize 内的已发布选择 |
+
+只读用途的手工候选授权还可以按 `news_review:manual_candidate_proof_bulk` 与
+`manual_verification:policy_dispatch` 两个 SQL 注释在 D1 查询日志里对照：前者每轮 1 条，
+后者在只读投影里应当为 0。
 
 部署后 `wrangler tail` 按 `[news-review-timing]` 过滤即可取真实分布，**回填到本节**再决定
 是否继续合并 C 节里的项。
