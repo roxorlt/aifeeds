@@ -118,3 +118,28 @@ payload = {
 
 - 大陆服务器取不回境外网页（`/v1/document` 502）：正解是把研究网关迁到香港 VPS，取证审计的 IP 钉定才能成立。列入 TODO。
 - 搜索提供方密钥（百度 / Exa / Brave）仍缺，ScrapeBadger 单点且不稳。
+## 6. 补充：陈述内容量校验放宽（2026-09-04 追加，三处一致）
+
+9/3 的陈述校验要求「至少 4 个汉字或 3 个英文单词」。用 owner 今早真实提交的三条实测，`OpenAI发布Astra`（2 汉字 + 2 英文单词）会被拒——但这是一句完整合格的新闻陈述。AI 新闻里公司名与产品名几乎都是英文，中英混写是常态，此规则必须放宽。
+
+改为「内容 token 数 ≥ 3」：一个 token = 一段连续汉字，或一个 ASCII 单词（连续字母，可含数字与连字符，如 `GPT-5`、`Gemini3`），以标点与空白分隔。
+
+| 输入 | 期望 |
+|---|---|
+| `OpenAI发布Astra` | 通过（OpenAI / 发布 / Astra = 3） |
+| `GPT、claude、Grok三家服务宕机` | 通过 |
+| `OpenAI发布新模型Astra` | 通过 |
+| `。。。。。。` | 拒（0 token） |
+| `aaaaaa` | 拒（1 token） |
+
+长度 6–160 code points、单行、无控制/bidi/零宽字符三条不变。同时作用于 `owner_asserted_v1` 与既有 `owner_vouched_v1`；云端、面板代理、latest 页面三处规则逐条一致，各有测试。
+
+---
+
+## 7. 落地记录（2026-09-04 下午）
+
+- 云端 PR #245 已合并部署 prod（130 测试文件 / 3151 条通过）。面板分支 `cc/20260902-review-ux-and-baton-race` @ `42ad539`（754 条通过）：代理与搜索预算走面板补丁 v19（已部署），页面走 render release `9f48f563…` v15（已部署，次日渲染生效）。
+- **三处陈述规则最终口径**（云端权威，页面与代理逐字对齐）：`汉字数 ≥ 4` 或 `英文单词数 ≥ 3`（`[A-Za-z][A-Za-z'’-]*`）或 `内容 token 数 ≥ 3`（`\p{Script=Han}+|[A-Za-z][A-Za-z0-9'’-]*`，**词身含数字**）。三条并列缺一不可：`阿里发布模型` 靠第 1 条，`Gemini3Flash8Pro` 靠第 2 条，`OpenAI发布Astra` 靠第 3 条。规范化顺序 NFC → 折叠连续空白 → trim；单行与不可见字符检查作用在用户原文上。
+- **页面直接录入不发 `expected_batch_revision`**：云端缺省时自读当前 active 批次，避免「轮询到提交之间批次变了」的无谓 409。`vouch-candidate` / `confirm-candidate` 仍必须发。
+- prod 验收：9/4 早卡住的两条线索（`433d823aab72`、`caaea648a005`）经 `vouch-candidate` 零证据担保入池，当日候选批次 V1 → V3，末两位为 `manual_lead` / 来源「手工补录」。重复的第三条（`db628ed1eb1d`，与 `433d823aab72` 同一事件）未入池。
+- 实操注意：连续担保多条时每次都会新建批次修订，第二条起必须用**最新的**批次修订号与线索版本号，否则依次撞 `candidate_batch_revision_conflict` 与 `lead_version_conflict`（担保记录已写入、版本已 +1，重试时取新版本即可，不需重写陈述）。

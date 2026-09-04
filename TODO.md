@@ -34,6 +34,13 @@
 - [ ] 面板侧（dailyVideo `cc/20260902-review-ux-and-baton-race`）的陈述校验必须与云端同口径：4 个汉字 / 3 个英文单词 / 3 个内容 token 三选一，任一满足即通过。只按「3 个 token」实现会把 `阿里发布模型` 这类单汉字段陈述在页面上拦下、而服务端接受。
 - [ ] prod 验收：对 9/4 卡住的三条线索（`d1eb1d` / `48a005` / `3aab72`）调 `vouch-candidate` 使其入池；再用「直接加入」新提交一条走完全程
 
+**9/4 owner 直接录入（PR #245，规格 `docs/plans/2026-09-04-owner-asserted-direct-entry-spec.md`）后续项**：
+- [ ] **研究网关迁到香港 VPS**：大陆腾讯云取不回境外网页（9/4 早搜到的网址 `/v1/document` 全部 502），而取证审计要求逐跳 `validated_ip === connected_ip`，架构上不能靠代理绕开。网关跑在香港才能让「自动找来源」这条路真正可用
+- [ ] 搜索提供方密钥仍缺（`BAIDU_SEARCH_API_KEY`/`QIANFAN_APPBUILDER_API_KEY`、`EXA_API_KEY`、`BRAVE_SEARCH_API_KEY`）；ScrapeBadger 单点且不稳（9/3 晚 Google 搜索 521、推文搜索超时；9/4 早 4s 预算内大半超时）。单家时预算已放宽到 12s（面板 v19）
+- [ ] `docs/operations.md` 补录节补 `owner_asserted_v1`：请求字段 `owner_asserted`/`statement`、审计动作 `assert_candidate`、放行方式枚举、零证据候选投影 `url` 用空串的约束
+- [ ] 直接录入的候选不参与跨天事件去重，事件身份绑线索 id（同一事件重复录入不会被判重复，如 9/4 的 `db628ed1eb1d` 与 `433d823aab72`）
+- [ ] 观察 9/5 起 owner 的实际使用：页面「我确认，直接加入」按钮是否如期出现、陈述校验是否还会误拒
+
 ### A9. Admin 看板渐进加载（2026-07-24，已上线）
 
 - [x] 生产浏览器抓包复现：HTML / ECharts 缓存命中且页面壳约 0.5 秒完成，但页面随后同一时刻
