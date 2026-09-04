@@ -76,6 +76,26 @@ describe('normalizeOwnerVouchStatement', () => {
     expect(() => normalizeOwnerVouchStatement(value)).toThrow('invalid_vouch_statement');
   });
 
+  // 2026-09-04 owner 实测:AI 新闻里公司名 / 产品名几乎都是英文,中英混写是常态。
+  // 「至少 4 个汉字或 3 个英文单词」把 `OpenAI发布Astra` 这种完整陈述拒在门外,
+  // 放宽为「内容 token 数 >= 3」(一段连续汉字 = 1 个,一个 ASCII 单词 = 1 个)。
+  test.each([
+    ['OpenAI发布Astra'],
+    ['GPT、claude、Grok三家服务宕机'],
+    ['OpenAI发布新模型Astra'],
+  ])('accepts the real 2026-09-04 owner statement %s', (value) => {
+    expect(normalizeOwnerVouchStatement(value)).toBe(value);
+  });
+
+  test.each([
+    ['punctuation only', '。。。。。。'],
+    ['a single repeated ascii token', 'aaaaaa'],
+    ['a single ascii token with digits', 'Gemini3Gemini3'],
+    ['two mixed tokens', 'Astra发布'],
+  ])('still rejects %s', (_label, value) => {
+    expect(() => normalizeOwnerVouchStatement(value)).toThrow('invalid_vouch_statement');
+  });
+
   test('accepts exactly six code points and exactly 160 code points', () => {
     expect(normalizeOwnerVouchStatement('阿里发布模型')).toBe('阿里发布模型');
     const long = `阿里发布模型${'字'.repeat(154)}`;
