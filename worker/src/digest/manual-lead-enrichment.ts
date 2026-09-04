@@ -229,3 +229,103 @@ function existingEnrichmentText(extra: string | null): boolean {
     return false;
   }
 }
+
+/** 补取一轮最多并发几条。网关那台机器的抓取有自己的队列，压太狠只会互相排队。 */
+export const MANUAL_LEAD_BACKFILL_CONCURRENCY = 3;
+/** 补取一轮的总预算。到点就停，剩下的候选保持只有陈述的状态。 */
+export const MANUAL_LEAD_BACKFILL_BUDGET_MS = 60_000;
+/** 单条线索在补取里的预算。比提交时那次短：出片等不起。 */
+export const MANUAL_LEAD_BACKFILL_LEAD_BUDGET_MS = 20_000;
+/** 一天的手工候选本来就有上限，这里再兜一道，防一次扫描拉回一整年的行。 */
+export const MANUAL_LEAD_BACKFILL_MAX_LEADS = 50;
+
+export interface ManualLeadBackfillStats {
+  scanned: number;
+  written: number;
+  empty: number;
+  failed: number;
+  skipped: number;
+}
+
+/**
+ * 出片之前把当天还空着的手工候选再取一遍素材。
+ *
+ * **为什么需要它**：提交时那次取材是 `ctx.waitUntil` 顺手做的，失败就没有第二次机会 ——
+ * 等到写口播词那一步，模型手上还是只有 owner 的一句话。补取在真正组装 payload 之前跑，
+ * 把「素材必须在写口播词之前备齐」这件事落到实处。
+ *
+ * **它伤不到任何东西**：只看当天已确认、零证据、还没有 `manual_evidence_text` 的候选；
+ * 写入仍走 `runManualLeadEnrichment`，也就是仍然只写那两个 extra 键；整个函数不抛异常，
+ * 数据库读失败也只是回一份零统计 —— 补取失败绝不能变成出片失败。
+ */
+export async function backfillManualLeadEnrichment(
+  env: Env,
+  date: string,
+  adapters: ManualLeadEnrichmentAdapters,
+  opts: {
+    now?: () => number;
+    budgetMs?: number;
+    leadBudgetMs?: number;
+    concurrency?: number;
+    maxLeads?: number;
+  } = {},
+): Promise<ManualLeadBackfillStats> {
+  const stats: ManualLeadBackfillStats = { scanned: 0, written: 0, empty: 0, failed: 0, skipped: 0 };
+  const now = opts.now ?? (() => Date.now());
+  const deadline = now() + (opts.budgetMs ?? MANUAL_LEAD_BACKFILL_BUDGET_MS);
+  const leadBudgetMs = opts.leadBudgetMs ?? MANUAL_LEAD_BACKFILL_LEAD_BUDGET_MS;
+  const concurrency = Math.max(1, opts.concurrency ?? MANUAL_LEAD_BACKFILL_CONCURRENCY);
+  const maxLeads = Math.max(1, opts.maxLeads ?? MANUAL_LEAD_BACKFILL_MAX_LEADS);
+
+  let pending: Array<{ lead_id: string; input_url: string | null; input_text: string | null }>;
+  try {
+    // 候选行按主键与 l.id 拼出来的常量取，走的是 items 的主键与 manual_news_leads 的
+    // review_date 索引；json_extract 只在连上之后的那一行上判断，不参与选行。
+    const rows = await env.DB.prepare(
+      `/* manual_lead:enrichment_backfill_scan */ SELECT
+         l.id AS lead_id, l.input_url AS input_url, l.input_text AS input_text
+       FROM manual_news_leads l
+       JOIN items i ON i.id = 'blog:manual:' || l.id
+       WHERE l.review_date = ?
+         AND l.confirmed_at IS NOT NULL
+         AND json_extract(
+           CASE WHEN i.extra IS NOT NULL AND json_valid(i.extra) = 1 THEN i.extra ELSE '{}' END,
+           '$.manual_evidence_text') IS NULL
+         AND NOT EXISTS (SELECT 1 FROM manual_news_evidence e WHERE e.lead_id = l.id)
+       ORDER BY l.id ASC
+       LIMIT ?`,
+    ).bind(date, maxLeads).all<{ lead_id: string; input_url: string | null; input_text: string | null }>();
+    pending = rows.results || [];
+  } catch (error) {
+    console.warn('[manual-lead-enrichment] backfill scan failed:',
+      String((error as Error)?.message || error).slice(0, 200));
+    return stats;
+  }
+
+  stats.scanned = pending.length;
+  if (!pending.length) return stats;
+
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < pending.length) {
+      if (now() >= deadline) return;
+      const row = pending[cursor++];
+      const outcome = await runManualLeadEnrichment(env, {
+        leadId: row.lead_id,
+        itemId: `blog:manual:${row.lead_id}`,
+        url: row.input_url || null,
+        text: row.input_text || '',
+      }, adapters, { now: now(), budgetMs: leadBudgetMs });
+      stats[outcome] += 1;
+    }
+  };
+
+  try {
+    await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, () => worker()));
+  } catch (error) {
+    // runManualLeadEnrichment 自己就把失败收敛成返回值了，走到这里只可能是意料之外的东西。
+    console.warn('[manual-lead-enrichment] backfill failed:',
+      String((error as Error)?.message || error).slice(0, 200));
+  }
+  return stats;
+}
