@@ -4869,6 +4869,19 @@ describe('manual news owner asserted', () => {
       WHERE action = 'assert_candidate'`).get()).toEqual({ count: 1 });
   });
 
+  test('refuses an expired review window before creating anything', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    await frozenAssertedBatch(state);
+    const leadsBefore = state.db.sqlite.prepare('SELECT COUNT(*) AS count FROM manual_news_leads').get();
+
+    await expect(assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+    }, 'direct-entry-expired', Date.parse('2026-09-30T00:00:00.000Z'))).resolves
+      .toEqual({ ok: false, status: 409, error: 'review_expired' });
+    expect(state.db.sqlite.prepare('SELECT COUNT(*) AS count FROM manual_news_leads').get())
+      .toEqual(leadsBefore);
+  });
+
   test('refuses a lead that is already confirmed', async () => {
     const state = await stuckZeroEvidenceFixture();
     const frozen = await frozenAssertedBatch(state);

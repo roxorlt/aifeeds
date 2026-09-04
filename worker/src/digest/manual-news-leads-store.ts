@@ -2938,6 +2938,11 @@ export async function assertManualNewsLeadCandidate(
   } catch {
     return { ok: false, status: 400, error: 'invalid_vouch_statement' };
   }
+  // 审核窗口早就过了就别建线索了 —— 后面的确认一定会拒,留一条建了又用不上的
+  // needs_review 线索只会让 owner 在列表里看见垃圾。
+  if (now >= newsReviewExpiresAt(normalized.date)) {
+    return { ok: false, status: 409, error: 'review_expired' };
+  }
   const confirmKey = `${idempotencyKey}:confirm`;
   const expectedBatchRevision = Number.isInteger(Number(input.expected_batch_revision))
     && Number(input.expected_batch_revision) >= 0
