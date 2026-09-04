@@ -4372,17 +4372,21 @@ describe('manual news owner vouch', () => {
     expect(state.db.preparedSql.slice(sqlStart)).toEqual([]);
   });
 
-  test('refuses a lead without evidence', async () => {
+  // 2026-09-04 起零证据不再是拒绝理由:同一个入口按证据数量分派到 owner_asserted_v1。
+  // 旧断言(0 条证据 -> 409 lead_not_vouchable)正是 owner 那三条线索救不回来的原因。
+  test('routes a lead without evidence to owner_asserted_v1 instead of refusing it', async () => {
     const state = await vouchFixture();
-    installSourceSupportReviewSchema(state);
+    const frozen = await frozenVouchBatch(state);
     state.db.sqlite.prepare('DELETE FROM manual_news_evidence WHERE lead_id = ?').run(state.leadId);
 
     await expect(vouchManualNewsLeadCandidate(
-      state.env, state.leadId, 4, 1, VOUCH_STATEMENT, 'vouch-key-1', 100,
-    )).resolves.toMatchObject({ ok: false, status: 409, error: 'lead_not_vouchable' });
-    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
+      state.env, state.leadId, 4, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-key-1', 100,
+    )).resolves.toMatchObject({ ok: true, changed: true, lead: { confirmed_at: 100 } });
+    expect(state.db.sqlite.prepare(`SELECT policy_version, status, assessment_version
       FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId))
-      .toEqual({ count: 0 });
+      .toMatchObject({
+        policy_version: 'owner_asserted_v1', status: 'active', assessment_version: 4_800_000,
+      });
   });
 
   test('refuses a lead whose signed evidence chain no longer verifies', async () => {

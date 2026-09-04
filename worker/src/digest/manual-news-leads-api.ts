@@ -4,6 +4,7 @@ import {
   manualNewsVerificationKeyring,
 } from '../security/manual-news-keyring';
 import {
+  assertManualNewsLeadCandidate,
   confirmManualNewsLeadCandidate,
   getManualNewsCandidateAuthorization,
   getManualNewsLead,
@@ -137,6 +138,20 @@ function scheduleLeadProcessing(
   ctx.waitUntil(pending);
 }
 
+/**
+ * owner 直接录入只需要签名密钥：搜索 / 取证 / 大模型全都不参与。
+ * 取证链路挂掉正是这条通道存在的理由，不能跟着一起 503。
+ */
+function signingKeysAvailable(env: Env): boolean {
+  try {
+    manualNewsResponseKeyring(env);
+    manualNewsVerificationKeyring(env);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function processingDependenciesAvailable(env: Env): boolean {
   if (!(
     env.MANUAL_NEWS_LEAD_WORKFLOW
@@ -171,7 +186,8 @@ function requestErrorResponse(error: unknown): Response {
     'trusted_research_response_secret_required', 'no_deepseek_key']
     .includes(code)) return response({ ok: false, error: 'dependency_unavailable' }, 503);
   if (code === 'invalid_json' || code === 'invalid_review_date' || code === 'lead_input_required'
-    || code === 'invalid_candidate_authorization'
+    || code === 'invalid_candidate_authorization' || code === 'invalid_owner_asserted'
+    || code === 'invalid_vouch_statement'
     || code.startsWith('unsafe_url:')) return response({ ok: false, error: code }, 400);
   console.error('[manual-news-leads-api] internal request failure', {
     error: error instanceof Error ? error.name : typeof error,
@@ -256,11 +272,34 @@ async function handleManualNewsLeadsApiInternal(
       });
     }
     if (request.method !== 'POST') return response({ ok: false, error: 'method_not_allowed' }, 405);
-    if (!processingDependenciesAvailable(env)) return response({ ok: false, error: 'dependency_unavailable' }, 503);
     const key = idempotencyKey(request);
     if (!key) return response({ ok: false, error: 'invalid_idempotency_key' }, 400);
     try {
       const body = await jsonBody(request);
+      if ('owner_asserted' in body && typeof body.owner_asserted !== 'boolean') {
+        throw new Error('invalid_owner_asserted');
+      }
+      if (body.owner_asserted === true) {
+        // owner 直接录入：不派发 Workflow、不做任何取证，一步入池，所以是 200 不是 202。
+        if (!signingKeysAvailable(env)) return response({ ok: false, error: 'dependency_unavailable' }, 503);
+        const asserted = await assertManualNewsLeadCandidate(env, {
+          date: body.date,
+          text: body.text,
+          url: body.url,
+          note: body.note,
+          ...('statement' in body ? { statement: body.statement } : {}),
+          ...('expected_batch_revision' in body
+            ? { expected_batch_revision: body.expected_batch_revision }
+            : {}),
+        }, key, now);
+        return response(
+          await manualNewsMutationResult(env, asserted),
+          asserted.ok ? 200 : asserted.status,
+        );
+      }
+      if (!processingDependenciesAvailable(env)) {
+        return response({ ok: false, error: 'dependency_unavailable' }, 503);
+      }
       if ('candidate_authorization' in body
         && body.candidate_authorization !== MANUAL_NEWS_SOURCE_SUPPORT_POLICY) {
         throw new Error('invalid_candidate_authorization');

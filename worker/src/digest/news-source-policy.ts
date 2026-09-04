@@ -10,6 +10,7 @@ import {
   MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
 } from './manual-news-leads';
 import { MANUAL_NEWS_OWNER_VOUCH_POLICY } from './manual-news-owner-vouch';
+import { MANUAL_NEWS_OWNER_ASSERTED_POLICY } from './manual-news-owner-asserted';
 
 const LEGACY_RADAR_KEY = 'weibo-hot-tech';
 const LEGACY_RADAR_FEED_ID = `blog:${LEGACY_RADAR_KEY}`;
@@ -572,6 +573,26 @@ function formalNewsFinalGuardCtes(
         AND NOT EXISTS (SELECT 1 FROM manual_news_event_assessments vouched_assessment
           WHERE vouched_assessment.lead_id=v.lead_id
             AND vouched_assessment.assessment_version=v.assessment_version))
+      OR
+      (v.policy_version='${MANUAL_NEWS_OWNER_ASSERTED_POLICY}'
+        AND ${expected('verification.assessment_json')} IS NULL
+        AND json_valid(v.verification_json)=1
+        AND json_extract(v.verification_json,'$.policy_version')='${MANUAL_NEWS_OWNER_ASSERTED_POLICY}'
+        AND i.id IS json_extract(v.verification_json,'$.item_projection.item_id')
+        AND i.source_id IS json_extract(v.verification_json,'$.item_projection.source_id')
+        AND i.title IS json_extract(v.verification_json,'$.item_projection.title')
+        AND i.content IS json_extract(v.verification_json,'$.item_projection.summary')
+        AND i.content_translated IS json_extract(v.verification_json,'$.item_projection.summary')
+        AND i.author IS json_extract(v.verification_json,'$.item_projection.source')
+        /* 零证据候选这一列是空串(不是 NULL):items 写入走 candidate.url || 空串,
+           投影里也存空串,两边逐字相等才过。 */
+        AND i.url IS json_extract(v.verification_json,'$.item_projection.url')
+        AND i.published_at IS json_extract(v.verification_json,'$.item_projection.published_at')
+        AND json_extract(i.extra,'$.event_fingerprint')
+          =json_extract(v.verification_json,'$.event_identity.event_key')
+        AND NOT EXISTS (SELECT 1 FROM manual_news_event_assessments asserted_assessment
+          WHERE asserted_assessment.lead_id=v.lead_id
+            AND asserted_assessment.assessment_version=v.assessment_version))
       OR
       (v.policy_version='${MANUAL_LEAD_VERIFICATION_POLICY_VERSION}'
         AND EXISTS (SELECT 1 FROM manual_news_event_assessments legacy_assessment

@@ -45,6 +45,14 @@ import {
   normalizeOwnerVouchStatement,
 } from './manual-news-owner-vouch';
 import {
+  createManualNewsOwnerAssertedPayload,
+  createManualNewsOwnerAssertedProof,
+  MANUAL_NEWS_OWNER_ASSERTED_AUDIT_ACTION,
+  MANUAL_NEWS_OWNER_ASSERTED_AUDIT_ACTIONS,
+  MANUAL_NEWS_OWNER_ASSERTED_MUTATION_KIND,
+  MANUAL_NEWS_OWNER_ASSERTED_POLICY,
+} from './manual-news-owner-asserted';
+import {
   loadManualNewsEvidence,
   loadVerifiedManualCandidateProof,
   loadVerifiedManualSourceSupportProofs,
@@ -140,8 +148,10 @@ function sourceSupportEvidenceSnapshotGuard(
       AND e.claims_supported_json = ? AND e.fetch_audit_json = ? AND e.reliable = ?
   )`);
   return {
+    // 证据集为空时只剩「这条线索确实一条证据都没有」这一句 —— owner 直接录入
+    // (owner_asserted_v1) 就是这种形态,不能像以前那样直接判 false。
     sql: `(SELECT COUNT(*) FROM manual_news_evidence WHERE lead_id = ?) = ?
-      AND ${predicates.length ? predicates.join(' AND ') : '0 = 1'}`,
+      AND ${predicates.length ? predicates.join(' AND ') : '1 = 1'}`,
     bindings: [
       leadId,
       evidence.length,
@@ -177,6 +187,9 @@ async function orderedVerifiedManualCandidates(
        ) WHEN v.policy_version = ? THEN (
          SELECT MIN(a.id) FROM manual_news_lead_audit a
          WHERE a.lead_id = l.id AND a.action = ?
+       ) WHEN v.policy_version = ? THEN (
+         SELECT MIN(a.id) FROM manual_news_lead_audit a
+         WHERE a.lead_id = l.id AND a.action IN (?, ?)
        ) ELSE (
          SELECT MIN(a.id) FROM manual_news_lead_audit a
          WHERE a.lead_id = l.id AND a.action = 'confirm_candidate'
@@ -192,6 +205,9 @@ async function orderedVerifiedManualCandidates(
     // 担保候选的授权时刻是 owner 的 vouch_candidate 审计行(与 proof 行同 batch 落盘),
     // 不是随后那次 confirm_candidate。取不到该行就让下面的正整数校验 fail-closed。
     MANUAL_NEWS_OWNER_VOUCH_POLICY, MANUAL_NEWS_OWNER_VOUCH_AUDIT_ACTION,
+    // 直接录入的授权时刻是 assert_candidate(一步录入)或 vouch_candidate(零证据线索
+    // 从担保按钮救回)审计行,同样不是随后那次 confirm_candidate。
+    MANUAL_NEWS_OWNER_ASSERTED_POLICY, ...MANUAL_NEWS_OWNER_ASSERTED_AUDIT_ACTIONS,
     date, excludeLeadId,
   ).all<{ lead_id: string; authorization_order: number | null }>();
   if ((rows.results || []).length > MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT) {
@@ -518,7 +534,8 @@ export async function listManualNewsLeads(env: Env, date: string): Promise<Manua
 
 export interface ManualNewsCandidateAuthorizationView {
   candidate_authorization: 'llm_verified' | typeof MANUAL_NEWS_SOURCE_SUPPORT_POLICY
-    | typeof MANUAL_NEWS_OWNER_VOUCH_POLICY | null;
+    | typeof MANUAL_NEWS_OWNER_VOUCH_POLICY | typeof MANUAL_NEWS_OWNER_ASSERTED_POLICY | null;
+  /** 担保与直接录入共用这个字段；直接录入时 `vouched_at` 取 `asserted_at`。 */
   vouch: { statement: string; vouched_at: number } | null;
 }
 
@@ -544,12 +561,15 @@ function manualNewsCandidateAuthorizationView(
   if (row.policy_version === MANUAL_NEWS_SOURCE_SUPPORT_POLICY) {
     return { candidate_authorization: MANUAL_NEWS_SOURCE_SUPPORT_POLICY, vouch: null };
   }
-  if (row.policy_version !== MANUAL_NEWS_OWNER_VOUCH_POLICY) {
+  if (row.policy_version !== MANUAL_NEWS_OWNER_VOUCH_POLICY
+    && row.policy_version !== MANUAL_NEWS_OWNER_ASSERTED_POLICY) {
     return { candidate_authorization: null, vouch: null };
   }
   const vouchedAt = Number(row.vouched_at);
   return {
-    candidate_authorization: MANUAL_NEWS_OWNER_VOUCH_POLICY,
+    candidate_authorization: row.policy_version === MANUAL_NEWS_OWNER_ASSERTED_POLICY
+      ? MANUAL_NEWS_OWNER_ASSERTED_POLICY
+      : MANUAL_NEWS_OWNER_VOUCH_POLICY,
     vouch: typeof row.vouch_statement === 'string' && row.vouch_statement
       && Number.isSafeInteger(vouchedAt) && vouchedAt > 0
       ? { statement: row.vouch_statement, vouched_at: vouchedAt }
@@ -558,9 +578,10 @@ function manualNewsCandidateAuthorizationView(
 }
 
 const MANUAL_NEWS_CANDIDATE_AUTHORIZATION_COLUMNS = `v.policy_version,
-  CASE WHEN v.policy_version = ? THEN json_extract(v.verification_json, '$.statement') END
+  CASE WHEN v.policy_version IN (?, ?) THEN json_extract(v.verification_json, '$.statement') END
     AS vouch_statement,
-  CASE WHEN v.policy_version = ? THEN json_extract(v.verification_json, '$.vouched_at') END
+  CASE WHEN v.policy_version = ? THEN json_extract(v.verification_json, '$.vouched_at')
+       WHEN v.policy_version = ? THEN json_extract(v.verification_json, '$.asserted_at') END
     AS vouched_at`;
 
 export async function getManualNewsCandidateAuthorization(
@@ -572,8 +593,10 @@ export async function getManualNewsCandidateAuthorization(
      FROM manual_news_assessment_verifications v
      WHERE v.lead_id = ? AND v.status = 'active'
      ORDER BY v.created_at DESC LIMIT 1`,
-  ).bind(MANUAL_NEWS_OWNER_VOUCH_POLICY, MANUAL_NEWS_OWNER_VOUCH_POLICY, leadId)
-    .first<ManualNewsCandidateAuthorizationRow>();
+  ).bind(
+    MANUAL_NEWS_OWNER_VOUCH_POLICY, MANUAL_NEWS_OWNER_ASSERTED_POLICY,
+    MANUAL_NEWS_OWNER_VOUCH_POLICY, MANUAL_NEWS_OWNER_ASSERTED_POLICY, leadId,
+  ).first<ManualNewsCandidateAuthorizationRow>();
   return manualNewsCandidateAuthorizationView(row);
 }
 
@@ -588,8 +611,10 @@ export async function listManualNewsCandidateAuthorizations(
      JOIN manual_news_leads l ON l.id = v.lead_id
      WHERE l.review_date = ? AND v.status = 'active'
      ORDER BY v.lead_id ASC LIMIT 200`,
-  ).bind(MANUAL_NEWS_OWNER_VOUCH_POLICY, MANUAL_NEWS_OWNER_VOUCH_POLICY, date)
-    .all<ManualNewsCandidateAuthorizationRow>();
+  ).bind(
+    MANUAL_NEWS_OWNER_VOUCH_POLICY, MANUAL_NEWS_OWNER_ASSERTED_POLICY,
+    MANUAL_NEWS_OWNER_VOUCH_POLICY, MANUAL_NEWS_OWNER_ASSERTED_POLICY, date,
+  ).all<ManualNewsCandidateAuthorizationRow>();
   const views = new Map<string, ManualNewsCandidateAuthorizationView>();
   for (const row of result.results || []) {
     if (typeof row.lead_id === 'string') views.set(row.lead_id, manualNewsCandidateAuthorizationView(row));
@@ -628,7 +653,8 @@ async function manualNewsSubmitIdentityDigest(input: {
   text: string;
   url: string;
   note: string;
-  candidate_authorization: typeof MANUAL_NEWS_SOURCE_SUPPORT_POLICY | null;
+  candidate_authorization: typeof MANUAL_NEWS_SOURCE_SUPPORT_POLICY
+    | typeof MANUAL_NEWS_OWNER_ASSERTED_POLICY | null;
 }): Promise<string> {
   return sha256Hex([
     'manual-news-submit-identity-v1', input.date, input.input_type, input.text,
@@ -2564,11 +2590,18 @@ export type ManualNewsLeadCandidateMutationOutcome =
   | { ok: false; status: 400 | 404 | 409; error: string; lead?: ManualNewsLeadRecord };
 
 /**
- * owner 担保确认（`owner_vouched_v1`）。
+ * owner 担保确认。
  *
- * 两步：先把担保签名快照与 `vouch_candidate` 审计原子写进库（线索 version+1、
+ * 两步：先把签名快照与 `vouch_candidate` 审计原子写进库（线索 version+1、
  * `last_mutation_kind='vouch'`），再复用既有的 {@link confirmManualNewsLeadCandidate}
  * 走完确认流程（冻结前候选池 / 新批次 / 事件占用冲突都不另起一套）。
+ *
+ * 按证据数量分派放行方式：
+ * - 有签名证据 → `owner_vouched_v1`（owner 担保 + 证据链，行为与 2026-09-03 上线时一致）
+ * - 零证据     → `owner_asserted_v1`（owner 断言，陈述本身就是全部依据）
+ *
+ * 零证据以前直接回 409 `lead_not_vouchable`，2026-09-04 owner 那三条取证全失败的线索
+ * 因此救不回来 —— 这条分派就是那次事故的修复。
  *
  * 第二步 409 时**保留** proof 行：owner 拿到新的 batch revision 重试即可，不必重写陈述。
  */
@@ -2598,9 +2631,11 @@ export async function vouchManualNewsLeadCandidate(
      WHERE lead_id = ? AND status = 'active' LIMIT 1`,
   ).bind(id).first<{ verification_id: string }>();
   const existing = activeVerification ? await loadVerifiedManualCandidateProof(env, id) : null;
-  // 同一句陈述已经担保过（第二步失败后重试，或整轮重放）时跳过写入，直接续做确认。
-  const reusable = existing?.policy_version === MANUAL_NEWS_OWNER_VOUCH_POLICY
-    && existing.owner_vouch?.statement === statement;
+  // 同一句陈述已经写过快照（第二步失败后重试，或整轮重放）时跳过写入，直接续做确认。
+  const reusable = (existing?.policy_version === MANUAL_NEWS_OWNER_VOUCH_POLICY
+    && existing.owner_vouch?.statement === statement)
+    || (existing?.policy_version === MANUAL_NEWS_OWNER_ASSERTED_POLICY
+      && existing.owner_asserted?.statement === statement);
   const row = await env.DB.prepare(
     `/* manual_lead:by_id */ SELECT * FROM manual_news_leads WHERE id = ?`,
   ).bind(id).first<ManualLeadRow>();
@@ -2621,17 +2656,25 @@ export async function vouchManualNewsLeadCandidate(
     if (lead.version !== expectedVersion) {
       return { ok: false, status: 409, error: 'lead_version_conflict', lead };
     }
-    if (!['needs_review', 'failed'].includes(lead.status) || lead.evidence.length < 1) {
+    if (!['needs_review', 'failed'].includes(lead.status)) {
       return { ok: false, status: 409, error: 'lead_not_vouchable', lead };
     }
     let written: Awaited<ReturnType<typeof writeOwnerVouchProof>>;
     try {
-      written = await writeOwnerVouchProof(env, lead, statement, idempotencyKey, now);
+      // 零证据走直接录入(owner_asserted_v1)；入口仍是担保按钮，所以审计 action 与
+      // last_mutation_kind 保持 vouch 一侧，如实记录 owner 是从哪儿点进来的。
+      written = lead.evidence.length >= 1
+        ? await writeOwnerVouchProof(env, lead, statement, idempotencyKey, now)
+        : await writeOwnerAssertedProof(env, lead, statement, idempotencyKey, now, {
+          auditAction: MANUAL_NEWS_OWNER_VOUCH_AUDIT_ACTION,
+          mutationKind: MANUAL_NEWS_OWNER_VOUCH_MUTATION_KIND,
+        });
     } catch (error) {
       // 证据链自己不成立(证据集非法 / response HMAC 或正文摘要对不上)时，担保这条路本来
       // 就走不通，回 409 让 owner 看到「不能担保」，而不是把内部异常抛成 500。
       const message = error instanceof Error ? error.message : '';
-      if (message === 'owner_vouch_payload_invalid' || message.startsWith('manual_news_evidence_')) {
+      if (message === 'owner_vouch_payload_invalid' || message === 'owner_asserted_payload_invalid'
+        || message.startsWith('manual_news_evidence_')) {
         // 只记错误名,不记证据内容:409 lead_not_vouchable 在 prod 上看不出是哪一环拒的,
         // 没有这行日志就只能靠猜(2026-09-03 推文证据摘要误判即是如此)。
         console.warn('[manual-news-vouch] evidence chain rejected', { lead_id: id, error: message });
@@ -2646,15 +2689,22 @@ export async function vouchManualNewsLeadCandidate(
   );
 }
 
+type OwnerAuthorizationWriteResult =
+  | { ok: true }
+  | { ok: false; status: 409; error: string; lead: ManualNewsLeadRecord };
+
+/**
+ * owner 担保（`owner_vouched_v1`）的快照写入。零证据线索不能走这里 —— 担保 payload
+ * 必须有主证据，调用方按证据数量分派到 {@link writeOwnerAssertedProof}。
+ */
 async function writeOwnerVouchProof(
   env: Env,
   lead: ManualNewsLeadRecord,
   statement: string,
   idempotencyKey: string,
   now: number,
-): Promise<{ ok: true } | { ok: false; status: 409; error: string; lead: ManualNewsLeadRecord }> {
-  const expectedVersion = lead.version;
-  const assessmentVersion = expectedVersion * 1_000_000 + 900_000;
+): Promise<OwnerAuthorizationWriteResult> {
+  const assessmentVersion = lead.version * 1_000_000 + 900_000;
   if (!Number.isSafeInteger(assessmentVersion) || assessmentVersion <= 0) {
     throw new Error('invalid_assessment_version');
   }
@@ -2668,13 +2718,98 @@ async function writeOwnerVouchProof(
     { lead_id: lead.id, assessment_version: assessmentVersion, payload },
     manualNewsVerificationKeyring(env), manualNewsResponseKeyring(env),
   );
+  return writeOwnerAuthorizationProof(env, lead, {
+    statement,
+    assessmentVersion,
+    payloadJson: JSON.stringify(payload),
+    proof,
+    auditAction: MANUAL_NEWS_OWNER_VOUCH_AUDIT_ACTION,
+    mutationKind: MANUAL_NEWS_OWNER_VOUCH_MUTATION_KIND,
+    processingOwner: `owner-vouch:${lead.id}`,
+  }, idempotencyKey, now);
+}
+
+/**
+ * owner 直接录入（`owner_asserted_v1`）的快照写入。证据可以是 0 条；挂了证据也照常
+ * 被签进快照并做密码学校验。
+ *
+ * `auditAction` / `mutationKind` 由调用方给：一步直接录入是 `assert_candidate` / `assert`，
+ * 零证据线索从担保按钮救回时沿用 `vouch_candidate` / `vouch`，让审计如实记录入口。
+ */
+async function writeOwnerAssertedProof(
+  env: Env,
+  lead: ManualNewsLeadRecord,
+  statement: string,
+  idempotencyKey: string,
+  now: number,
+  entry: { auditAction: string; mutationKind: string } = {
+    auditAction: MANUAL_NEWS_OWNER_ASSERTED_AUDIT_ACTION,
+    mutationKind: MANUAL_NEWS_OWNER_ASSERTED_MUTATION_KIND,
+  },
+): Promise<OwnerAuthorizationWriteResult> {
+  const assessmentVersion = lead.version * 1_000_000 + 800_000;
+  if (!Number.isSafeInteger(assessmentVersion) || assessmentVersion <= 0) {
+    throw new Error('invalid_assessment_version');
+  }
+  const payload = await createManualNewsOwnerAssertedPayload({
+    lead: { id: lead.id, review_date: lead.review_date, input_url: lead.input_url },
+    statement,
+    evidence: lead.evidence,
+    asserted_at: now,
+  });
+  const proof = await createManualNewsOwnerAssertedProof(
+    {
+      lead_id: lead.id,
+      input_url: lead.input_url,
+      assessment_version: assessmentVersion,
+      payload,
+    },
+    manualNewsVerificationKeyring(env), manualNewsResponseKeyring(env),
+  );
+  return writeOwnerAuthorizationProof(env, lead, {
+    statement,
+    assessmentVersion,
+    payloadJson: JSON.stringify(payload),
+    proof,
+    auditAction: entry.auditAction,
+    mutationKind: entry.mutationKind,
+    processingOwner: `owner-asserted:${lead.id}`,
+  }, idempotencyKey, now);
+}
+
+/**
+ * 担保 / 直接录入共用的三语句原子写入：proof 行 + 线索状态推进 + 授权审计。
+ *
+ * 三条语句彼此因果绑定（后一条的 guard 引用前一条的落盘结果），要么全成要么全不成；
+ * 全 0 说明版本被别人推走了，回 409 让 owner 拿新版本重试。
+ */
+async function writeOwnerAuthorizationProof(
+  env: Env,
+  lead: ManualNewsLeadRecord,
+  input: {
+    statement: string;
+    assessmentVersion: number;
+    payloadJson: string;
+    proof: {
+      policy_version: string;
+      verification_key_id: string;
+      canonical_digest: string;
+      hmac_sha256: string;
+    };
+    auditAction: string;
+    mutationKind: string;
+    processingOwner: string;
+  },
+  idempotencyKey: string,
+  now: number,
+): Promise<OwnerAuthorizationWriteResult> {
+  const expectedVersion = lead.version;
+  const { proof, assessmentVersion } = input;
   const verificationId = `mav:${lead.id}:${assessmentVersion}:${proof.canonical_digest.slice(0, 16)}`;
-  const verificationJson = JSON.stringify(payload);
-  const creationNonce = createMutationNonce('owner_vouch_verification_create');
-  const mutationNonce = createMutationNonce('owner_vouch');
-  // 担保不占 workflow 的 processing fence（owner 从页面直接发起），但 proof 行的
+  const creationNonce = createMutationNonce(`${input.mutationKind}_verification_create`);
+  const mutationNonce = createMutationNonce(input.mutationKind);
+  // 这一步不占 workflow 的 processing fence（owner 从页面直接发起），但 proof 行的
   // processing_owner / processing_attempt 有 NOT NULL 与 > 0 约束，这里记录发起方身份。
-  const processingOwner = `owner-vouch:${lead.id}`;
   const processingAttempt = 1;
   const verification: PersistedManualVerificationRow = {
     verification_id: verificationId,
@@ -2684,8 +2819,8 @@ async function writeOwnerVouchProof(
     verification_key_id: proof.verification_key_id,
     canonical_digest: proof.canonical_digest,
     hmac_sha256: proof.hmac_sha256,
-    verification_json: verificationJson,
-    processing_owner: processingOwner,
+    verification_json: input.payloadJson,
+    processing_owner: input.processingOwner,
     processing_attempt: processingAttempt,
     creation_nonce: creationNonce,
     status: 'active',
@@ -2696,8 +2831,8 @@ async function writeOwnerVouchProof(
   const proofGuardBindings = manualVerificationSnapshotGuardBindings(lead.id, verification);
   const evidenceGuard = sourceSupportEvidenceSnapshotGuard(lead.id, lead.evidence);
   const auditMetadata = JSON.stringify({
-    candidate_authorization: MANUAL_NEWS_OWNER_VOUCH_POLICY,
-    statement,
+    candidate_authorization: proof.policy_version,
+    statement: input.statement,
     canonical_digest: proof.canonical_digest,
     verification_id: verificationId,
   });
@@ -2719,8 +2854,8 @@ async function writeOwnerVouchProof(
          AND ${evidenceGuard.sql}`,
     ).bind(
       verificationId, lead.id, assessmentVersion, proof.policy_version, proof.verification_key_id,
-      proof.canonical_digest, proof.hmac_sha256, verificationJson, processingOwner, processingAttempt,
-      creationNonce, now,
+      proof.canonical_digest, proof.hmac_sha256, input.payloadJson, input.processingOwner,
+      processingAttempt, creationNonce, now,
       lead.id, expectedVersion,
       lead.id,
       ...evidenceGuard.bindings,
@@ -2734,7 +2869,7 @@ async function writeOwnerVouchProof(
          AND confirmed_at IS NULL
          AND ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}`,
     ).bind(
-      MANUAL_NEWS_OWNER_VOUCH_MUTATION_KIND, idempotencyKey, mutationNonce, now,
+      input.mutationKind, idempotencyKey, mutationNonce, now,
       lead.id, expectedVersion, ...proofGuardBindings,
     ),
     env.DB.prepare(
@@ -2747,9 +2882,9 @@ async function writeOwnerVouchProof(
          AND last_mutation_nonce = ?
          AND ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}`,
     ).bind(
-      lead.id, MANUAL_NEWS_OWNER_VOUCH_AUDIT_ACTION, lead.status, idempotencyKey, mutationNonce,
+      lead.id, input.auditAction, lead.status, idempotencyKey, mutationNonce,
       auditMetadata, now,
-      lead.id, expectedVersion + 1, MANUAL_NEWS_OWNER_VOUCH_MUTATION_KIND, idempotencyKey,
+      lead.id, expectedVersion + 1, input.mutationKind, idempotencyKey,
       mutationNonce, ...proofGuardBindings,
     ),
   ]) as Array<{ meta?: { changes?: number } }>;
@@ -2759,6 +2894,256 @@ async function writeOwnerVouchProof(
     return {
       ok: false, status: 409, error: 'lead_version_conflict', lead: latest || lead,
     };
+  }
+  if (changes.some((value) => value !== 1)) throw new Error('manual_lead_audit_causality_mismatch');
+  return { ok: true };
+}
+
+/**
+ * owner 一步直接录入（`owner_asserted_v1`）。
+ *
+ * 不派发 Workflow、不做任何取证：一个 `DB.batch` 内建线索（`needs_review`、
+ * `error_code=NULL`）+ 写 `submit` 与 `assert_candidate` 审计 + 写签名快照，然后复用
+ * {@link confirmManualNewsLeadCandidate} 走完既有确认流程。
+ *
+ * 幂等：同一个 `Idempotency-Key` 落在同一天、同一份输入上时命中已有线索，续做后面的
+ * 步骤并返回同一结果；输入变了则回 `idempotency_key_reused_with_different_payload`。
+ * 命中的线索若已经带着证据（例如取证跑完一半的旧线索），证据照样被签进快照并做
+ * 密码学校验 —— 断言可以不带证据，带上的证据必须是真的。
+ */
+export async function assertManualNewsLeadCandidate(
+  env: Env,
+  input: {
+    date?: unknown;
+    text?: unknown;
+    url?: unknown;
+    note?: unknown;
+    statement?: unknown;
+    expected_batch_revision?: unknown;
+  },
+  idempotencyKey: string,
+  now = Date.now(),
+): Promise<ManualNewsLeadCandidateMutationOutcome> {
+  const normalized = validateManualNewsLeadInput({
+    date: input.date, text: input.text, url: input.url, note: input.note,
+  });
+  let statement: string;
+  try {
+    // 陈述缺省时用文字线索本身:owner 在页面上写的那句话就是他要断言的事。
+    statement = normalizeOwnerVouchStatement(
+      input.statement === undefined || input.statement === null || input.statement === ''
+        ? normalized.text
+        : input.statement,
+    );
+  } catch {
+    return { ok: false, status: 400, error: 'invalid_vouch_statement' };
+  }
+  const confirmKey = `${idempotencyKey}:confirm`;
+  const expectedBatchRevision = Number.isInteger(Number(input.expected_batch_revision))
+    && Number(input.expected_batch_revision) >= 0
+    ? Number(input.expected_batch_revision)
+    // 一步录入没有「先读后写」的机会,缺省时就取当前 active 批次的 revision。
+    : (await getActiveNewsReviewBatch(env, normalized.date))?.batch_revision || 0;
+  const existingRow = await env.DB.prepare(
+    `/* manual_lead:by_submit_key */ SELECT * FROM manual_news_leads
+     WHERE review_date = ? AND submit_idempotency_key = ?`,
+  ).bind(normalized.date, idempotencyKey).first<ManualLeadRow>();
+  if (existingRow) {
+    if (existingRow.input_type !== normalized.input_type
+      || existingRow.input_text !== normalized.text
+      || existingRow.input_url !== normalized.url
+      || (existingRow.note || '') !== normalized.note) {
+      throw new Error('idempotency_key_reused_with_different_payload');
+    }
+    const existingLead = await leadFromRow(env, existingRow);
+    return continueOwnerAssertedEntry(
+      env, existingLead, statement, idempotencyKey, confirmKey, expectedBatchRevision, now,
+    );
+  }
+  const submitIdentityDigest = await manualNewsSubmitIdentityDigest({
+    date: normalized.date,
+    input_type: normalized.input_type,
+    text: normalized.text,
+    url: normalized.url,
+    note: normalized.note,
+    candidate_authorization: MANUAL_NEWS_OWNER_ASSERTED_POLICY,
+  });
+  const hash = await sha256Hex(
+    `manual-news-owner-asserted-lead-id-v1\0${normalized.date}\0${idempotencyKey}\0${submitIdentityDigest}`,
+  );
+  const id = `ml-${normalized.date.replace(/-/g, '')}-${hash.slice(0, 12)}`;
+  const created = await createOwnerAssertedLead(env, {
+    id, normalized, statement, idempotencyKey, now,
+  });
+  if (!created.ok) return created;
+  const lead = await getManualNewsLead(env, id);
+  if (!lead) throw new Error('manual_news_lead_insert_failed');
+  return confirmManualNewsLeadCandidate(env, id, lead.version, expectedBatchRevision, confirmKey, now);
+}
+
+/** 命中已有线索时的续做：缺 proof 就补写，再走确认。 */
+async function continueOwnerAssertedEntry(
+  env: Env,
+  lead: ManualNewsLeadRecord,
+  statement: string,
+  idempotencyKey: string,
+  confirmKey: string,
+  expectedBatchRevision: number,
+  now: number,
+): Promise<ManualNewsLeadCandidateMutationOutcome> {
+  const activeVerification = await env.DB.prepare(
+    `/* manual_owner_vouch:active_verification */ SELECT verification_id
+     FROM manual_news_assessment_verifications
+     WHERE lead_id = ? AND status = 'active' LIMIT 1`,
+  ).bind(lead.id).first<{ verification_id: string }>();
+  const existing = activeVerification ? await loadVerifiedManualCandidateProof(env, lead.id) : null;
+  const reusable = existing?.policy_version === MANUAL_NEWS_OWNER_ASSERTED_POLICY
+    && existing.owner_asserted?.statement === statement;
+  if (reusable) {
+    return confirmManualNewsLeadCandidate(env, lead.id, lead.version, expectedBatchRevision, confirmKey, now);
+  }
+  if (activeVerification) return { ok: false, status: 409, error: 'lead_not_vouchable', lead };
+  if (lead.confirmed_at !== null) return { ok: false, status: 409, error: 'lead_already_confirmed', lead };
+  if (now >= newsReviewExpiresAt(lead.review_date)) {
+    return { ok: false, status: 409, error: 'review_expired', lead };
+  }
+  if (!['needs_review', 'failed'].includes(lead.status)) {
+    return { ok: false, status: 409, error: 'lead_not_vouchable', lead };
+  }
+  let written: Awaited<ReturnType<typeof writeOwnerAssertedProof>>;
+  try {
+    written = await writeOwnerAssertedProof(env, lead, statement, idempotencyKey, now);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '';
+    if (message === 'owner_asserted_payload_invalid' || message.startsWith('manual_news_evidence_')) {
+      console.warn('[manual-news-assert] evidence chain rejected', { lead_id: lead.id, error: message });
+      return { ok: false, status: 409, error: 'lead_not_vouchable', lead };
+    }
+    throw error;
+  }
+  if (!written.ok) return written;
+  return confirmManualNewsLeadCandidate(
+    env, lead.id, lead.version + 1, expectedBatchRevision, confirmKey, now,
+  );
+}
+
+/**
+ * 建线索 + submit 审计 + 签名快照 + `assert_candidate` 审计，四条语句一个 batch。
+ *
+ * 四条彼此因果绑定：后一条的 guard 引用前一条的落盘结果。全 0 说明这个幂等键已经被
+ * 别人用掉了（并发重放），回 409 让调用方按已有线索续做。
+ */
+async function createOwnerAssertedLead(
+  env: Env,
+  input: {
+    id: string;
+    normalized: ReturnType<typeof validateManualNewsLeadInput>;
+    statement: string;
+    idempotencyKey: string;
+    now: number;
+  },
+): Promise<{ ok: true } | { ok: false; status: 409; error: string }> {
+  const { id, normalized, statement, idempotencyKey, now } = input;
+  const assessmentVersion = 1 * 1_000_000 + 800_000;
+  const payload = await createManualNewsOwnerAssertedPayload({
+    lead: { id, review_date: normalized.date, input_url: normalized.url },
+    statement,
+    evidence: [],
+    asserted_at: now,
+  });
+  const proof = await createManualNewsOwnerAssertedProof(
+    { lead_id: id, input_url: normalized.url, assessment_version: assessmentVersion, payload },
+    manualNewsVerificationKeyring(env), manualNewsResponseKeyring(env),
+  );
+  const payloadJson = JSON.stringify(payload);
+  const verificationId = `mav:${id}:${assessmentVersion}:${proof.canonical_digest.slice(0, 16)}`;
+  const mutationNonce = createMutationNonce(MANUAL_NEWS_OWNER_ASSERTED_MUTATION_KIND);
+  const creationNonce = createMutationNonce('owner_asserted_verification_create');
+  const auditNonce = createMutationNonce('owner_asserted_authorization');
+  const processingOwner = `owner-asserted:${id}`;
+  const verification: PersistedManualVerificationRow = {
+    verification_id: verificationId,
+    lead_id: id,
+    assessment_version: assessmentVersion,
+    policy_version: proof.policy_version,
+    verification_key_id: proof.verification_key_id,
+    canonical_digest: proof.canonical_digest,
+    hmac_sha256: proof.hmac_sha256,
+    verification_json: payloadJson,
+    processing_owner: processingOwner,
+    processing_attempt: 1,
+    creation_nonce: creationNonce,
+    status: 'active',
+    reason: null,
+    created_at: now,
+    invalidated_at: null,
+  };
+  const proofGuardBindings = manualVerificationSnapshotGuardBindings(id, verification);
+  const leadGuard = `EXISTS (
+    SELECT 1 FROM manual_news_leads l
+    WHERE l.id = ? AND l.version = 1 AND l.status = 'needs_review' AND l.confirmed_at IS NULL
+      AND l.review_date = ? AND l.submit_idempotency_key = ? AND l.last_mutation_nonce = ?
+  )`;
+  const leadGuardBindings = [id, normalized.date, idempotencyKey, mutationNonce];
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `/* manual_lead:assert_insert */ INSERT OR IGNORE INTO manual_news_leads (
+         id, review_date, input_type, input_text, input_url, note, status, version,
+         error_code, error_message, submit_idempotency_key, last_mutation_kind,
+         last_mutation_idempotency_key, last_mutation_nonce, processing_owner,
+         processing_attempt, processing_lease_until, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, 'needs_review', 1, NULL, NULL, ?, ?, ?, ?, NULL, 0, NULL, ?, ?)`,
+    ).bind(
+      id, normalized.date, normalized.input_type, normalized.text, normalized.url, normalized.note,
+      idempotencyKey, MANUAL_NEWS_OWNER_ASSERTED_MUTATION_KIND, idempotencyKey, mutationNonce,
+      now, now,
+    ),
+    env.DB.prepare(
+      `/* manual_lead:assert_submit_audit */ INSERT INTO manual_news_lead_audit (
+         lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
+         resulting_version, metadata_json, created_at
+       ) SELECT ?, 'submit', NULL, 'needs_review', ?, ?, 1, ?, ? WHERE ${leadGuard}`,
+    ).bind(
+      id, idempotencyKey, mutationNonce, JSON.stringify({
+        input_type: normalized.input_type,
+        candidate_authorization: MANUAL_NEWS_OWNER_ASSERTED_POLICY,
+      }), now,
+      ...leadGuardBindings,
+    ),
+    env.DB.prepare(
+      `/* manual_owner_asserted:proof_insert */ INSERT OR IGNORE INTO manual_news_assessment_verifications (
+         verification_id, lead_id, assessment_version, policy_version, verification_key_id,
+         canonical_digest, hmac_sha256, verification_json, processing_owner, processing_attempt,
+         creation_nonce, status, reason, created_at, invalidated_at
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'active', NULL, ?, NULL
+       WHERE ${leadGuard}
+         AND NOT EXISTS (SELECT 1 FROM manual_news_assessment_verifications v
+           WHERE v.lead_id = ? AND v.status = 'active')
+         AND (SELECT COUNT(*) FROM manual_news_evidence WHERE lead_id = ?) = 0`,
+    ).bind(
+      verificationId, id, assessmentVersion, proof.policy_version, proof.verification_key_id,
+      proof.canonical_digest, proof.hmac_sha256, payloadJson, processingOwner, creationNonce, now,
+      ...leadGuardBindings, id, id,
+    ),
+    env.DB.prepare(
+      `/* manual_owner_asserted:audit */ INSERT INTO manual_news_lead_audit (
+         lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
+         resulting_version, metadata_json, created_at
+       ) SELECT ?, ?, 'needs_review', 'needs_review', NULL, ?, 1, ?, ?
+       WHERE ${leadGuard} AND ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}`,
+    ).bind(
+      id, MANUAL_NEWS_OWNER_ASSERTED_AUDIT_ACTION, auditNonce, JSON.stringify({
+        candidate_authorization: MANUAL_NEWS_OWNER_ASSERTED_POLICY,
+        statement,
+        canonical_digest: proof.canonical_digest,
+        verification_id: verificationId,
+      }), now,
+      ...leadGuardBindings, ...proofGuardBindings,
+    ),
+  ]) as Array<{ meta?: { changes?: number } }>;
+  const changes = results.map((entry) => Number(entry?.meta?.changes || 0));
+  if (changes.every((value) => value === 0)) {
+    return { ok: false, status: 409, error: 'lead_version_conflict' };
   }
   if (changes.some((value) => value !== 1)) throw new Error('manual_lead_audit_causality_mismatch');
   return { ok: true };
