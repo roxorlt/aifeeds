@@ -76,6 +76,9 @@ class SqliteD1 {
   private nextFirstBarrier: {
     marker: string; remaining: number; entered: () => void; released: Promise<void>;
   } | null = null;
+  private nextAllBarrier: {
+    marker: string; remaining: number; entered: () => void; released: Promise<void>;
+  } | null = null;
 
   constructor() {
     this.sqlite.exec(`
@@ -185,6 +188,13 @@ class SqliteD1 {
         return (statement.get(...bindings) as T | undefined) ?? null;
       },
       all: async <T>() => {
+        const allBarrier = this.nextAllBarrier;
+        if (allBarrier && sql.includes(allBarrier.marker)) {
+          allBarrier.remaining -= 1;
+          if (allBarrier.remaining === 0) allBarrier.entered();
+          await allBarrier.released;
+          if (allBarrier.remaining === 0) this.nextAllBarrier = null;
+        }
         if (this.rejectEvidenceBlobMaterialization && sql.includes('manual_evidence:list')) {
           throw new Error('evidence_blob_materialized');
         }
@@ -245,6 +255,15 @@ class SqliteD1 {
     const entered = new Promise<void>((resolve) => { markEntered = resolve; });
     const released = new Promise<void>((resolve) => { release = resolve; });
     this.nextFirstGate = { marker, entered: markEntered, released };
+    return { entered, release };
+  }
+
+  pauseNextAllCalls(marker: string, count: number): { entered: Promise<void>; release: () => void } {
+    let markEntered!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    this.nextAllBarrier = { marker, remaining: count, entered: markEntered, released };
     return { entered, release };
   }
 
@@ -5297,5 +5316,125 @@ describe('formal news authorization manual fast path', () => {
     expect(fast.fullVerifications).toBe(1);
     expect(fast.result.allowed_ids).toEqual([ids[1]]);
     expect(JSON.stringify(fast.result.decisions)).toBe(JSON.stringify(full.result.decisions));
+  });
+});
+
+// prod 实测：单轮 authorizeFormalNewsSet 约 1.9s，而三条 SQL 服务端执行合计只有约 13ms
+//（EXPLAIN 全部走索引，rows_read 36–40）。成本全在 D1 往返，所以能省的只有往返次数：
+// 两条 preflight 查询互不依赖（scheduled_join 直接收全量 id），并发发起，3 轮变 2 轮。
+describe('formal news authorization preflight round trips', () => {
+  test('两条 preflight 查询并发发起，不再等第一条回来才发第二条', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+    const entry = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+      expected_batch_revision: frozen.batch.batch_revision,
+    }, 'preflight-round-trips', 100);
+    const ids = [
+      'auto-1', 'auto-2', `blog:manual:${entry.ok ? entry.lead.id : ''}`,
+    ];
+
+    const barrier = state.db.pauseNextAllCalls('formal_news:early_', 2);
+    const authorizing = authorizeFormalNewsSet(
+      state.env, '2026-08-28', ids, 'review_api_final_projection',
+    );
+    const arrival = await Promise.race([
+      barrier.entered.then(() => 'concurrent' as const),
+      new Promise<'serial'>((resolve) => { setTimeout(() => resolve('serial'), 1_000); }),
+    ]);
+    barrier.release();
+    const result = await authorizing;
+
+    expect(arrival).toBe('concurrent');
+    // 并发化不许动判定：手工候选照样放行，定时候选照旧按注册表判。
+    expect(result.allowed_ids).toContain(`blog:manual:${entry.ok ? entry.lead.id : ''}`);
+    expect(result.decisions.map((decision) => decision.item_id)).toEqual(ids);
+  });
+
+  test('并发化后判定结果与串行时逐字相同（含缺失 / 手工 / 定时三种）', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+    const entry = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+      expected_batch_revision: frozen.batch.batch_revision,
+    }, 'preflight-parity', 100);
+    const manualId = `blog:manual:${entry.ok ? entry.lead.id : ''}`;
+    // 真实定时候选（items + sources + 注册表齐全）、缺失 id、手工候选三种混在一起，
+    // 而且定时候选排在手工候选两侧，能抓住并发化把行配错位的错误。
+    const ids = ['blog:anthropic:pool-1', 'does-not-exist', manualId, 'blog:anthropic:pool-2'];
+
+    const readOnly = await authorizeFormalNewsSet(
+      state.env, '2026-08-28', ids, 'review_api_final_projection',
+    );
+    const full = await authorizeFormalNewsSet(
+      state.env, '2026-08-28', ids, 'review_submit_final_guard',
+    );
+
+    expect(readOnly.decisions.map((decision) => [decision.item_id, decision.code])).toEqual([
+      ['blog:anthropic:pool-1', 'ALLOW_SCHEDULED_FORMAL'],
+      ['does-not-exist', 'DENY_MISSING_ITEM'],
+      [manualId, 'ALLOW_VERIFIED_MANUAL'],
+      ['blog:anthropic:pool-2', 'ALLOW_SCHEDULED_FORMAL'],
+    ]);
+    expect(readOnly.allowed_ids).toEqual([
+      'blog:anthropic:pool-1', manualId, 'blog:anthropic:pool-2',
+    ]);
+    expect(JSON.stringify(readOnly.decisions)).toBe(JSON.stringify(full.decisions));
+  });
+});
+
+// sanitize 里两轮只读授权（候选政策 / 已发布选择）的入参互不依赖，
+// prod 实测串行是 1865 + 1816 = 3.7s，并发发起后只等一轮。
+describe('news review sanitize authorization round trips', () => {
+  test('候选政策与已发布选择两轮授权同时在途', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+    await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+      expected_batch_revision: frozen.batch.batch_revision,
+    }, 'sanitize-round-trips', 100);
+
+    // 两轮授权各发一条 early_authorization；串行时第一条会一直卡住，第二条永远不来。
+    const barrier = state.db.pauseNextAllCalls('formal_news:early_authorization', 2);
+    const sanitizing = sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 200);
+    const arrival = await Promise.race([
+      barrier.entered.then(() => 'concurrent' as const),
+      new Promise<'serial'>((resolve) => { setTimeout(() => resolve('serial'), 1_000); }),
+    ]);
+    barrier.release();
+    const sanitized = await sanitizing;
+
+    expect(arrival).toBe('concurrent');
+    // 并发化不许动结果。
+    expect(sanitized.changed).toBe(false);
+    expect(sanitized.dropped_ids).toEqual([]);
+    expect(Array.isArray(sanitized.published_selected_ids)).toBe(true);
+  });
+
+  test('候选重建这一路抛错时，提前发起的已发布选择不会变成未处理的 rejection', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+    await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+      expected_batch_revision: frozen.batch.batch_revision,
+    }, 'sanitize-reject-order', 100);
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => { rejections.push(reason); };
+    process.on('unhandledRejection', onRejection);
+    // 两轮授权都炸：主路径先抛出去，提前发起的那一条也在同一刻 reject。
+    const original = state.db.prepare.bind(state.db);
+    vi.spyOn(state.db, 'prepare').mockImplementation(((sql: string) => {
+      if (sql.includes('formal_news:early_authorization')) {
+        throw new Error('authorization_exploded');
+      }
+      return original(sql);
+    }) as never);
+
+    await expect(sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 200))
+      .rejects.toThrow('authorization_exploded');
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+    process.off('unhandledRejection', onRejection);
+
+    expect(rejections).toEqual([]);
   });
 });

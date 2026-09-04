@@ -1,4 +1,5 @@
 import type { Env } from '../index';
+import { timedNewsReviewStep } from './news-review-timing';
 import { pushDeerMessage } from '../notifier';
 import {
   AUTOMATIC_NEWS_REVIEW_CANDIDATE_LIMIT,
@@ -1105,19 +1106,6 @@ export async function getVerifiedNewsReviewSelectionSnapshot(
 }
 
 /** 手工候选校验的并发上限：够快，又不至于把 D1 一次打满。 */
-/**
- * 读路径的分步耗时探针。只记步骤名与毫秒数，不记任何数据内容；
- * `wrangler tail` 里按 `[news-review-timing]` 过滤即可拿到真实分布。
- */
-export async function timedNewsReviewStep<T>(step: string, run: () => Promise<T>): Promise<T> {
-  const started = Date.now();
-  try {
-    return await run();
-  } finally {
-    console.log(`[news-review-timing] ${step} ${Date.now() - started}ms`);
-  }
-}
-
 export const MANUAL_CANDIDATE_VERIFY_CONCURRENCY = 8;
 
 export type SettledTaskResult<T> =
@@ -1176,6 +1164,15 @@ async function sanitizeCurrentNewsReviewBatchAttempt(
   const manualLeadIds = current.candidates.map((candidate) => (
     isManualCandidateSnapshot(candidate) ? manualCandidateLeadId(candidate) : null
   ));
+  // 已发布选择的入参只有 (env, date, current)，跟下面重建候选那一路没有任何数据依赖，
+  // 所以提前发起、循环之后再收 —— prod 实测两轮授权各约 1.9s，串行等于白等一轮。
+  // 先挂一个空 catch：上面那一路先抛错时，这条不能变成未处理的 rejection
+  // （挂了 handler 之后 await 原 promise 仍会照常抛出）。
+  const publishedSelectionPending = timedNewsReviewStep(
+    'sanitize.published_selection',
+    () => getPublishedNewsReviewSelection(env, date, current),
+  );
+  publishedSelectionPending.catch(() => {});
   // 定时候选的授权与手工候选的签名复核互不依赖，并发发起省一整轮往返。
   const [scheduledPolicy, signedSnapshots] = await timedNewsReviewStep(
     'sanitize.candidate_policy',
@@ -1249,10 +1246,7 @@ async function sanitizeCurrentNewsReviewBatchAttempt(
   const candidateIds = candidates.map((candidate) => candidate.item_id);
   const available = new Set(candidateIds);
   const defaultSelected = current.default_selected_ids.filter((id) => available.has(id));
-  const publishedBefore = await timedNewsReviewStep(
-    'sanitize.published_selection',
-    () => getPublishedNewsReviewSelection(env, date, current),
-  );
+  const publishedBefore = await publishedSelectionPending;
   const publishedAfter = publishedBefore.filter((id) => available.has(id));
   const publishedChanged = stableJson(publishedAfter) !== stableJson(publishedBefore)
     || publishedAfter.some((id) => {

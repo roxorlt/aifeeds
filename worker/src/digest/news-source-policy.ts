@@ -1,4 +1,5 @@
 import type { Env } from '../index';
+import { timedNewsReviewStep } from './news-review-timing';
 import { FEED_REGISTRY } from '../feeds/registry';
 import type { EditorialType, FeedDef } from '../feeds/types';
 import {
@@ -839,15 +840,18 @@ async function collectFormalNewsPreflight(
   if (!ids.length) return { allowed_ids: [], decisions: [] };
   const descriptors = registryDescriptors();
   const descriptorById = new Map(descriptors.map((entry) => [entry.id, entry]));
-  const items = await loadRequestedItems(env, ids);
-  const scheduledIds = items.filter((row) => {
-    if (!row.id) return false;
-    const parsed = strictObject(row.extra);
-    return !manualLooking(row, parsed.ok ? parsed.value : {});
-  }).map((row) => row.requested_id);
-  const scheduledRows = await loadScheduledAuthorizationRows(
-    env, scheduledIds, JSON.stringify(descriptors),
-  );
+  // 两条查询原本是串行的：先取回 items，再挑出非手工的那批去做注册表 / 源站联结。
+  // 但 scheduled_join 本身就是逐 id 的 LEFT JOIN，直接收全量 id 结果完全一样 ——
+  // 手工 id 只会多带回一行注册表 / 源站全为 NULL 的记录，下面的循环对手工行根本不查
+  // scheduledById。于是两条查询没有数据依赖，并发发起省一整轮 D1 往返
+  //（prod 实测单轮往返约 500ms，而这两条 SQL 服务端执行各只有几毫秒）。
+  const [items, scheduledRows] = await Promise.all([
+    timedNewsReviewStep('authorize.preflight.items', () => loadRequestedItems(env, ids)),
+    timedNewsReviewStep(
+      'authorize.preflight.scheduled_join',
+      () => loadScheduledAuthorizationRows(env, ids, JSON.stringify(descriptors)),
+    ),
+  ]);
   const scheduledById = new Map<string, AuthorizationRow[]>();
   for (const row of scheduledRows) {
     const queue = scheduledById.get(row.requested_id) || [];
@@ -953,9 +957,13 @@ export async function authorizeFormalNewsSet(
   }
   // 只读用途才分流；写入 / 发布 / 投递以及没登记过的 purpose 一律走完整验签。
   const preloaded = READ_ONLY_FORMAL_NEWS_PURPOSES.has(_purpose)
-    ? await preloadManualCandidateAuthorizations(env, candidateIds)
+    ? await timedNewsReviewStep(
+      'authorize.manual_preload', () => preloadManualCandidateAuthorizations(env, candidateIds),
+    )
     : null;
-  const early = await collectFormalNewsPreflight(env, reviewDate, candidateIds, preloaded);
+  const early = await timedNewsReviewStep(
+    'authorize.preflight', () => collectFormalNewsPreflight(env, reviewDate, candidateIds, preloaded),
+  );
   const earlyAllowed = early.decisions.filter((decision) => decision.allowed);
   if (!earlyAllowed.length) return early;
   const staleIndexes = new Set<number>();
@@ -982,8 +990,13 @@ export async function authorizeFormalNewsSet(
     }
     expectedRows.push(snapshot);
   }
+  const registryBuildStarted = Date.now();
   const registryJson = buildFormalNewsRegistryJson();
-  const guardedRows = await executeFormalNewsFinalGuard(env, reviewDate, expectedRows, registryJson);
+  console.log(`[news-review-timing] authorize.registry_json ${Date.now() - registryBuildStarted}ms`);
+  const guardedRows = await timedNewsReviewStep(
+    'authorize.final_guard',
+    () => executeFormalNewsFinalGuard(env, reviewDate, expectedRows, registryJson),
+  );
   const guardByRequestedIndex = new Map(
     guardedRows.map((row) => [Number(row.requested_index), Number(row.guard_ok) === 1]),
   );
