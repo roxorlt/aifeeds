@@ -10,6 +10,7 @@ import {
   TOTAL_NEWS_REVIEW_CANDIDATE_LIMIT,
 } from './manual-news-leads';
 import { MANUAL_NEWS_OWNER_VOUCH_POLICY } from './manual-news-owner-vouch';
+import { MANUAL_NEWS_OWNER_ASSERTED_POLICY } from './manual-news-owner-asserted';
 import {
   authorizeFormalNewsSet,
   formalNewsFinalGuardBindings,
@@ -936,12 +937,16 @@ async function verifiedManualCandidateSnapshot(
   const verified = await loadVerifiedManualCandidateProof(env, row.id);
   if (!verified) return null;
   if (verified.policy_version === MANUAL_NEWS_SOURCE_SUPPORT_POLICY
-    || verified.policy_version === MANUAL_NEWS_OWNER_VOUCH_POLICY) {
+    || verified.policy_version === MANUAL_NEWS_OWNER_VOUCH_POLICY
+    || verified.policy_version === MANUAL_NEWS_OWNER_ASSERTED_POLICY) {
     // ⚠️ 这里逐字透传签名快照(canonical_digest / hmac_sha256 覆盖 item_projection),
     // 其中本来就带 `published_at: string | null` —— 一直进着 candidates_json。
     // 不要为了跟其它两条路径「统一成空值省略」去改写它,那会动到被签名的形状。
-    // owner 担保(owner_vouched_v1)与 source_support_v1 共用这条透传:陈述原文即
-    // 标题与摘要,不做 compactReviewText 截断,否则 confirm 写入与这里重建会不一致。
+    // owner 担保(owner_vouched_v1)、owner 直接录入(owner_asserted_v1)与
+    // source_support_v1 共用这条透传:陈述原文即标题与摘要,不做 compactReviewText
+    // 截断,否则 confirm 写入与这里重建会不一致。
+    // 直接录入的 url 可能是空串(零证据、线索也没给网址),同样必须原样透传 ——
+    // 换成「空值省略字段」会让每次 sanitize 看到 drift 而空转 bump 批次版本。
     return {
       lead_id: row.id,
       verification: verified.record,

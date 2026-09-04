@@ -42,6 +42,12 @@ const OWNER_VOUCH_MIN_CODE_POINTS = 6;
 const OWNER_VOUCH_MAX_CODE_POINTS = 160;
 const OWNER_VOUCH_MIN_HAN_CHARACTERS = 4;
 const OWNER_VOUCH_MIN_ENGLISH_WORDS = 3;
+const OWNER_VOUCH_MIN_CONTENT_TOKENS = 3;
+/**
+ * 内容 token:一段连续汉字算一个,一个 ASCII 单词(字母开头,可含数字与连字符,
+ * 如 `GPT-5` / `Gemini3`)算一个。标点与空白只做分隔,自己不算 token。
+ */
+const OWNER_VOUCH_CONTENT_TOKEN = /\p{Script=Han}+|[A-Za-z][A-Za-z0-9'’-]*/gu;
 
 export interface ManualNewsOwnerVouchPayload {
   policy_version: typeof MANUAL_NEWS_OWNER_VOUCH_POLICY;
@@ -78,7 +84,15 @@ const OWNER_VOUCH_PAYLOAD_KEYS = [
 
 /**
  * 陈述规范化 + 校验。trim 后 6–160 code points、单行、无控制字符 / bidi / 零宽字符，
- * 且至少 4 个汉字或 3 个英文单词。不合规一律抛 `invalid_vouch_statement`。
+ * 且内容量够：至少 4 个汉字、或至少 3 个英文单词、或至少 3 个内容 token。
+ *
+ * 三选一是「只放宽不收紧」的写法。2026-09-04 owner 实测 `OpenAI发布Astra`（2 个汉字 +
+ * 2 个英文单词）被前两条挡下，但它是一句完整合格的新闻陈述 —— AI 新闻里公司名与产品名
+ * 几乎都是英文，中英混写是常态，所以补上 token 计数这一条；同时保留原有两条，避免
+ * `阿里发布模型`（单个汉字段，只有 1 个 token）这类原本能过的陈述被新规则误伤。
+ *
+ * 不合规一律抛 `invalid_vouch_statement`。`owner_asserted_v1` 与 `owner_vouched_v1`
+ * 共用这一个口径，面板侧的就地校验必须与此一致。
  */
 export function normalizeOwnerVouchStatement(raw: unknown): string {
   if (typeof raw !== 'string' || OWNER_VOUCH_UNSAFE_UNICODE.test(raw)) {
@@ -91,7 +105,10 @@ export function normalizeOwnerVouchStatement(raw: unknown): string {
   }
   const hanCount = (normalized.match(/\p{Script=Han}/gu) || []).length;
   const wordCount = (normalized.match(/[A-Za-z][A-Za-z'’-]*/gu) || []).length;
-  if (hanCount < OWNER_VOUCH_MIN_HAN_CHARACTERS && wordCount < OWNER_VOUCH_MIN_ENGLISH_WORDS) {
+  const contentTokens = (normalized.match(OWNER_VOUCH_CONTENT_TOKEN) || []).length;
+  if (hanCount < OWNER_VOUCH_MIN_HAN_CHARACTERS
+    && wordCount < OWNER_VOUCH_MIN_ENGLISH_WORDS
+    && contentTokens < OWNER_VOUCH_MIN_CONTENT_TOKENS) {
     throw new Error('invalid_vouch_statement');
   }
   return normalized;

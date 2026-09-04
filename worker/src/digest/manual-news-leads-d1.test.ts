@@ -39,6 +39,7 @@ import {
   retryManualNewsLead,
   submitManualNewsLead,
   vouchManualNewsLeadCandidate,
+  assertManualNewsLeadCandidate,
 } from './manual-news-leads-store';
 import {
   loadManualNewsEvidence,
@@ -4372,17 +4373,21 @@ describe('manual news owner vouch', () => {
     expect(state.db.preparedSql.slice(sqlStart)).toEqual([]);
   });
 
-  test('refuses a lead without evidence', async () => {
+  // 2026-09-04 起零证据不再是拒绝理由:同一个入口按证据数量分派到 owner_asserted_v1。
+  // 旧断言(0 条证据 -> 409 lead_not_vouchable)正是 owner 那三条线索救不回来的原因。
+  test('routes a lead without evidence to owner_asserted_v1 instead of refusing it', async () => {
     const state = await vouchFixture();
-    installSourceSupportReviewSchema(state);
+    const frozen = await frozenVouchBatch(state);
     state.db.sqlite.prepare('DELETE FROM manual_news_evidence WHERE lead_id = ?').run(state.leadId);
 
     await expect(vouchManualNewsLeadCandidate(
-      state.env, state.leadId, 4, 1, VOUCH_STATEMENT, 'vouch-key-1', 100,
-    )).resolves.toMatchObject({ ok: false, status: 409, error: 'lead_not_vouchable' });
-    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
+      state.env, state.leadId, 4, frozen.batch.batch_revision, VOUCH_STATEMENT, 'vouch-key-1', 100,
+    )).resolves.toMatchObject({ ok: true, changed: true, lead: { confirmed_at: 100 } });
+    expect(state.db.sqlite.prepare(`SELECT policy_version, status, assessment_version
       FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId))
-      .toEqual({ count: 0 });
+      .toMatchObject({
+        policy_version: 'owner_asserted_v1', status: 'active', assessment_version: 4_800_000,
+      });
   });
 
   test('refuses a lead whose signed evidence chain no longer verifies', async () => {
@@ -4596,6 +4601,438 @@ describe('manual news owner vouch', () => {
       .filter((itemId) => itemId.startsWith('blog:manual:'));
     expect(manualIds).toEqual([
       `blog:manual:${state.leadId}`,
+      `blog:manual:${second.leadId}`,
+    ]);
+  });
+});
+
+// ── owner 直接录入（owner_asserted_v1）─────────────────────────────────────────
+// 2026-09-04 早 07:55–08:00 owner 提交的三条线索全部 failed / processing_retry_exhausted
+// 且证据 0 条（大陆服务器取不回境外网页）。下面的用例复刻那个形态。
+
+const ASSERTED_STATEMENT = 'OpenAI发布Astra';
+
+/** 9/4 那三条卡住的线索：failed + processing_retry_exhausted + 证据 0 条。 */
+async function stuckZeroEvidenceFixture(inputUrl = '') {
+  const state = fixture('verifying', 4);
+  state.db.sqlite.prepare('DELETE FROM manual_news_leads').run();
+  state.db.sqlite.prepare('DELETE FROM manual_news_evidence').run();
+  const submitted = await submitManualNewsLead(state.env, {
+    date: '2026-08-28', text: 'OpenAI 发布 Astra', url: inputUrl, note: '',
+  }, 'submit-stuck-zero-evidence', 10);
+  state.db.sqlite.prepare(`UPDATE manual_news_leads SET status = 'failed', version = 4,
+    processing_owner = NULL, processing_attempt = 0,
+    error_code = 'processing_retry_exhausted', error_message = 'retry budget exhausted'
+    WHERE id = ?`).run(submitted.lead.id);
+  return {
+    ...state,
+    env: { ...state.env, DAILY_NEWS_REVIEW_SECRET: 'owner-asserted-review-secret' } as Env,
+    leadId: submitted.lead.id,
+  };
+}
+
+function assertedEnv(state: { db: SqliteD1; env: Env }): Env {
+  return { ...state.env, DAILY_NEWS_REVIEW_SECRET: 'owner-asserted-review-secret' } as Env;
+}
+
+async function frozenAssertedBatch(state: { db: SqliteD1; env: Env }) {
+  installSourceSupportReviewSchema(state);
+  state.db.sqlite.prepare(`DELETE FROM daily_news_review_batches
+    WHERE review_date = '2026-08-28'`).run();
+  installSourceSupportAutomaticPool(state, null);
+  return freezeNewsReviewBatchFromPool(state.env, '2026-08-28', 100);
+}
+
+describe('manual news owner asserted', () => {
+  test('rescues the stuck 2026-09-04 shape through vouch-candidate with zero evidence', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+
+    const result = await vouchManualNewsLeadCandidate(
+      state.env, state.leadId, 4, frozen.batch.batch_revision, ASSERTED_STATEMENT, 'rescue-1', 100,
+    );
+
+    expect(result).toMatchObject({
+      ok: true, changed: true, rerender_enqueued: false, pending_initial_freeze: false,
+      lead: { status: 'needs_review', version: 6, confirmed_at: 100 },
+    });
+    expect(state.db.sqlite.prepare(`SELECT policy_version, status, assessment_version
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId))
+      .toMatchObject({
+        policy_version: 'owner_asserted_v1', status: 'active', assessment_version: 4_800_000,
+      });
+    // 入口是担保按钮,审计如实记 vouch_candidate,但授权方式是 owner_asserted_v1。
+    const audit = state.db.sqlite.prepare(`SELECT from_status, to_status, metadata_json
+      FROM manual_news_lead_audit WHERE lead_id = ? AND action = 'vouch_candidate'`)
+      .get(state.leadId) as { from_status: string; to_status: string; metadata_json: string };
+    expect(audit).toMatchObject({ from_status: 'failed', to_status: 'needs_review' });
+    expect(JSON.parse(audit.metadata_json)).toMatchObject({
+      candidate_authorization: 'owner_asserted_v1', statement: ASSERTED_STATEMENT,
+    });
+    expect(state.db.sqlite.prepare('SELECT title, url, author, published_at FROM items WHERE id = ?')
+      .get(`blog:manual:${state.leadId}`)).toEqual({
+      title: ASSERTED_STATEMENT, url: '', author: '手工补录', published_at: null,
+    });
+  });
+
+  test('one-step direct entry lands in the batch and passes the formal news gate', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+
+    const result = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+      expected_batch_revision: frozen.batch.batch_revision,
+    }, 'direct-entry-1', 100);
+
+    expect(result).toMatchObject({
+      ok: true, changed: true, rerender_enqueued: false, pending_initial_freeze: false,
+      batch: { revision: frozen.batch.batch_revision + 1, current: true },
+      lead: { status: 'needs_review', confirmed_at: 100, error_code: null },
+    });
+    const leadId = result.ok ? result.lead.id : '';
+    expect(leadId).toMatch(/^ml-20260828-[a-f0-9]{12}$/);
+
+    const active = state.db.sqlite.prepare(`SELECT candidates_json FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28' AND is_current = 1`).get() as { candidates_json: string };
+    const candidates = JSON.parse(active.candidates_json) as Array<Record<string, unknown>>;
+    expect(candidates[candidates.length - 1]).toEqual({
+      item_id: `blog:manual:${leadId}`,
+      source_id: `manual:${leadId}`,
+      title: ASSERTED_STATEMENT,
+      summary: ASSERTED_STATEMENT,
+      source: '手工补录',
+      score: null,
+      url: '',
+      published_at: null,
+      event_key: expect.stringMatching(/^mnoa1:[a-f0-9]{64}$/),
+      origin: 'manual_lead',
+      lead_id: leadId,
+    });
+
+    await expect(authorizeFormalNewsSet(
+      state.env, '2026-08-28', [`blog:manual:${leadId}`], 'owner-asserted-gate',
+    )).resolves.toMatchObject({
+      allowed_ids: [`blog:manual:${leadId}`],
+      decisions: [{ allowed: true, code: 'ALLOW_VERIFIED_MANUAL' }],
+    });
+
+    await expect(durableConfirmedManualCandidates(state.env, '2026-08-28')).resolves.toEqual([
+      expect.objectContaining({ item_id: `blog:manual:${leadId}`, title: ASSERTED_STATEMENT }),
+    ]);
+
+    // 连续两次 sanitize 都不能 bump 批次版本:confirm 写入与 sanitize 重建口径一致。
+    const firstSanitize = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 100);
+    const secondSanitize = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 100);
+    expect(firstSanitize.changed).toBe(false);
+    expect(secondSanitize.changed).toBe(false);
+    expect(secondSanitize.batch.batch_revision).toBe(frozen.batch.batch_revision + 1);
+    expect(secondSanitize.manual_verifications).toEqual([
+      expect.objectContaining({
+        lead_id: leadId,
+        verification: expect.objectContaining({ policy_version: 'owner_asserted_v1' }),
+      }),
+    ]);
+  });
+
+  test('takes the statement from the text and the url from an https lead url', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+
+    const result = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT, url: 'https://openai.com/index/astra/',
+      note: '早报', expected_batch_revision: frozen.batch.batch_revision,
+    }, 'direct-entry-url', 100);
+
+    const leadId = result.ok ? result.lead.id : '';
+    expect(state.db.sqlite.prepare('SELECT title, url, author FROM items WHERE id = ?')
+      .get(`blog:manual:${leadId}`)).toEqual({
+      title: ASSERTED_STATEMENT, url: 'https://openai.com/index/astra/', author: '手工补录',
+    });
+    await expect(authorizeFormalNewsSet(
+      state.env, '2026-08-28', [`blog:manual:${leadId}`], 'owner-asserted-url-gate',
+    )).resolves.toMatchObject({ allowed_ids: [`blog:manual:${leadId}`] });
+  });
+
+  test('keeps the evidence on the candidate and still checks its body digest', async () => {
+    // 直接录入命中一条已经取到证据的线索(取证跑完一半的旧线索)时,证据照样被签进
+    // 快照:来源 / 链接 / 时间取主证据,body digest 仍逐条校验。
+    const state = await vouchFixture();
+    const frozen = await frozenVouchBatch(state);
+    const submitKey = state.db.sqlite.prepare(
+      'SELECT submit_idempotency_key AS key FROM manual_news_leads WHERE id = ?',
+    ).get(state.leadId) as { key: string };
+
+    const result = await assertManualNewsLeadCandidate(assertedEnv(state), {
+      date: '2026-08-28', text: 'OpenAI 发布 GPT-6', url: VOUCH_URL, note: '',
+      statement: ASSERTED_STATEMENT, expected_batch_revision: frozen.batch.batch_revision,
+    }, submitKey.key, 100);
+
+    expect(result).toMatchObject({ ok: true, changed: true, lead: { id: state.leadId } });
+    expect(state.db.sqlite.prepare(`SELECT policy_version FROM
+      manual_news_assessment_verifications WHERE lead_id = ? AND status = 'active'`)
+      .get(state.leadId)).toEqual({ policy_version: 'owner_asserted_v1' });
+    expect(state.db.sqlite.prepare('SELECT title, url, author, published_at FROM items WHERE id = ?')
+      .get(`blog:manual:${state.leadId}`)).toEqual({
+      title: ASSERTED_STATEMENT, url: VOUCH_URL, author: 'OpenAI',
+      published_at: '2026-08-28T00:00:00.000Z',
+    });
+    const payload = JSON.parse((state.db.sqlite.prepare(
+      `SELECT verification_json AS json FROM manual_news_assessment_verifications
+       WHERE lead_id = ? AND status = 'active'`,
+    ).get(state.leadId) as { json: string }).json) as { evidence: Array<{ id: string }> };
+    expect(payload.evidence.map((item) => item.id)).toEqual(['ev-openai-gpt-6']);
+    await expect(authorizeFormalNewsSet(
+      state.env, '2026-08-28', [`blog:manual:${state.leadId}`], 'owner-asserted-evidence-gate',
+    )).resolves.toMatchObject({ allowed_ids: [`blog:manual:${state.leadId}`] });
+
+    // 证据正文摘要被改坏 -> 快照失效 -> 候选被隔离,进不了正式新闻门。
+    state.db.sqlite.prepare(`UPDATE manual_news_evidence
+      SET fetch_audit_json = json_set(fetch_audit_json, '$.body_sha256', ?)
+      WHERE lead_id = ?`).run('0'.repeat(64), state.leadId);
+    await expect(authorizeFormalNewsSet(
+      state.env, '2026-08-28', [`blog:manual:${state.leadId}`], 'owner-asserted-evidence-tamper',
+    )).resolves.toMatchObject({
+      allowed_ids: [], decisions: [{ allowed: false, code: 'DENY_UNVERIFIED_MANUAL' }],
+    });
+  });
+
+  test('rejects an invalid statement with 400 and writes nothing', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    await frozenAssertedBatch(state);
+    const leadsBefore = state.db.sqlite.prepare('SELECT COUNT(*) AS count FROM manual_news_leads').get();
+
+    await expect(assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: '。。。。。。', expected_batch_revision: 1,
+    }, 'direct-entry-invalid', 100)).resolves
+      .toEqual({ ok: false, status: 400, error: 'invalid_vouch_statement' });
+    await expect(assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: 'aaaaaa', expected_batch_revision: 1,
+    }, 'direct-entry-invalid-2', 100)).resolves
+      .toEqual({ ok: false, status: 400, error: 'invalid_vouch_statement' });
+
+    expect(state.db.sqlite.prepare('SELECT COUNT(*) AS count FROM manual_news_leads').get())
+      .toEqual(leadsBefore);
+  });
+
+  test('returns the same result when the direct entry idempotency key is replayed', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+    const body = {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+      expected_batch_revision: frozen.batch.batch_revision,
+    };
+
+    const first = await assertManualNewsLeadCandidate(state.env, body, 'direct-entry-replay', 100);
+    const replay = await assertManualNewsLeadCandidate(state.env, body, 'direct-entry-replay', 101);
+
+    expect(first).toMatchObject({ ok: true, changed: true });
+    expect(replay).toMatchObject({ ok: true, changed: false });
+    expect(replay.ok && replay.lead.id).toBe(first.ok && first.lead.id);
+    expect(replay.ok && replay.batch?.batch_id).toBe(first.ok && first.batch?.batch_id);
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE action IN ('assert_candidate', 'confirm_candidate')`).get()).toEqual({ count: 2 });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count
+      FROM manual_news_assessment_verifications`).get()).toEqual({ count: 1 });
+
+    // 同一个键换一份输入 -> 幂等键被复用,不能悄悄建第二条线索。
+    await expect(assertManualNewsLeadCandidate(state.env, {
+      ...body, text: '阿里发布通义千问新模型',
+    }, 'direct-entry-replay', 102)).rejects
+      .toThrow('idempotency_key_reused_with_different_payload');
+  });
+
+  test('keeps the proof on a batch revision conflict and confirms on retry', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+
+    const conflicted = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+      expected_batch_revision: frozen.batch.batch_revision + 5,
+    }, 'direct-entry-conflict', 100);
+
+    expect(conflicted).toMatchObject({
+      ok: false, status: 409, error: 'candidate_batch_revision_conflict',
+    });
+    const proof = state.db.sqlite.prepare(`SELECT lead_id, policy_version, status
+      FROM manual_news_assessment_verifications`).get() as Record<string, string>;
+    expect(proof).toMatchObject({ policy_version: 'owner_asserted_v1', status: 'active' });
+    expect(state.db.sqlite.prepare('SELECT version, confirmed_at FROM manual_news_leads WHERE id = ?')
+      .get(proof.lead_id)).toEqual({ version: 1, confirmed_at: null });
+
+    const retried = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+      expected_batch_revision: frozen.batch.batch_revision,
+    }, 'direct-entry-conflict', 101);
+
+    expect(retried).toMatchObject({ ok: true, changed: true, lead: { confirmed_at: 101 } });
+    expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM manual_news_lead_audit
+      WHERE action = 'assert_candidate'`).get()).toEqual({ count: 1 });
+  });
+
+  test('refuses an expired review window before creating anything', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    await frozenAssertedBatch(state);
+    const leadsBefore = state.db.sqlite.prepare('SELECT COUNT(*) AS count FROM manual_news_leads').get();
+
+    await expect(assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+    }, 'direct-entry-expired', Date.parse('2026-09-30T00:00:00.000Z'))).resolves
+      .toEqual({ ok: false, status: 409, error: 'review_expired' });
+    expect(state.db.sqlite.prepare('SELECT COUNT(*) AS count FROM manual_news_leads').get())
+      .toEqual(leadsBefore);
+  });
+
+  test('refuses a lead that is already confirmed', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+    const body = {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+      expected_batch_revision: frozen.batch.batch_revision,
+    };
+    const first = await assertManualNewsLeadCandidate(state.env, body, 'direct-entry-confirmed', 100);
+    expect(first.ok).toBe(true);
+
+    // 同一条线索、同一句陈述、换一个幂等键:线索早已确认,不能再录一次。
+    const leadId = first.ok ? first.lead.id : '';
+    await expect(vouchManualNewsLeadCandidate(
+      state.env, leadId, first.ok ? first.lead.version : 0,
+      frozen.batch.batch_revision + 1, '阿里发布通义千问新模型', 'direct-entry-confirmed-2', 101,
+    )).resolves.toMatchObject({ ok: false, status: 409, error: 'lead_not_vouchable' });
+  });
+
+  test('defaults the expected batch revision to the current active batch', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+
+    await expect(assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+    }, 'direct-entry-default-revision', 100)).resolves.toMatchObject({
+      ok: true, changed: true, batch: { revision: frozen.batch.batch_revision + 1 },
+    });
+  });
+
+  test('merges a pre-freeze direct entry into the first frozen batch of the day', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    installSourceSupportReviewSchema(state);
+    state.db.sqlite.prepare(`DELETE FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28'`).run();
+    installSourceSupportAutomaticPool(state, null);
+
+    const entered = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+    }, 'direct-entry-prefreeze', 100);
+    expect(entered).toMatchObject({ ok: true, pending_initial_freeze: true, batch: null });
+    const leadId = entered.ok ? entered.lead.id : '';
+
+    const frozen = await freezeNewsReviewBatchFromPool(state.env, '2026-08-28', 200);
+
+    expect(frozen.batch.candidates.map((candidate) => candidate.item_id))
+      .toContain(`blog:manual:${leadId}`);
+    expect(frozen.batch.candidates.find(
+      (candidate) => candidate.item_id === `blog:manual:${leadId}`,
+    )).toMatchObject({
+      title: ASSERTED_STATEMENT, summary: ASSERTED_STATEMENT, score: null,
+      source: '手工补录', url: '',
+    });
+    expect(state.db.sqlite.prepare('SELECT confirmed_batch_id FROM manual_news_leads WHERE id = ?')
+      .get(leadId)).toEqual({ confirmed_batch_id: frozen.batch.batch_id });
+    await expect(sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 200))
+      .resolves.toMatchObject({ changed: false });
+  });
+
+  test('reports the direct entry authorization and statement for the API views', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+    const entered = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+      expected_batch_revision: frozen.batch.batch_revision,
+    }, 'direct-entry-view', 100);
+    const leadId = entered.ok ? entered.lead.id : '';
+
+    await expect(getManualNewsCandidateAuthorization(state.env, leadId)).resolves.toEqual({
+      candidate_authorization: 'owner_asserted_v1',
+      vouch: { statement: ASSERTED_STATEMENT, vouched_at: 100 },
+    });
+    const listed = await listManualNewsCandidateAuthorizations(state.env, '2026-08-28');
+    expect(listed.get(leadId)).toEqual({
+      candidate_authorization: 'owner_asserted_v1',
+      vouch: { statement: ASSERTED_STATEMENT, vouched_at: 100 },
+    });
+  });
+
+  test('quarantines a tampered direct entry projection before the formal gate', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+    const entered = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+      expected_batch_revision: frozen.batch.batch_revision,
+    }, 'direct-entry-tamper', 100);
+    const leadId = entered.ok ? entered.lead.id : '';
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications
+      SET verification_json = json_set(verification_json, '$.item_projection.title', '伪造的候选标题内容')
+      WHERE lead_id = ? AND status = 'active'`).run(leadId);
+
+    await expect(authorizeFormalNewsSet(
+      state.env, '2026-08-28', [`blog:manual:${leadId}`], 'owner-asserted-tamper',
+    )).resolves.toMatchObject({
+      allowed_ids: [], decisions: [{ allowed: false, code: 'DENY_UNVERIFIED_MANUAL' }],
+    });
+    expect(state.db.sqlite.prepare(`SELECT status, reason
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(leadId))
+      .toMatchObject({ status: 'invalidated', reason: 'verification_integrity_invalid' });
+  });
+
+  test('rejects a direct entry proof whose authorization audit no longer matches', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+    const entered = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+      expected_batch_revision: frozen.batch.batch_revision,
+    }, 'direct-entry-audit', 100);
+    const leadId = entered.ok ? entered.lead.id : '';
+    state.db.sqlite.prepare(`UPDATE manual_news_lead_audit
+      SET metadata_json = json_set(metadata_json, '$.canonical_digest', ?)
+      WHERE lead_id = ? AND action = 'assert_candidate'`).run('0'.repeat(64), leadId);
+
+    await expect(loadVerifiedManualCandidateProof(state.env, leadId)).resolves.toBeNull();
+  });
+
+  test('orders a direct entry by its assert audit, not by its confirmation', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+
+    // 先制造「快照已写、确认撞版本」的中间态,让 assert 审计与 confirm 审计之间夹进另一条线索。
+    const conflicted = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+      expected_batch_revision: frozen.batch.batch_revision + 5,
+    }, 'direct-entry-order', 100);
+    expect(conflicted).toMatchObject({ ok: false, status: 409 });
+    const first = state.db.sqlite.prepare(
+      `SELECT lead_id FROM manual_news_assessment_verifications`,
+    ).get() as { lead_id: string };
+    const second = await addSourceSupportLead(state, {
+      idempotencyKey: 'submit-source-support-after-assert', owner: 'source-support-owner-b',
+      fact: 'Anthropic 开放 Model Hardware Standard（MHS）研究预览。',
+      excerpt: 'Anthropic is opening a research preview of the Model Hardware Standard (MHS), '
+        + 'a shared specification for AI agents to safely operate physical devices, '
+        + 'to a first group of scientific research labs and advanced manufacturers.',
+      url: 'https://www.anthropic.com/news/model-hardware-standard-research-preview',
+      evidenceId: 'ev-anthropic-mhs', publisher: 'Anthropic', now: 101,
+    });
+    await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+      expected_batch_revision: frozen.batch.batch_revision,
+    }, 'direct-entry-order', 102);
+    await new D1ManualLeadProcessingStore(state.env, second.owner, 1)
+      .saveSourceSupportedCandidate(second.leadId, 4, second.payload);
+
+    const active = state.db.sqlite.prepare(`SELECT candidates_json FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28' AND is_current = 1`).get() as { candidates_json: string };
+    const manualIds = (JSON.parse(active.candidates_json) as Array<{ item_id: string }>)
+      .map((candidate) => candidate.item_id)
+      .filter((itemId) => itemId.startsWith('blog:manual:'));
+    expect(manualIds).toEqual([
+      `blog:manual:${first.lead_id}`,
       `blog:manual:${second.leadId}`,
     ]);
   });
