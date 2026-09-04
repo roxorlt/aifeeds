@@ -2,9 +2,7 @@ import { describe, expect, test, vi } from 'vitest';
 
 import type { Env } from '../index';
 import {
-  MANUAL_LEAD_ENRICHMENT_FETCH_TIMEOUT_MS,
   MANUAL_LEAD_ENRICHMENT_PROMPT_MAX_CHARS,
-  MANUAL_LEAD_ENRICHMENT_SEARCH_TIMEOUT_MS,
   createManualLeadEnrichmentAdapters,
   manualLeadEnrichmentBackgroundPrompt,
   parseManualLeadEnrichmentMaterial,
@@ -41,34 +39,6 @@ describe('parseManualLeadEnrichmentMaterial', () => {
     expect(parseManualLeadEnrichmentMaterial({
       text: '正文', url: 7, publisher: {}, kind: 'tweet',
     })).toEqual({ text: '正文', url: '', publisher: '', kind: 'tweet' });
-  });
-
-  test('网关合并了两份素材时收下 sources,逐项按形状收口', () => {
-    expect(parseManualLeadEnrichmentMaterial({
-      text: '正文', url: 'https://techcrunch.com/a', publisher: 'techcrunch.com', kind: 'document',
-      sources: [
-        { url: 'https://techcrunch.com/a', publisher: 'techcrunch.com', kind: 'document', extra: 'x' },
-        { url: 'https://theverge.com/b', publisher: 'theverge.com', kind: 'search+document' },
-      ],
-    })).toEqual({
-      text: '正文', url: 'https://techcrunch.com/a', publisher: 'techcrunch.com', kind: 'document',
-      sources: [
-        { url: 'https://techcrunch.com/a', publisher: 'techcrunch.com', kind: 'document' },
-        { url: 'https://theverge.com/b', publisher: 'theverge.com', kind: 'search+document' },
-      ],
-    });
-  });
-
-  test.each([
-    ['sources 缺失', undefined],
-    ['sources 是空数组', []],
-    ['sources 不是数组', 'techcrunch.com'],
-    ['sources 里全是形状不对的东西', [{ kind: 'screenshot' }, null, 7]],
-  ])('%s 时不写这个字段,素材本身照收', (_name, sources) => {
-    const parsed = parseManualLeadEnrichmentMaterial({
-      text: '正文', url: 'https://a.example/x', publisher: 'A', kind: 'document', ...(sources === undefined ? {} : { sources }),
-    });
-    expect(parsed).toEqual({ text: '正文', url: 'https://a.example/x', publisher: 'A', kind: 'document' });
   });
 });
 
@@ -107,43 +77,6 @@ describe('createManualLeadEnrichmentAdapters.fetchPlainText', () => {
     expect(init.method).toBe('POST');
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer gateway-token-value');
     expect(JSON.parse(String(init.body))).toEqual({ url: 'https://techcrunch.com/a' });
-  });
-
-  test('url 与 query 一起发时原样转给网关', async () => {
-    const fetcher = vi.fn(async () => jsonResponse({
-      text: '正文', url: 'https://techcrunch.com/a', publisher: 'TechCrunch', kind: 'document',
-    }));
-    const adapters = createManualLeadEnrichmentAdapters(GATEWAY_ENV, { fetcher });
-
-    await adapters.fetchPlainText({ url: 'https://techcrunch.com/a', query: 'OpenAI 发布 Astra' });
-    expect(JSON.parse(String((fetcher.mock.calls[0] as unknown as [string, RequestInit])[1].body)))
-      .toEqual({ url: 'https://techcrunch.com/a', query: 'OpenAI 发布 Astra' });
-  });
-
-  test('带 query 的请求按搜索预算给时限 —— 网关那边还要翻结果再逐条试抓', async () => {
-    const timeouts: number[] = [];
-    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
-      .mockImplementation(((_handler: unknown, ms?: number) => {
-        timeouts.push(Number(ms));
-        return 0 as unknown as ReturnType<typeof setTimeout>;
-      }) as typeof setTimeout);
-    try {
-      const fetcher = vi.fn(async () => jsonResponse({
-        text: '正文', url: 'https://a.example/x', publisher: 'A', kind: 'document',
-      }));
-      const adapters = createManualLeadEnrichmentAdapters(GATEWAY_ENV, { fetcher });
-
-      await adapters.fetchPlainText({ url: 'https://a.example/x' });
-      await adapters.fetchPlainText({ url: 'https://a.example/x', query: '描述' });
-      await adapters.fetchPlainText({ query: '描述' });
-    } finally {
-      setTimeoutSpy.mockRestore();
-    }
-    expect(timeouts).toEqual([
-      MANUAL_LEAD_ENRICHMENT_FETCH_TIMEOUT_MS,
-      MANUAL_LEAD_ENRICHMENT_SEARCH_TIMEOUT_MS,
-      MANUAL_LEAD_ENRICHMENT_SEARCH_TIMEOUT_MS,
-    ]);
   });
 
   test('没有链接时把文字线索当查询发过去', async () => {

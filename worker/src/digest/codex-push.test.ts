@@ -11,15 +11,6 @@ vi.mock('./news-review', () => ({
 vi.mock('./news-source-policy', () => ({
   authorizeFormalNewsSet: vi.fn(),
 }));
-vi.mock('./manual-lead-enrichment', () => ({
-  backfillManualLeadEnrichment: vi.fn(async () => ({ scanned: 0, written: 0, empty: 0, failed: 0, skipped: 0 })),
-}));
-vi.mock('./manual-lead-enrichment-runtime', () => ({
-  createManualLeadEnrichmentAdapters: vi.fn(() => ({
-    fetchPlainText: async () => null,
-    compress: async () => null,
-  })),
-}));
 
 import type { Env } from '../index';
 import type { RenderRow } from './render';
@@ -31,7 +22,6 @@ import {
   pushDailyToCodex,
 } from './codex-push';
 import { authorizeFormalNewsSet } from './news-source-policy';
-import { backfillManualLeadEnrichment } from './manual-lead-enrichment';
 import { getAppliedNewsReviewSelection } from './news-review';
 import {
   getPublishedNewsReviewSelection,
@@ -218,9 +208,6 @@ function exactReceiptResponse(_input: RequestInfo | URL, init?: RequestInit): Pr
 }
 
 beforeEach(() => {
-  vi.mocked(backfillManualLeadEnrichment).mockResolvedValue({
-    scanned: 0, written: 0, empty: 0, failed: 0, skipped: 0,
-  });
   vi.mocked(authorizeFormalNewsSet).mockImplementation(async (_env, _date, ids) => ({
     allowed_ids: [...ids],
     decisions: ids.map((id) => ({ item_id: id, allowed: true, code: 'ALLOW_SCHEDULED_FORMAL' as const })),
@@ -1178,83 +1165,5 @@ describe('staged push origin contract', () => {
     expect(reviewedBody.origin).toBe('review');
     expect(automatic).toMatchObject({ ok: true, stage: 'foundation', origin: 'auto' });
     expect(automaticBody.origin).toBe('auto');
-  });
-});
-
-
-// ---------------------------------------------------------------------------
-// 出片前的补取（2026-09-04）
-//
-// 写口播词之前素材必须备齐。提交时那次取材失败就没有第二次机会，所以在真正组装
-// editorial 那份 payload 之前再补一遍。守的是：补在读行之前、只补 editorial 这一段、
-// 补取炸了出片照旧。
-// ---------------------------------------------------------------------------
-describe('出片前的补取', () => {
-  const manualId = 'blog:manual:ml-20260721-backfill01';
-
-  beforeEach(() => {
-    // 这个文件里别的用例也会走 editorial 那条路，调用记录是攒着的，先清干净再数。
-    vi.mocked(backfillManualLeadEnrichment).mockClear();
-    vi.mocked(getAppliedNewsReviewSelection).mockResolvedValue(null);
-    vi.mocked(getVerifiedNewsReviewSelectionSnapshot).mockResolvedValue(null);
-  });
-
-  test('补取跑在读候选行之前，补上的素材直接进这一版 payload 的 evidence_note', async () => {
-    const { env, setPool, rows } = makeEnv();
-    setPool('2026-07-21', 'news', [manualId]);
-    vi.mocked(backfillManualLeadEnrichment).mockImplementation(async () => {
-      // 真的等一拍再写:补取在生产里是网络往返,组装那一步必须 await 它,而不是发出去就走。
-      await new Promise((resolve) => { setTimeout(resolve, 1); });
-      const stored = rows.get(manualId)!;
-      rows.set(manualId, {
-        ...stored,
-        extra: JSON.stringify({ manual_evidence_text: '补取回来的背景素材。' }),
-      });
-      return { scanned: 1, written: 1, empty: 0, failed: 0, skipped: 0 };
-    });
-
-    const payload = await buildStagedDailyCodexPayload(env, 'editorial', { date: '2026-07-21' });
-
-    expect(backfillManualLeadEnrichment).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(backfillManualLeadEnrichment).mock.calls[0][1]).toBe('2026-07-21');
-    expect(payload.digest.sections.normal[0].items[0]).toMatchObject({
-      evidence_note: '补取回来的背景素材。',
-    });
-  });
-
-  test('只有 editorial 这一段补取：foundation / papers 与 finalize 都不补', async () => {
-    const { env, setPool } = makeEnv();
-    seedAll(setPool);
-    for (const stage of ['foundation', 'papers'] as const) {
-      await buildStagedDailyCodexPayload(env, stage, { date: '2026-07-21' });
-    }
-    expect(backfillManualLeadEnrichment).not.toHaveBeenCalled();
-
-    await buildStagedDailyCodexPayload(env, 'editorial', { date: '2026-07-21', persistRevision: true });
-    expect(backfillManualLeadEnrichment).toHaveBeenCalledTimes(1);
-
-    // finalize 用的是 editorial 那份已锁定的快照，这时候再补也进不了 payload。
-    await buildStagedDailyCodexPayload(env, 'foundation', { date: '2026-07-21', persistRevision: true });
-    await buildStagedDailyCodexPayload(env, 'papers', { date: '2026-07-21', persistRevision: true });
-    await buildStagedDailyCodexPayload(env, 'finalize', { date: '2026-07-21' });
-    expect(backfillManualLeadEnrichment).toHaveBeenCalledTimes(1);
-  });
-
-  test('补取抛异常时出片照旧完成 —— 少一段背景，不是少一期日报', async () => {
-    const { env, setPool } = makeEnv();
-    setPool('2026-07-21', 'news', ['news-1']);
-    vi.mocked(backfillManualLeadEnrichment).mockRejectedValue(new Error('D1_ERROR: too many subrequests'));
-
-    const payload = await buildStagedDailyCodexPayload(env, 'editorial', { date: '2026-07-21' });
-    expect(payload.digest.sections.normal[0].items.map((item) => item.item_id)).toEqual(['news-1']);
-  });
-
-  test('补取超时挂住时也不拖住出片', async () => {
-    const { env, setPool } = makeEnv();
-    setPool('2026-07-21', 'news', ['news-1']);
-    vi.mocked(backfillManualLeadEnrichment).mockRejectedValue(Object.assign(new Error('aborted'), { name: 'AbortError' }));
-
-    await expect(buildStagedDailyCodexPayload(env, 'editorial', { date: '2026-07-21' }))
-      .resolves.toMatchObject({ stage: 'editorial' });
   });
 });

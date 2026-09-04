@@ -52,3 +52,20 @@
 ## 5. 不改的
 
 入池不等取材；owner 的陈述始终是标题与卡片显示文字，取材只进 `evidence_note` 供口播当背景；`/v1/document` 的证据取证与本路径无关。
+
+---
+
+## 6. 回滚记录（2026-09-04 23:00）
+
+PR #249 上线后 prod 出现两处回归，已 `git revert -m 1 61560ea` 回滚：
+
+1. **`POST /api/digest/daily-news-leads`（owner_asserted）连续 500**，三次三中。worker 日志只有 `[manual-news-leads-api] internal request failure {"error":"Error"}`（该路径只记错误名，无堆栈），线索行已建但 `confirmed_at` 为空 —— 说明四语句原子写入之后、确认那一步抛了未归类异常。
+2. **取材不再写入 `extra.manual_evidence_text`**。#249 之前的 18:47 那条（`ml-20260904-e0cb46e9a893`）成功写入 159 字，#249 之后的 22:51 那条（`a29c223017bc`）确认成功但素材为 0。
+
+回滚后恢复到 #248 的状态：取材可用（有链接抓该链接、无链接搜索），提交可用。**面板 v22 不回滚**——它接受 `url` 与 `query` 同时出现、也接受只给其一，与 #248 的云端兼容。
+
+### 重做时必须先补的东西
+
+- **可诊断性**：`manual-news-leads-api.ts` 的 `internal_error` 分支现在只记 `error.name`，prod 上无法定位。重做前先让它记 `error.message` 的前 200 字（不含 URL 与 token，沿用 `safeError` 的脱敏），否则下次同样瞎。
+- **端到端回归**：#249 的 3274 个用例全绿却在 prod 一提交就 500，说明测试没覆盖真实提交路径的这段。重做时补一条走完整 `handleManualNewsLeadsApi` 的 owner_asserted 提交用例（真实 D1 夹具，不是桩），断言 200 且 `confirmed_at` 非空。
+- 定位方向：#249 对提交路径的改动只有详情 DTO 新增 `evidence_material`（自带 try/catch，已排除）与 `scheduleLeadEnrichment` 的入参，重点看后者与 `createOwnerAssertedLead` 的交互。

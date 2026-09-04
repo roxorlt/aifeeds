@@ -2,10 +2,8 @@ import { describe, expect, test, vi } from 'vitest';
 
 import {
   MANUAL_EVIDENCE_TEXT_MAX_CODE_POINTS,
-  MANUAL_LEAD_ENRICHMENT_QUERY_MAX_LENGTH,
   clampEnrichmentText,
   collectManualLeadEnrichment,
-  manualLeadEnrichmentRequest,
   manualLeadNeedsEnrichment,
   type ManualLeadEnrichmentAdapters,
 } from './manual-lead-enrichment';
@@ -64,11 +62,7 @@ describe('collectManualLeadEnrichment', () => {
       { now: 1_757_000_000_000 },
     );
 
-    // owner 纠正的原始需求:有链接的线索要「抓那条链接 + 按描述搜索」两份素材,
-    // 所以 url 与 query 一起发给网关,而不是二选一。
-    expect(fetchPlainText).toHaveBeenCalledWith({
-      url: 'https://techcrunch.com/2026/09/04/a/', query: 'owner 的陈述',
-    });
+    expect(fetchPlainText).toHaveBeenCalledWith({ url: 'https://techcrunch.com/2026/09/04/a/' });
     expect(result).toEqual({
       text: '背景一。背景二。',
       source: {
@@ -211,94 +205,5 @@ describe('collectManualLeadEnrichment', () => {
       { now: 0 },
     );
     expect(result?.source).toMatchObject({ url: 'https://example.com/a', publisher: '未知来源' });
-  });
-});
-
-describe('manualLeadEnrichmentRequest', () => {
-  test('有链接时 url 与 query 一起发,描述就是搜索依据', () => {
-    expect(manualLeadEnrichmentRequest({ url: 'https://a.example/x', text: 'OpenAI 发布 Astra' }))
-      .toEqual({ url: 'https://a.example/x', query: 'OpenAI 发布 Astra' });
-  });
-
-  test('没有链接时只发 query', () => {
-    expect(manualLeadEnrichmentRequest({ url: null, text: 'OpenAI 发布 Astra' }))
-      .toEqual({ query: 'OpenAI 发布 Astra' });
-  });
-
-  test('没有描述时只发 url', () => {
-    expect(manualLeadEnrichmentRequest({ url: 'https://a.example/x', text: '  ' }))
-      .toEqual({ url: 'https://a.example/x' });
-  });
-
-  test('两样都没有时回 null,连网关都不必打扰', () => {
-    expect(manualLeadEnrichmentRequest({ url: '', text: '  ' })).toBeNull();
-  });
-
-  test('描述压掉换行与多余空白', () => {
-    expect(manualLeadEnrichmentRequest({ url: null, text: ' OpenAI\n\n 发布  Astra ' }))
-      .toEqual({ query: 'OpenAI 发布 Astra' });
-  });
-
-  test('描述超过网关的 200 上限时截断,不让整个请求被 400 掉', () => {
-    const request = manualLeadEnrichmentRequest({ url: null, text: '甲'.repeat(400) });
-    expect(request?.query?.length).toBeLessThanOrEqual(MANUAL_LEAD_ENRICHMENT_QUERY_MAX_LENGTH);
-    expect(request?.query).toBe('甲'.repeat(MANUAL_LEAD_ENRICHMENT_QUERY_MAX_LENGTH));
-  });
-
-  test('截断按 UTF-16 长度算,代理对不会被切碎', () => {
-    const request = manualLeadEnrichmentRequest({ url: null, text: '🙂'.repeat(400) });
-    expect(request?.query?.length).toBeLessThanOrEqual(MANUAL_LEAD_ENRICHMENT_QUERY_MAX_LENGTH);
-    expect([...(request?.query || '')].every((char) => char === '🙂')).toBe(true);
-  });
-});
-
-describe('合并素材的来源记录', () => {
-  const merged = {
-    text: '链接正文。\n\n搜索素材。',
-    url: 'https://techcrunch.com/a',
-    publisher: 'techcrunch.com',
-    kind: 'document' as const,
-    sources: [
-      { url: 'https://techcrunch.com/a', publisher: 'techcrunch.com', kind: 'document' as const },
-      { url: 'https://theverge.com/b', publisher: 'theverge.com', kind: 'search+document' as const },
-    ],
-  };
-
-  test('网关合并了两份素材时,来源记录把两份都列出来', async () => {
-    const result = await collectManualLeadEnrichment(
-      { url: 'https://techcrunch.com/a', text: 'owner 的陈述' },
-      adapters({ fetchPlainText: vi.fn(async () => merged), compress: vi.fn(async () => '背景。') }),
-      { now: 1_757_000_000_000 },
-    );
-
-    expect(result?.source).toEqual({
-      url: 'https://techcrunch.com/a',
-      publisher: 'techcrunch.com',
-      fetched_at: new Date(1_757_000_000_000).toISOString(),
-      kind: 'document',
-      sources: merged.sources,
-    });
-  });
-
-  test('只有一份素材时不写 sources —— 形状与补充上线之初一模一样', async () => {
-    const result = await collectManualLeadEnrichment(
-      { url: 'https://techcrunch.com/a', text: 'owner 的陈述' },
-      adapters({
-        fetchPlainText: vi.fn(async () => ({ ...merged, sources: [merged.sources[0]] })),
-        compress: vi.fn(async () => '背景。'),
-      }),
-      { now: 0 },
-    );
-    expect(Object.prototype.hasOwnProperty.call(result?.source || {}, 'sources')).toBe(false);
-  });
-
-  test('网关没给 sources 时同样不写', async () => {
-    const { sources: _dropped, ...single } = merged;
-    const result = await collectManualLeadEnrichment(
-      { url: 'https://techcrunch.com/a', text: 'owner 的陈述' },
-      adapters({ fetchPlainText: vi.fn(async () => single), compress: vi.fn(async () => '背景。') }),
-      { now: 0 },
-    );
-    expect(Object.prototype.hasOwnProperty.call(result?.source || {}, 'sources')).toBe(false);
   });
 });
