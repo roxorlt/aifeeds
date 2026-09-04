@@ -1,0 +1,180 @@
+/**
+ * 手工补录线索的正文补充（enrichment）。
+ *
+ * owner 直接录入（`owner_asserted_v1`）让线索绕过取证一步入池，代价是口播词只有 owner
+ * 写的那一句话 —— 标题与证据文本取的是同一句陈述，模型没有别的素材可写。这个模块在
+ * **入池之后**去补一段背景素材：有链接就抓那条链接的正文，没链接就拿文字线索去搜。
+ *
+ * 三条不可动的边界（`docs/plans/2026-09-04-manual-lead-enrichment-spec.md` 第 1 节）：
+ *
+ * 1. **入池不得被它阻塞**。补充是入池之后的异步增强，抓取失败、模型失败、网关超时都只
+ *    意味着「这条候选保持只有陈述的状态」，与补充上线之前的行为一模一样。所以这里的每
+ *    个失败路径都收敛成 `null`，从不往外抛。
+ * 2. **不碰被正式新闻门绑定的字段**。`items` 的 title / content / content_translated /
+ *    author / url / published_at 与 `extra.event_fingerprint` 跟签名投影逐字绑定，补充
+ *    只写 `extra.manual_evidence_text` 与 `extra.manual_evidence_source` 这两个新键。
+ * 3. **不覆盖 `extra.ai_summary_zh`**。那是卡片与静态页显示的那句话，也是 owner 自己写
+ *    的主张；补充素材是口播的**补充证据**，不是替换品。
+ */
+import type { Env } from '../index';
+
+/** 补充素材的长度上限（code point）。口播只要背景，不要整篇正文。 */
+export const MANUAL_EVIDENCE_TEXT_MAX_CODE_POINTS = 400;
+/** 单条线索的取材总预算。超时就放弃，候选保持原样。 */
+export const MANUAL_LEAD_ENRICHMENT_BUDGET_MS = 60_000;
+
+export type ManualEvidenceKind = 'tweet' | 'document' | 'search+document';
+
+/** 取证网关轻量入口回来的原始素材（未压缩）。 */
+export interface ManualEnrichmentMaterial {
+  text: string;
+  url: string;
+  publisher: string;
+  kind: ManualEvidenceKind;
+}
+
+/** 落进 `extra.manual_evidence_source` 的来源记录，供排查与将来在卡片上标注来源。 */
+export interface ManualEvidenceSource {
+  url: string;
+  publisher: string;
+  fetched_at: string;
+  kind: ManualEvidenceKind;
+}
+
+export interface ManualLeadEnrichmentResult {
+  text: string;
+  source: ManualEvidenceSource;
+}
+
+export interface ManualLeadEnrichmentAdapters {
+  /**
+   * 一次调用覆盖三条取材路径：给 `url` 就抓那一条（X status 链接由网关自己转推文接口），
+   * 给 `query` 就先搜再抓第一条能抓到的结果。抓不到回 `null`。
+   */
+  fetchPlainText(input: { url: string } | { query: string }): Promise<ManualEnrichmentMaterial | null>;
+  /** 把正文压成 2–4 句中文背景。压不出来回 `null`。 */
+  compress(material: ManualEnrichmentMaterial): Promise<string | null>;
+}
+
+export function clampEnrichmentText(value: unknown): string {
+  const collapsed = String(value ?? '').replace(/\s+/g, ' ').trim();
+  return Array.from(collapsed).slice(0, MANUAL_EVIDENCE_TEXT_MAX_CODE_POINTS).join('');
+}
+
+/**
+ * 已有签名证据的线索（`llm_verified` / `source_support_v1` / 有证据的 `owner_vouched_v1`）
+ * 不触发补充：它们的 `ai_summary_zh` 本来就是核验过的正文摘要，再补一段只会重复。
+ */
+export function manualLeadNeedsEnrichment(lead: { evidence?: readonly unknown[] }): boolean {
+  return (lead.evidence?.length || 0) === 0;
+}
+
+/** 让整轮取材受一个总预算约束。超时不是错误，是「这次不补」。 */
+function withBudget<T>(work: Promise<T>, budgetMs: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), budgetMs);
+  });
+  return Promise.race([work, expiry]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
+/**
+ * 取一段背景素材。**任何失败都回 `null`** —— 调用方据此什么都不写。
+ */
+export async function collectManualLeadEnrichment(
+  clue: { url: string | null; text: string },
+  adapters: ManualLeadEnrichmentAdapters,
+  opts: { now?: number; budgetMs?: number } = {},
+): Promise<ManualLeadEnrichmentResult | null> {
+  const now = opts.now ?? Date.now();
+  const budgetMs = opts.budgetMs ?? MANUAL_LEAD_ENRICHMENT_BUDGET_MS;
+  const url = String(clue.url || '').trim();
+  const text = String(clue.text || '').trim();
+  // 既没链接也没文字就没有任何取材依据，连网关都不必打扰。
+  if (!url && !text) return null;
+  const request = url ? { url } : { query: text };
+
+  const work = (async (): Promise<ManualLeadEnrichmentResult | null> => {
+    const material = await adapters.fetchPlainText(request);
+    if (!material || !String(material.text || '').trim()) return null;
+    const compressed = clampEnrichmentText(await adapters.compress(material));
+    if (!compressed) return null;
+    return {
+      text: compressed,
+      source: {
+        url: String(material.url || url || ''),
+        publisher: String(material.publisher || '').trim() || '未知来源',
+        fetched_at: new Date(now).toISOString(),
+        kind: material.kind,
+      },
+    };
+  })();
+
+  try {
+    return await withBudget(work.catch((error) => {
+      console.warn('[manual-lead-enrichment] collect failed:', String((error as Error)?.message || error).slice(0, 200));
+      return null;
+    }), budgetMs);
+  } catch {
+    return null;
+  }
+}
+
+export type ManualLeadEnrichmentOutcome = 'skipped' | 'written' | 'empty' | 'failed';
+
+/**
+ * 幂等地把补充素材写进候选对应的 items 行。
+ *
+ * `json_set` 只改这两个键，其余 `extra` 内容与所有被门禁绑定的列一字不动；WHERE 上的
+ * `manual_evidence_text IS NULL` 保证重复触发不会覆盖已有素材（幂等的第二道，第一道是
+ * 取材之前的那次读）。
+ */
+export async function runManualLeadEnrichment(
+  env: Env,
+  input: { leadId: string; itemId: string; url: string | null; text: string },
+  adapters: ManualLeadEnrichmentAdapters,
+  opts: { now?: number; budgetMs?: number } = {},
+): Promise<ManualLeadEnrichmentOutcome> {
+  try {
+    const row = await env.DB.prepare(
+      `/* manual_lead:enrichment_existing */ SELECT extra FROM items WHERE id = ?`,
+    ).bind(input.itemId).first<{ extra: string | null }>();
+    if (!row) return 'skipped';
+    if (existingEnrichmentText(row.extra)) return 'skipped';
+
+    const collected = await collectManualLeadEnrichment(input, adapters, opts);
+    if (!collected) return 'empty';
+
+    await env.DB.prepare(
+      `/* manual_lead:enrichment_write */ UPDATE items
+       SET extra = json_set(
+         CASE WHEN extra IS NOT NULL AND json_valid(extra) = 1 THEN extra ELSE '{}' END,
+         '$.manual_evidence_text', ?,
+         '$.manual_evidence_source', json(?))
+       WHERE id = ?
+         AND json_extract(
+           CASE WHEN extra IS NOT NULL AND json_valid(extra) = 1 THEN extra ELSE '{}' END,
+           '$.manual_evidence_text') IS NULL`,
+    ).bind(collected.text, JSON.stringify(collected.source), input.itemId).run();
+    return 'written';
+  } catch (error) {
+    // 入池已经完成了。补充失败只是少一段背景，绝不能变成 owner 那次确认的失败。
+    console.warn(
+      `[manual-lead-enrichment] lead=${input.leadId} failed:`,
+      String((error as Error)?.message || error).slice(0, 200),
+    );
+    return 'failed';
+  }
+}
+
+function existingEnrichmentText(extra: string | null): boolean {
+  if (!extra) return false;
+  try {
+    const parsed = JSON.parse(extra) as Record<string, unknown>;
+    return typeof parsed?.manual_evidence_text === 'string' && parsed.manual_evidence_text.trim() !== '';
+  } catch {
+    return false;
+  }
+}

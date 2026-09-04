@@ -46,6 +46,7 @@ import {
   loadVerifiedManualCandidateProof,
 } from './manual-news-leads-verification';
 import { ManualNewsProviderError } from './manual-news-provider';
+import { runManualLeadEnrichment } from './manual-lead-enrichment';
 import { authorizeFormalNewsSet } from './news-source-policy';
 import {
   durableConfirmedManualCandidates,
@@ -5035,5 +5036,204 @@ describe('manual news owner asserted', () => {
       `blog:manual:${first.lead_id}`,
       `blog:manual:${second.leadId}`,
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 补录线索的正文补充（enrichment，2026-09-04）
+//
+// 入池已经完成之后才跑。这一组用例守的是「补充不能反过来伤到已经入池的候选」：
+// 门禁仍放行、sanitize 连续两次都不判 drift、抓取抛异常时候选完好。
+// ---------------------------------------------------------------------------
+describe('manual lead enrichment', () => {
+  const material = {
+    text: 'OpenAI 今天发布 Astra，面向企业客户开放。',
+    url: 'https://openai.com/index/astra/',
+    publisher: 'OpenAI',
+    kind: 'document' as const,
+  };
+
+  async function assertedCandidate(inputUrl = '') {
+    const state = await stuckZeroEvidenceFixture(inputUrl);
+    const frozen = await frozenAssertedBatch(state);
+    const result = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT, url: inputUrl,
+      expected_batch_revision: frozen.batch.batch_revision,
+    }, 'enrichment-entry', 100);
+    expect(result.ok).toBe(true);
+    const leadId = result.ok ? result.lead.id : '';
+    return { state, leadId, itemId: `blog:manual:${leadId}`, frozen };
+  }
+
+  function itemExtraOf(state: { db: SqliteD1 }, itemId: string): Record<string, unknown> {
+    const row = state.db.sqlite.prepare('SELECT extra FROM items WHERE id = ?')
+      .get(itemId) as { extra: string | null };
+    return JSON.parse(row.extra || '{}') as Record<string, unknown>;
+  }
+
+  test('把素材写进两个新 extra 键,门禁仍放行且 sanitize 不判 drift', async () => {
+    const { state, leadId, itemId, frozen } = await assertedCandidate('https://openai.com/index/astra/');
+    const before = itemExtraOf(state, itemId);
+
+    await expect(runManualLeadEnrichment(state.env, {
+      leadId, itemId, url: 'https://openai.com/index/astra/', text: ASSERTED_STATEMENT,
+    }, {
+      fetchPlainText: async () => material,
+      compress: async () => 'OpenAI 发布 Astra，面向企业客户开放。这是该系列的第一款产品。',
+    }, { now: 1_757_000_000_000 })).resolves.toBe('written');
+
+    const after = itemExtraOf(state, itemId);
+    expect(after.manual_evidence_text).toBe('OpenAI 发布 Astra，面向企业客户开放。这是该系列的第一款产品。');
+    expect(after.manual_evidence_source).toEqual({
+      url: 'https://openai.com/index/astra/',
+      publisher: 'OpenAI',
+      fetched_at: new Date(1_757_000_000_000).toISOString(),
+      kind: 'document',
+    });
+    // 被门禁绑定的键一字未动:owner 的那句话仍是卡片显示的主张。
+    expect(after.ai_summary_zh).toBe(before.ai_summary_zh);
+    expect(after.title_zh).toBe(before.title_zh);
+    expect(after.event_fingerprint).toBe(before.event_fingerprint);
+    expect(after.manual_lead).toEqual(before.manual_lead);
+    expect(after.source_company).toBe(before.source_company);
+    // 被门禁绑定的列同样一字未动。
+    expect(state.db.sqlite.prepare(
+      'SELECT title, content, content_translated, author, url, published_at FROM items WHERE id = ?',
+    ).get(itemId)).toEqual({
+      title: ASSERTED_STATEMENT, content: ASSERTED_STATEMENT, content_translated: ASSERTED_STATEMENT,
+      author: '手工补录', url: 'https://openai.com/index/astra/', published_at: null,
+    });
+
+    await expect(authorizeFormalNewsSet(
+      state.env, '2026-08-28', [itemId], 'enrichment-gate',
+    )).resolves.toMatchObject({
+      allowed_ids: [itemId],
+      decisions: [{ allowed: true, code: 'ALLOW_VERIFIED_MANUAL' }],
+    });
+
+    const first = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 100);
+    const second = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 100);
+    expect(first.changed).toBe(false);
+    expect(second.changed).toBe(false);
+    expect(second.batch.batch_revision).toBe(frozen.batch.batch_revision + 1);
+  });
+
+  test('抓取抛异常时候选完好,extra 一个字都不写脏', async () => {
+    const { state, leadId, itemId } = await assertedCandidate();
+    const before = itemExtraOf(state, itemId);
+
+    await expect(runManualLeadEnrichment(state.env, {
+      leadId, itemId, url: null, text: ASSERTED_STATEMENT,
+    }, {
+      fetchPlainText: async () => { throw new Error('trusted_gateway_http_502'); },
+      compress: async () => '不该被调用',
+    }, { now: 100 })).resolves.toBe('empty');
+
+    expect(itemExtraOf(state, itemId)).toEqual(before);
+    await expect(authorizeFormalNewsSet(
+      state.env, '2026-08-28', [itemId], 'enrichment-fetch-failed-gate',
+    )).resolves.toMatchObject({ allowed_ids: [itemId] });
+    expect((await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 100)).changed).toBe(false);
+  });
+
+  test('搜索抓不到结果时同样什么都不写', async () => {
+    const { state, leadId, itemId } = await assertedCandidate();
+    const before = itemExtraOf(state, itemId);
+
+    await expect(runManualLeadEnrichment(state.env, {
+      leadId, itemId, url: null, text: ASSERTED_STATEMENT,
+    }, { fetchPlainText: async () => null, compress: async () => '不该被调用' }, { now: 100 }))
+      .resolves.toBe('empty');
+
+    expect(itemExtraOf(state, itemId)).toEqual(before);
+  });
+
+  test('超时放弃时什么都不写', async () => {
+    const { state, leadId, itemId } = await assertedCandidate();
+    const before = itemExtraOf(state, itemId);
+
+    await expect(runManualLeadEnrichment(state.env, {
+      leadId, itemId, url: 'https://openai.com/index/astra/', text: ASSERTED_STATEMENT,
+    }, {
+      fetchPlainText: () => new Promise(() => {}),
+      compress: async () => '不该被调用',
+    }, { now: 100, budgetMs: 5 })).resolves.toBe('empty');
+
+    expect(itemExtraOf(state, itemId)).toEqual(before);
+  });
+
+  test('重复触发不重复写:第二次直接跳过,不再调用网关', async () => {
+    const { state, leadId, itemId } = await assertedCandidate();
+    let calls = 0;
+    const adapters = {
+      fetchPlainText: async () => { calls += 1; return material; },
+      compress: async () => `第 ${calls} 次的背景。`,
+    };
+
+    await expect(runManualLeadEnrichment(state.env, {
+      leadId, itemId, url: null, text: ASSERTED_STATEMENT,
+    }, adapters, { now: 100 })).resolves.toBe('written');
+    await expect(runManualLeadEnrichment(state.env, {
+      leadId, itemId, url: null, text: ASSERTED_STATEMENT,
+    }, adapters, { now: 200 })).resolves.toBe('skipped');
+
+    expect(calls).toBe(1);
+    expect(itemExtraOf(state, itemId).manual_evidence_text).toBe('第 1 次的背景。');
+  });
+
+  test('两次触发撞在一起时,后到的那次写不进去(SQL 那道幂等)', async () => {
+    // 两次都先读到「还没有素材」再各自去取材:JS 那道早退拦不住,靠 UPDATE 的
+    // WHERE manual_evidence_text IS NULL 保证只有先到的那次落库。
+    const { state, leadId, itemId } = await assertedCandidate();
+    let releaseSecond: () => void = () => {};
+    const secondFetched = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    let readSecond: () => void = () => {};
+    const secondRead = new Promise<void>((resolve) => { readSecond = resolve; });
+
+    const second = runManualLeadEnrichment(state.env, {
+      leadId, itemId, url: null, text: ASSERTED_STATEMENT,
+    }, {
+      fetchPlainText: async () => { readSecond(); await secondFetched; return material; },
+      compress: async () => '后到的背景。',
+    }, { now: 200 });
+    await secondRead;
+
+    await expect(runManualLeadEnrichment(state.env, {
+      leadId, itemId, url: null, text: ASSERTED_STATEMENT,
+    }, {
+      fetchPlainText: async () => material,
+      compress: async () => '先到的背景。',
+    }, { now: 100 })).resolves.toBe('written');
+
+    releaseSecond();
+    await expect(second).resolves.toBe('written');
+    expect(itemExtraOf(state, itemId).manual_evidence_text).toBe('先到的背景。');
+  });
+
+  test('候选行不存在时安静跳过,不炸也不建行', async () => {
+    const { state } = await assertedCandidate();
+    await expect(runManualLeadEnrichment(state.env, {
+      leadId: 'ml-20260828-deadbeefdead', itemId: 'blog:manual:ml-20260828-deadbeefdead',
+      url: null, text: ASSERTED_STATEMENT,
+    }, { fetchPlainText: async () => material, compress: async () => '背景。' }, { now: 100 }))
+      .resolves.toBe('skipped');
+    expect(state.db.sqlite.prepare(
+      'SELECT COUNT(*) AS n FROM items WHERE id = ?',
+    ).get('blog:manual:ml-20260828-deadbeefdead')).toEqual({ n: 0 });
+  });
+
+  test('数据库读失败时回 failed,异常不外泄给确认流程', async () => {
+    const { state, leadId, itemId } = await assertedCandidate();
+    const brokenEnv = {
+      ...state.env,
+      DB: {
+        prepare() { throw new Error('D1_ERROR: too many subrequests'); },
+      },
+    } as unknown as Env;
+
+    await expect(runManualLeadEnrichment(brokenEnv, {
+      leadId, itemId, url: null, text: ASSERTED_STATEMENT,
+    }, { fetchPlainText: async () => material, compress: async () => '背景。' }, { now: 100 }))
+      .resolves.toBe('failed');
   });
 });
