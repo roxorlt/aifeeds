@@ -5091,6 +5091,11 @@ describe('news review sanitize manual candidate fast path', () => {
       .toEqual([firstLeadId, secondLeadId]);
     expect(sanitized.manual_verifications.map((entry) => entry.verification.policy_version))
       .toEqual(['owner_asserted_v1', 'owner_asserted_v1']);
+    // 没漂移就顺带把已发布选择交出去，读路径不必再查一遍授权。
+    expect(Array.isArray(sanitized.published_selected_ids)).toBe(true);
+    expect(sanitized.published_selected_ids).toEqual(
+      sanitized.batch.applied_selected_ids ?? sanitized.batch.default_selected_ids,
+    );
   });
 
   test('单条签名被改：只有那一条走完整验签并被剔除，其余原样留下', async () => {
@@ -5116,6 +5121,8 @@ describe('news review sanitize manual candidate fast path', () => {
       WHERE lead_id = ?`).get(secondLeadId)).toEqual({
       status: 'invalidated', reason: 'verification_integrity_invalid',
     });
+    // 批次已经换了一行，交出去的就不再是这一行的已发布选择，必须让调用方重查。
+    expect(sanitized.published_selected_ids).toBeNull();
   });
 
   test('批次快照与签名投影对不上时，也落到完整重算', async () => {

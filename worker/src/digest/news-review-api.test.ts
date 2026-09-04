@@ -17,6 +17,7 @@ vi.mock('./news-review', () => ({
   newsReviewSecret: vi.fn((env) => env.DAILY_NEWS_REVIEW_SECRET || ''),
   sanitizeCurrentNewsReviewBatch: vi.fn(),
   submitNewsReviewSelection: vi.fn(),
+  timedNewsReviewStep: vi.fn(async (_step: string, run: () => Promise<unknown>) => run()),
   verifyNewsReviewTokenSignature: vi.fn(async () => true),
 }));
 vi.mock('./codex-push', () => ({
@@ -461,7 +462,52 @@ describe('daily news review API', () => {
     expect(payload.review_url).toBe(
       `https://ai-feeds.cc/aifeeds/latest/?review_date=2026-07-30&review_batch=${batch.batch_id}&review_token=newer-token#news-review`,
     );
-    expect(getActiveNewsReviewBatch).toHaveBeenCalledWith(expect.anything(), '2026-07-30');
+    // 当前批次这一行由 sanitize 自己读，外层不再重复读一遍。
+    expect(getActiveNewsReviewBatch).not.toHaveBeenCalled();
+    expect(sanitizeCurrentNewsReviewBatch).toHaveBeenCalledWith(expect.anything(), '2026-07-30', expect.any(Number));
+  });
+
+  test('解析日期时没有当前批次仍然回 404', async () => {
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockRejectedValue(new Error('news_review_batch_not_found'));
+
+    const response = await handleDailyNewsReviewApi(
+      currentBatchRequest(), env(), Date.parse('2026-07-30T08:00:00Z'),
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ ok: false, error: 'review_batch_not_found' });
+  });
+
+  test('解析日期时 sanitize 的其他错误不被吞掉', async () => {
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockRejectedValue(new Error('news_review_batch_cas_failed'));
+
+    await expect(handleDailyNewsReviewApi(
+      currentBatchRequest(), env(), Date.parse('2026-07-30T08:00:00Z'),
+    )).rejects.toThrow('news_review_batch_cas_failed');
+  });
+
+  test('批次没漂移时复用 sanitize 已算好的已发布选择，不再查一遍', async () => {
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
+      batch, changed: false, dropped_ids: [], published_selected_ids: ['news-3', 'news-1'],
+    } as never);
+
+    const response = await handleDailyNewsReviewApi(
+      currentBatchRequest(), env(), Date.parse('2026-07-30T08:00:00Z'),
+    );
+    const payload = await response.json<Record<string, unknown>>();
+
+    expect(payload.published_selected_ids).toEqual(['news-3', 'news-1']);
+    expect(getPublishedNewsReviewSelection).not.toHaveBeenCalled();
+  });
+
+  test('批次漂移过就照旧查一遍已发布选择', async () => {
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
+      batch, changed: true, dropped_ids: [], published_selected_ids: null,
+    } as never);
+
+    await handleDailyNewsReviewApi(currentBatchRequest(), env(), Date.parse('2026-07-30T08:00:00Z'));
+
+    expect(getPublishedNewsReviewSelection).toHaveBeenCalled();
   });
 
   test('解析日期这一次请求就带回正文，页面不必再发第二次', async () => {

@@ -10,6 +10,7 @@ import {
   newsReviewSecret,
   sanitizeCurrentNewsReviewBatch,
   submitNewsReviewSelection,
+  timedNewsReviewStep,
   verifyNewsReviewTokenSignature,
   type NewsReviewBatch,
 } from './news-review';
@@ -150,6 +151,8 @@ async function projectNewsReviewBatch(
   now: number,
   requestedBatch: NewsReviewBatch,
   active: NewsReviewBatch,
+  /** sanitize 已经算过的已发布选择（批次没漂移时才有），有就不再查一遍。 */
+  preloadedPublishedSelection: string[] | null = null,
 ): Promise<Record<string, unknown>> {
   const requestedIsActive = requestedBatch.is_current && requestedBatch.lineage_id === date;
   let batch = requestedIsActive ? active : requestedBatch;
@@ -178,23 +181,34 @@ async function projectNewsReviewBatch(
       ])],
     };
   }
-  let [publishedSelectedIds, editorialState, finalizeState] = await Promise.all([
-    getPublishedNewsReviewSelection(env, date, batch),
-    batch.edit_revision > 0 && batch.applied_selected_ids?.length
-      ? getDailyStageState(env, date, 'editorial')
-      : Promise.resolve(null),
-    batch.edit_revision > 0 && batch.applied_selected_ids?.length
-      ? getDailyStageState(env, date, 'finalize')
-      : Promise.resolve(null),
-  ]);
+  const authorizationBatch = requestedIsActive ? active : requestedBatch;
+  // 三项读互不依赖，对外授权也只看 authorizationBatch，一起发起省两轮往返。
+  const [[publishedSelection, ...stageStates], outwardAuthorization] = await timedNewsReviewStep(
+    'api.projection.reads',
+    () => Promise.all([
+      Promise.all([
+        // 批次没漂移时 sanitize 刚算过同一份，直接用，省掉一整轮授权往返。
+        requestedIsActive && preloadedPublishedSelection
+          ? Promise.resolve(preloadedPublishedSelection)
+          : getPublishedNewsReviewSelection(env, date, batch),
+        batch.edit_revision > 0 && batch.applied_selected_ids?.length
+          ? getDailyStageState(env, date, 'editorial')
+          : Promise.resolve(null),
+        batch.edit_revision > 0 && batch.applied_selected_ids?.length
+          ? getDailyStageState(env, date, 'finalize')
+          : Promise.resolve(null),
+      ]),
+      authorizeNewsReviewBatchSnapshot(
+        env, date, authorizationBatch, authorizationBatch.candidate_ids, 'review_api_final_projection',
+      ),
+    ]),
+  );
+  let publishedSelectedIds = publishedSelection;
+  let [editorialState, finalizeState] = stageStates;
   if (!requestedIsActive || !editorialBindsActiveReview(editorialState, active)) {
     editorialState = null;
     finalizeState = null;
   } else if (!finalizeBindsEditorialTarget(finalizeState, editorialState)) finalizeState = null;
-  const authorizationBatch = requestedIsActive ? active : requestedBatch;
-  const outwardAuthorization = await authorizeNewsReviewBatchSnapshot(
-    env, date, authorizationBatch, authorizationBatch.candidate_ids, 'review_api_final_projection',
-  );
   const outwardAllowed = new Set(outwardAuthorization.allowed_ids);
   const outwardHidden = new Set(batch.candidate_ids.filter((id) => !outwardAllowed.has(id)));
   if (outwardHidden.size) {
@@ -279,9 +293,21 @@ export async function handleDailyNewsReviewApi(
     return response({ ok: false, error: 'invalid_review_reference' }, 400);
   }
   if (request.method === 'GET' && !batchId && !token) {
-    const existing = await getActiveNewsReviewBatch(env, date);
-    if (!existing) return response({ ok: false, error: 'review_batch_not_found' }, 404);
-    const active = (await sanitizeCurrentNewsReviewBatch(env, date, now)).batch;
+    // sanitize 自己就要读一遍当前批次，外层不再重复读同一行；没有当前批次时
+    // 它抛 news_review_batch_not_found，等价于原来的 404。
+    let sanitized;
+    try {
+      sanitized = await timedNewsReviewStep(
+        'api.resolve.sanitize', () => sanitizeCurrentNewsReviewBatch(env, date, now),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message === 'news_review_batch_not_found') {
+        return response({ ok: false, error: 'review_batch_not_found' }, 404);
+      }
+      throw error;
+    }
+    const active = sanitized.batch;
     const activeToken = await createNewsReviewToken(newsReviewSecret(env), date, active.batch_id);
     // 正文跟着解析结果一起回：页面点一次「打开所选日期」原本要串行发两次请求，
     // 两次各跑一遍完整性修复例程。既有字段一个不动，只往后追加。
@@ -291,7 +317,9 @@ export async function handleDailyNewsReviewApi(
       batch_id: active.batch_id,
       review_url: reviewLink(date, active.batch_id, activeToken),
       token: activeToken,
-      ...await projectNewsReviewBatch(env, date, now, active, active),
+      ...await projectNewsReviewBatch(
+        env, date, now, active, active, sanitized.published_selected_ids ?? null,
+      ),
     });
   }
   if (!/^nr-\d{8}-[a-f0-9]{12}$/.test(batchId)) {
@@ -304,11 +332,15 @@ export async function handleDailyNewsReviewApi(
   if (request.method === 'GET') {
     const requestedBatch = await getNewsReviewBatch(env, date, batchId);
     if (!requestedBatch) return response({ ok: false, error: 'review_batch_not_found' }, 404);
-    const sanitized = await sanitizeCurrentNewsReviewBatch(env, date, now);
+    const sanitized = await timedNewsReviewStep(
+      'api.detail.sanitize', () => sanitizeCurrentNewsReviewBatch(env, date, now),
+    );
     return response({
       ok: true,
       date,
-      ...await projectNewsReviewBatch(env, date, now, requestedBatch, sanitized.batch),
+      ...await projectNewsReviewBatch(
+        env, date, now, requestedBatch, sanitized.batch, sanitized.published_selected_ids ?? null,
+      ),
     });
   }
 
