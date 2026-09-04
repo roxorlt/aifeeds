@@ -1,7 +1,9 @@
 import type { Env } from '../index';
+import { timedNewsReviewStep } from './news-review-timing';
 import { FEED_REGISTRY } from '../feeds/registry';
 import type { EditorialType, FeedDef } from '../feeds/types';
 import {
+  loadSignedManualCandidateSnapshots,
   loadVerifiedManualCandidateProof,
   type PersistedManualVerificationRow,
 } from './manual-news-leads-verification';
@@ -365,11 +367,74 @@ function itemGuardSnapshot(row: ItemRow): FormalNewsGuardExpected['item'] {
   };
 }
 
+
+/**
+ * 只读用途白名单：这些调用的结果只用来渲染一次读响应，不决定任何不可逆的对外动作，
+ * 所以手工候选可以走批量廉价复核（`loadSignedManualCandidateSnapshots`）而不是逐条完整
+ * 重算。**显式登记制**：没列在这里的 purpose（包括将来新加的）一律走完整验签。
+ *
+ * 判据是「这次调用的结果会不会决定一次不可逆的对外动作」。冻结批次、提交选择、finalize、
+ * push、邮件投递、静态页发布、以及 sanitize 里那些会引出批次改写的判定，全部不在这里。
+ */
+export const READ_ONLY_FORMAL_NEWS_PURPOSES: ReadonlySet<string> = new Set([
+  'review_api_final_projection',
+  'historical_review_api',
+  'daily_api_snapshot',
+  'daily_api_snapshot_final_projection',
+]);
+
+const MANUAL_ITEM_ID_PREFIX = 'blog:manual:';
+
+export interface ManualCandidateFastAuthorization {
+  lead: ManualLeadAuthorizationRow;
+  record: PersistedManualVerificationRow;
+}
+
+function manualLeadRowFromProofRecord(
+  record: PersistedManualVerificationRow,
+): ManualLeadAuthorizationRow | null {
+  if (typeof record.review_date !== 'string'
+    || typeof record.lead_status !== 'string'
+    || typeof record.lead_version !== 'number'
+    || record.lead_confirmed_at === undefined
+    || record.lead_confirmed_at === null) return null;
+  return {
+    id: record.lead_id,
+    review_date: record.review_date,
+    status: record.lead_status,
+    confirmed_at: record.lead_confirmed_at,
+    version: record.lead_version,
+  };
+}
+
+/**
+ * 只读用途下，一条 SQL 把这一批里全部手工候选的线索行与 active proof 行取回来并验签。
+ * 拿不回来的（缺行、签名对不上、旧策略、线索行字段不全）不放进 map —— 调用点会对**这几条**
+ * 回退到 `loadVerifiedManualCandidateProof` 完整重算，判定结果与不分流时逐字一致。
+ */
+async function preloadManualCandidateAuthorizations(
+  env: Env,
+  candidateIds: readonly string[],
+): Promise<Map<string, ManualCandidateFastAuthorization>> {
+  const preloaded = new Map<string, ManualCandidateFastAuthorization>();
+  const leadIds = candidateIds
+    .filter((id) => id.startsWith(MANUAL_ITEM_ID_PREFIX))
+    .map((id) => id.slice(MANUAL_ITEM_ID_PREFIX.length));
+  if (!leadIds.length) return preloaded;
+  const signed = await loadSignedManualCandidateSnapshots(env, leadIds);
+  for (const [leadId, snapshot] of signed) {
+    const lead = manualLeadRowFromProofRecord(snapshot.record);
+    if (lead) preloaded.set(leadId, { lead, record: snapshot.record });
+  }
+  return preloaded;
+}
+
 async function authorizeManualItem(
   env: Env,
   reviewDate: string,
   row: ItemRow,
   extra: Record<string, unknown>,
+  preloaded: ReadonlyMap<string, ManualCandidateFastAuthorization> | null,
 ): Promise<FormalNewsDecision> {
   const itemPrefix = 'blog:manual:';
   const leadId = row.requested_id.startsWith(itemPrefix)
@@ -387,7 +452,8 @@ async function authorizeManualItem(
     || !Array.isArray((manualIdentity as Record<string, unknown>).evidence_ids)) {
     return deny(row.requested_id, 'DENY_MANUAL_IDENTITY_MISMATCH');
   }
-  const lead = await env.DB.prepare(
+  const fast = preloaded?.get(leadId) || null;
+  const lead = fast ? fast.lead : await env.DB.prepare(
     `SELECT id, review_date, status, confirmed_at, version
        FROM manual_news_leads WHERE id = ?`,
   ).bind(leadId).first<ManualLeadAuthorizationRow>();
@@ -397,8 +463,8 @@ async function authorizeManualItem(
     || lead.confirmed_at === null) {
     return deny(row.requested_id, 'DENY_UNVERIFIED_MANUAL');
   }
-  const verified = await loadVerifiedManualCandidateProof(env, leadId);
-  if (!verified || verified.record.status !== 'active' || verified.record.lead_id !== leadId) {
+  const record = fast ? fast.record : (await loadVerifiedManualCandidateProof(env, leadId))?.record;
+  if (!record || record.status !== 'active' || record.lead_id !== leadId) {
     return deny(row.requested_id, 'DENY_UNVERIFIED_MANUAL');
   }
   return {
@@ -406,15 +472,15 @@ async function authorizeManualItem(
     allowed: true,
     code: 'ALLOW_VERIFIED_MANUAL',
     lead_id: leadId,
-    verification_id: verified.record.verification_id,
-    guard_fingerprint: manualGuardFingerprint(row, lead, verified.record),
+    verification_id: record.verification_id,
+    guard_fingerprint: manualGuardFingerprint(row, lead, record),
     guard_snapshot: {
       requested_index: row.requested_index,
       item_id: row.requested_id,
       kind: 'manual',
       item: itemGuardSnapshot(row),
       lead,
-      verification: verified.record,
+      verification: record,
     },
   };
 }
@@ -768,20 +834,24 @@ async function collectFormalNewsPreflight(
   env: Env,
   reviewDate: string,
   candidateIds: readonly string[],
+  preloaded: ReadonlyMap<string, ManualCandidateFastAuthorization> | null = null,
 ): Promise<FormalNewsAuthorizationResult> {
   const ids = [...candidateIds];
   if (!ids.length) return { allowed_ids: [], decisions: [] };
   const descriptors = registryDescriptors();
   const descriptorById = new Map(descriptors.map((entry) => [entry.id, entry]));
-  const items = await loadRequestedItems(env, ids);
-  const scheduledIds = items.filter((row) => {
-    if (!row.id) return false;
-    const parsed = strictObject(row.extra);
-    return !manualLooking(row, parsed.ok ? parsed.value : {});
-  }).map((row) => row.requested_id);
-  const scheduledRows = await loadScheduledAuthorizationRows(
-    env, scheduledIds, JSON.stringify(descriptors),
-  );
+  // 两条查询原本是串行的：先取回 items，再挑出非手工的那批去做注册表 / 源站联结。
+  // 但 scheduled_join 本身就是逐 id 的 LEFT JOIN，直接收全量 id 结果完全一样 ——
+  // 手工 id 只会多带回一行注册表 / 源站全为 NULL 的记录，下面的循环对手工行根本不查
+  // scheduledById。于是两条查询没有数据依赖，并发发起省一整轮 D1 往返
+  //（prod 实测单轮往返约 500ms，而这两条 SQL 服务端执行各只有几毫秒）。
+  const [items, scheduledRows] = await Promise.all([
+    timedNewsReviewStep('authorize.preflight.items', () => loadRequestedItems(env, ids)),
+    timedNewsReviewStep(
+      'authorize.preflight.scheduled_join',
+      () => loadScheduledAuthorizationRows(env, ids, JSON.stringify(descriptors)),
+    ),
+  ]);
   const scheduledById = new Map<string, AuthorizationRow[]>();
   for (const row of scheduledRows) {
     const queue = scheduledById.get(row.requested_id) || [];
@@ -817,7 +887,7 @@ async function collectFormalNewsPreflight(
       continue;
     }
     if (manualLooking(row, extra)) {
-      decisions.push(await authorizeManualItem(env, reviewDate, row, extra));
+      decisions.push(await authorizeManualItem(env, reviewDate, row, extra, preloaded));
       continue;
     }
     const feedId = typeof extra.feed_id === 'string' ? extra.feed_id : '';
@@ -885,7 +955,15 @@ export async function authorizeFormalNewsSet(
       },
     };
   }
-  const early = await collectFormalNewsPreflight(env, reviewDate, candidateIds);
+  // 只读用途才分流；写入 / 发布 / 投递以及没登记过的 purpose 一律走完整验签。
+  const preloaded = READ_ONLY_FORMAL_NEWS_PURPOSES.has(_purpose)
+    ? await timedNewsReviewStep(
+      'authorize.manual_preload', () => preloadManualCandidateAuthorizations(env, candidateIds),
+    )
+    : null;
+  const early = await timedNewsReviewStep(
+    'authorize.preflight', () => collectFormalNewsPreflight(env, reviewDate, candidateIds, preloaded),
+  );
   const earlyAllowed = early.decisions.filter((decision) => decision.allowed);
   if (!earlyAllowed.length) return early;
   const staleIndexes = new Set<number>();
@@ -897,19 +975,28 @@ export async function authorizeFormalNewsSet(
       continue;
     }
     if (snapshot.kind === 'manual') {
+      // 只读用途下这一份就是上面批量复核拿回来的同一行，等价于「preflight 之后没变过」；
+      // 完整验签那一侧照旧重新载一遍，抓 preflight 与最终守卫之间被作废的 proof。
       const refreshed = snapshot.lead
-        ? await loadVerifiedManualCandidateProof(env, snapshot.lead.id)
+        ? (preloaded?.get(snapshot.lead.id)?.record
+          ?? (await loadVerifiedManualCandidateProof(env, snapshot.lead.id))?.record
+          ?? null)
         : null;
-      if (!refreshed?.record || !snapshot.verification
-        || !sameManualProof(snapshot.verification, refreshed.record)) {
+      if (!refreshed || !snapshot.verification
+        || !sameManualProof(snapshot.verification, refreshed)) {
         staleIndexes.add(snapshot.requested_index);
         continue;
       }
     }
     expectedRows.push(snapshot);
   }
+  const registryBuildStarted = Date.now();
   const registryJson = buildFormalNewsRegistryJson();
-  const guardedRows = await executeFormalNewsFinalGuard(env, reviewDate, expectedRows, registryJson);
+  console.log(`[news-review-timing] authorize.registry_json ${Date.now() - registryBuildStarted}ms`);
+  const guardedRows = await timedNewsReviewStep(
+    'authorize.final_guard',
+    () => executeFormalNewsFinalGuard(env, reviewDate, expectedRows, registryJson),
+  );
   const guardByRequestedIndex = new Map(
     guardedRows.map((row) => [Number(row.requested_index), Number(row.guard_ok) === 1]),
   );

@@ -1,4 +1,5 @@
 import type { Env } from '../index';
+import { timedNewsReviewStep } from './news-review-timing';
 import { pushDeerMessage } from '../notifier';
 import {
   AUTOMATIC_NEWS_REVIEW_CANDIDATE_LIMIT,
@@ -18,6 +19,7 @@ import {
   type FormalNewsAuthorizationResult,
 } from './news-source-policy';
 import {
+  loadSignedManualCandidateSnapshots,
   loadVerifiedManualCandidateProof,
   MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL,
   manualVerificationSnapshotGuardBindings,
@@ -1038,6 +1040,8 @@ export async function sanitizeCurrentNewsReviewBatch(
   changed: boolean;
   dropped_ids: string[];
   manual_verifications: Array<{ lead_id: string; verification: PersistedManualVerificationRow }>;
+  /** 返回的批次没漂移时，顺带给出它的已发布选择，读路径不必再查一遍；漂移时为 null。 */
+  published_selected_ids: string[] | null;
 }> {
   return sanitizeCurrentNewsReviewBatchAttempt(env, date, now, 0);
 }
@@ -1101,6 +1105,40 @@ export async function getVerifiedNewsReviewSelectionSnapshot(
   };
 }
 
+/** 手工候选校验的并发上限：够快，又不至于把 D1 一次打满。 */
+export const MANUAL_CANDIDATE_VERIFY_CONCURRENCY = 8;
+
+export type SettledTaskResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: unknown };
+
+/**
+ * 限流并发跑一组任务，结果按任务下标返回（与完成先后无关）；单个任务抛错只落在
+ * 它自己的下标上，由调用方决定在哪一步把它抛出来。
+ */
+export async function settleWithConcurrency<T>(
+  tasks: readonly (() => Promise<T>)[],
+  limit: number,
+): Promise<SettledTaskResult<T>[]> {
+  const results = new Array<SettledTaskResult<T>>(tasks.length);
+  let cursor = 0;
+  const workerCount = Math.min(Math.max(1, limit), tasks.length);
+  const workers = Array.from({ length: workerCount }, async () => {
+    for (;;) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= tasks.length) return;
+      try {
+        results[index] = { ok: true, value: await tasks[index]() };
+      } catch (error) {
+        results[index] = { ok: false, error };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 async function sanitizeCurrentNewsReviewBatchAttempt(
   env: Env,
   date: string,
@@ -1109,20 +1147,78 @@ async function sanitizeCurrentNewsReviewBatchAttempt(
   initialBatchId?: string,
   accumulatedDroppedIds: string[] = [],
 ): ReturnType<typeof sanitizeCurrentNewsReviewBatch> {
-  const current = await getActiveNewsReviewBatch(env, date);
+  const current = await timedNewsReviewStep(
+    'sanitize.active_batch_read',
+    () => getActiveNewsReviewBatch(env, date),
+  );
   if (!current) throw new Error('news_review_batch_not_found');
   const initialId = initialBatchId || current.batch_id;
   const candidates: NewsReviewCandidate[] = [];
   const droppedIds = [...accumulatedDroppedIds];
   const manualVerifications: Array<{ lead_id: string; verification: PersistedManualVerificationRow }> = [];
-  const scheduledPolicy = await readScheduledNewsItemPolicy(
-    env,
-    date,
-    current.candidates
-      .filter((candidate) => !isManualCandidateSnapshot(candidate))
-      .map((candidate) => candidate.item_id),
+  // 手工候选原本每条都要走一遍完整重算(9 次 D1 往返,prod 实测约 1.8s/条),等于把
+  // 「确认」那一步的写入门禁搬到了每次查列表上。现在改成:一次批量廉价复核拿回整批
+  // 签名快照(纯计算验 HMAC,零逐条往返),签名投影与批次快照逐字一致的直接放行;
+  // 缺行、签名过不去、或投影对不上的,才落回完整重算(仍并发发起)。
+  // 下面的循环按原下标回放,候选顺序、droppedIds 顺序、各判定分支逐字不变。
+  const manualLeadIds = current.candidates.map((candidate) => (
+    isManualCandidateSnapshot(candidate) ? manualCandidateLeadId(candidate) : null
+  ));
+  // 已发布选择的入参只有 (env, date, current)，跟下面重建候选那一路没有任何数据依赖，
+  // 所以提前发起、循环之后再收 —— prod 实测两轮授权各约 1.9s，串行等于白等一轮。
+  // 先挂一个空 catch：上面那一路先抛错时，这条不能变成未处理的 rejection
+  // （挂了 handler 之后 await 原 promise 仍会照常抛出）。
+  const publishedSelectionPending = timedNewsReviewStep(
+    'sanitize.published_selection',
+    () => getPublishedNewsReviewSelection(env, date, current),
   );
-  for (const candidate of current.candidates) {
+  publishedSelectionPending.catch(() => {});
+  // 定时候选的授权与手工候选的签名复核互不依赖，并发发起省一整轮往返。
+  const [scheduledPolicy, signedSnapshots] = await timedNewsReviewStep(
+    'sanitize.candidate_policy',
+    () => Promise.all([
+      readScheduledNewsItemPolicy(
+        env,
+        date,
+        current.candidates
+          .filter((candidate) => !isManualCandidateSnapshot(candidate))
+          .map((candidate) => candidate.item_id),
+      ),
+      loadSignedManualCandidateSnapshots(
+        env, manualLeadIds.filter((leadId): leadId is string => !!leadId),
+      ),
+    ]),
+  );
+  const verifiedByIndex = new Map<number, VerifiedManualCandidateSnapshot>();
+  const manualLookupIndexes: number[] = [];
+  manualLeadIds.forEach((leadId, index) => {
+    if (!leadId) return;
+    const signed = signedSnapshots.get(leadId);
+    const rebuilt = signed
+      ? { ...signed.candidate, origin: 'manual_lead' as const, lead_id: leadId }
+      : null;
+    // 签名投影与批次快照逐字一致 = 这条候选自确认以来没变过，读路径就此打住。
+    if (rebuilt && signed && stableJson(rebuilt) === stableJson(current.candidates[index])) {
+      verifiedByIndex.set(index, {
+        candidate: rebuilt, lead_id: leadId, verification: signed.record,
+      });
+      return;
+    }
+    manualLookupIndexes.push(index);
+  });
+  const manualLookups = manualLookupIndexes.length
+    ? await timedNewsReviewStep('sanitize.manual_full_recheck', () => settleWithConcurrency(
+      manualLookupIndexes.map((index) => () => confirmedManualCandidateById(
+        env, manualLeadIds[index] as string,
+      )),
+      MANUAL_CANDIDATE_VERIFY_CONCURRENCY,
+    ))
+    : [];
+  const manualLookupByIndex = new Map(
+    manualLookupIndexes.map((index, slot) => [index, manualLookups[slot]] as const),
+  );
+  for (let index = 0; index < current.candidates.length; index += 1) {
+    const candidate = current.candidates[index];
     if (!isManualCandidateSnapshot(candidate)) {
       // Keep the id-only guard for snapshots whose backing row has disappeared,
       // and use the batch-read shared SQL predicate whenever durable identity exists.
@@ -1133,10 +1229,11 @@ async function sanitizeCurrentNewsReviewBatchAttempt(
       }
       continue;
     }
-    const leadId = manualCandidateLeadId(candidate);
-    const snapshot = leadId
-      ? await confirmedManualCandidateById(env, leadId)
-      : null;
+    const lookup = manualLookupByIndex.get(index);
+    // 逐条串行时,前一条抛错就不会再查后一条 —— 这里把错误按原下标回放,
+    // 抛出的仍是候选顺序上第一个失败的那条。
+    if (lookup && !lookup.ok) throw lookup.error;
+    const snapshot = verifiedByIndex.get(index) || (lookup ? lookup.value : null);
     if (!snapshot) {
       droppedIds.push(candidate.item_id);
       continue;
@@ -1149,7 +1246,7 @@ async function sanitizeCurrentNewsReviewBatchAttempt(
   const candidateIds = candidates.map((candidate) => candidate.item_id);
   const available = new Set(candidateIds);
   const defaultSelected = current.default_selected_ids.filter((id) => available.has(id));
-  const publishedBefore = await getPublishedNewsReviewSelection(env, date, current);
+  const publishedBefore = await publishedSelectionPending;
   const publishedAfter = publishedBefore.filter((id) => available.has(id));
   const publishedChanged = stableJson(publishedAfter) !== stableJson(publishedBefore)
     || publishedAfter.some((id) => {
@@ -1168,6 +1265,10 @@ async function sanitizeCurrentNewsReviewBatchAttempt(
     changed: current.batch_id !== initialId,
     dropped_ids: [...new Set(droppedIds)],
     manual_verifications: manualVerifications,
+    // 没有漂移时 publishedAfter 与 publishedBefore 必然逐字相同（任何差异都会经
+    // publishedChanged → appliedSelected 变成漂移），所以这一份就是读路径要的那一份，
+    // 调用方不必再查一遍。漂移时批次已经换了一行，只能返回 null 让调用方重查。
+    published_selected_ids: [...publishedBefore],
   };
 
   const batchRevision = current.batch_revision + 1;
@@ -1255,6 +1356,7 @@ async function sanitizeCurrentNewsReviewBatchAttempt(
     changed: true,
     dropped_ids: [...new Set(droppedIds)],
     manual_verifications: manualVerifications,
+    published_selected_ids: null,
   };
 }
 
