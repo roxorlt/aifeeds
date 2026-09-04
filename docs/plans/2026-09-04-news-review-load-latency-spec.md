@@ -252,3 +252,16 @@ LAX 之间），不在查询本身。**所以能改的只有往返次数，改 S
 - prod 实测 9/4（2 条手工候选）date-only 接口耗时，以及页面一次点击的总等待时间，前后对比写进本文件。
 - 连续两次 sanitize 仍 `changed:false`（不因并发化而误判 drift 空转 bump revision）。
 - 全量 `cd worker && npm test` 与面板 `node --test workflows/aifeeds-daily/*.test.mjs` 全过。
+## 8. 落地实测（2026-09-04 下午，prod）
+
+| 阶段 | 9/4（2 条手工候选） | 9/2（0 条） | 说明 |
+|---|---|---|---|
+| 改造前 | 约 13s（两次请求各约 6.7s） | 约 5.8s（两次各约 2.9s） | 逐条验签 + 两次往返 |
+| PR #246 后 | 约 5.8s（一次请求，返回体 250B → 6.8KB） | 约 4.4s | 读路径不再逐条验签 + 一次点击一次请求 |
+| PR #247 后 | **约 3.4s** | **约 2.5–3.3s** | 两处授权并发发起 |
+
+`[news-review-timing]` 最终分布（单次 2.82s）：`sanitize.active_batch_read` 175ms；sanitize 两轮并发后 `candidate_policy` 749ms / `published_selection` 913ms → `api.resolve.sanitize` 1088ms；`api.projection.reads` 1417ms（内含 `manual_preload` 175ms、`preflight` 487ms、`final_guard` 379ms）。
+
+**剩余成本 100% 是 D1 往返延迟**：单次往返 230–490ms，一次请求约 7 次串行往返。SQL 服务端执行合计仅 13–25ms 且全程走索引（prod EXPLAIN 见 3.3 E 节）。再往下压需要 D1 读副本（Sessions API），会改变读一致性语义，对「人审顺序必须被尊重」这条不变量有影响，**未做，等 owner 拍板**。
+
+面板侧：审核解析接口透传正文（补丁 v21，整文件替换，因补丁基线与服务器分叉）与页面一次请求（render release `8743685c…` v16）均已部署，页面在下一次渲染生效。
