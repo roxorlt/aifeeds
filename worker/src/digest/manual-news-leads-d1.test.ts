@@ -5037,3 +5037,265 @@ describe('manual news owner asserted', () => {
     ]);
   });
 });
+
+// ── 读路径不再逐条重算手工候选（2026-09-04 审核区「打开所选日期」等太久）──────────
+// 验签是「确认」那一步的写入门禁；每次查列表再重算一遍，等于把 9 次 D1 往返 ×
+// 每条候选压在读路径上。现在读路径只做一次批量廉价复核，完整重算留给对不上的那几条。
+describe('news review sanitize manual candidate fast path', () => {
+  async function twoAssertedCandidates() {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+    const first = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+      expected_batch_revision: frozen.batch.batch_revision,
+    }, 'fast-path-1', 100);
+    const second = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: 'Anthropic发布Claude5',
+      expected_batch_revision: frozen.batch.batch_revision + 1,
+    }, 'fast-path-2', 101);
+    expect(first.ok && second.ok).toBe(true);
+    return {
+      state,
+      frozen,
+      firstLeadId: first.ok ? first.lead.id : '',
+      secondLeadId: second.ok ? second.lead.id : '',
+    };
+  }
+
+  function countPrepared(state: { db: SqliteD1 }, marker: string): number {
+    return state.db.preparedSql.filter((sql) => sql.includes(marker)).length;
+  }
+
+  test('快照与签名一致时，一次批量查询搞定，零次逐条完整验签', async () => {
+    const { state, firstLeadId, secondLeadId } = await twoAssertedCandidates();
+    const beforeRow = state.db.sqlite.prepare(`SELECT candidates_json, batch_revision
+      FROM daily_news_review_batches WHERE review_date = '2026-08-28' AND is_current = 1`)
+      .get() as { candidates_json: string; batch_revision: number };
+    const before = JSON.parse(beforeRow.candidates_json) as Array<Record<string, unknown>>;
+    state.db.preparedSql.length = 0;
+
+    const sanitized = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 200);
+
+    expect(countPrepared(state, 'news_review:manual_candidate_proof_bulk')).toBe(1);
+    // 完整重算的入口：一次都不许走。
+    expect(countPrepared(state, 'news_review:confirmed_manual_candidate_by_id')).toBe(0);
+    expect(countPrepared(state, 'manual_verification:policy_dispatch')).toBe(0);
+    expect(countPrepared(state, 'manual_evidence:list')).toBe(0);
+    expect(countPrepared(state, 'manual_verification:key_lineage')).toBe(0);
+    // 廉价复核不许改变结果。
+    expect(sanitized.changed).toBe(false);
+    expect(sanitized.dropped_ids).toEqual([]);
+    expect(sanitized.batch.batch_revision).toBe(beforeRow.batch_revision);
+    expect(sanitized.batch.candidates).toEqual(before);
+    expect(sanitized.manual_verifications.map((entry) => entry.lead_id))
+      .toEqual([firstLeadId, secondLeadId]);
+    expect(sanitized.manual_verifications.map((entry) => entry.verification.policy_version))
+      .toEqual(['owner_asserted_v1', 'owner_asserted_v1']);
+    // 没漂移就顺带把已发布选择交出去，读路径不必再查一遍授权。
+    expect(Array.isArray(sanitized.published_selected_ids)).toBe(true);
+    expect(sanitized.published_selected_ids).toEqual(
+      sanitized.batch.applied_selected_ids ?? sanitized.batch.default_selected_ids,
+    );
+  });
+
+  test('单条签名被改：只有那一条走完整验签并被剔除，其余原样留下', async () => {
+    const { state, firstLeadId, secondLeadId } = await twoAssertedCandidates();
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications SET hmac_sha256 = ?
+      WHERE lead_id = ? AND status = 'active'`).run('0'.repeat(64), secondLeadId);
+    state.db.preparedSql.length = 0;
+
+    const sanitized = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 200);
+
+    expect(countPrepared(state, 'news_review:manual_candidate_proof_bulk')).toBe(1);
+    // 只对不上的那一条落到完整重算。
+    expect(countPrepared(state, 'news_review:confirmed_manual_candidate_by_id')).toBe(1);
+    expect(sanitized.changed).toBe(true);
+    expect(sanitized.dropped_ids).toEqual([`blog:manual:${secondLeadId}`]);
+    expect(sanitized.batch.candidates.map((candidate) => candidate.item_id))
+      .toContain(`blog:manual:${firstLeadId}`);
+    expect(sanitized.batch.candidates.map((candidate) => candidate.item_id))
+      .not.toContain(`blog:manual:${secondLeadId}`);
+    expect(sanitized.manual_verifications.map((entry) => entry.lead_id)).toEqual([firstLeadId]);
+    // 完整重算照旧作废那份 proof。
+    expect(state.db.sqlite.prepare(`SELECT status, reason FROM manual_news_assessment_verifications
+      WHERE lead_id = ?`).get(secondLeadId)).toEqual({
+      status: 'invalidated', reason: 'verification_integrity_invalid',
+    });
+    // 批次已经换了一行，交出去的就不再是这一行的已发布选择，必须让调用方重查。
+    expect(sanitized.published_selected_ids).toBeNull();
+  });
+
+  test('批次快照与签名投影对不上时，也落到完整重算', async () => {
+    const { state, secondLeadId } = await twoAssertedCandidates();
+    // 只改批次快照里的标题：proof 行本身没动，签名照样能过，但投影对不上。
+    const row = state.db.sqlite.prepare(`SELECT candidates_json FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28' AND is_current = 1`).get() as { candidates_json: string };
+    const tampered = (JSON.parse(row.candidates_json) as Array<Record<string, unknown>>)
+      .map((candidate) => (candidate.lead_id === secondLeadId
+        ? { ...candidate, title: '被改过的标题' } : candidate));
+    state.db.sqlite.prepare(`UPDATE daily_news_review_batches SET candidates_json = ?
+      WHERE review_date = '2026-08-28' AND is_current = 1`).run(JSON.stringify(tampered));
+    state.db.preparedSql.length = 0;
+
+    const sanitized = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 200);
+
+    expect(countPrepared(state, 'news_review:confirmed_manual_candidate_by_id')).toBe(1);
+    // 完整重算拿回真正的投影，快照被改回去，批次版本 bump 一次。
+    expect(sanitized.changed).toBe(true);
+    expect(sanitized.dropped_ids).toEqual([]);
+    expect(sanitized.batch.candidates.find(
+      (candidate) => candidate.lead_id === secondLeadId,
+    )?.title).toBe('Anthropic发布Claude5');
+  });
+
+  test('多条都要完整重算时，仍然并发发起，不逐条排队', async () => {
+    const { state } = await twoAssertedCandidates();
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications
+      SET verification_key_id = 'unknown-key'`).run();
+
+    // 到齐 2 个 confirmed_manual_candidate_by_id 才放行：逐条 await 时第一条会一直卡住。
+    const barrier = state.db.pauseNextFirstCalls('news_review:confirmed_manual_candidate_by_id', 2);
+    const sanitizing = sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 200);
+    const arrival = await Promise.race([
+      barrier.entered.then(() => 'concurrent' as const),
+      new Promise<'serial'>((resolve) => { setTimeout(() => resolve('serial'), 1_000); }),
+    ]);
+    barrier.release();
+    const sanitized = await sanitizing;
+
+    expect(arrival).toBe('concurrent');
+    expect(sanitized.batch.candidates.some((candidate) => candidate.origin === 'manual_lead'))
+      .toBe(false);
+  });
+
+  test('走廉价复核后连续两次 sanitize 仍不 bump 批次版本', async () => {
+    const { state, frozen } = await twoAssertedCandidates();
+
+    const firstSanitize = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 200);
+    const secondSanitize = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 201);
+
+    expect(firstSanitize.changed).toBe(false);
+    expect(secondSanitize.changed).toBe(false);
+    expect(secondSanitize.batch.batch_id).toBe(firstSanitize.batch.batch_id);
+    expect(secondSanitize.batch.batch_revision).toBe(frozen.batch.batch_revision + 2);
+  });
+});
+
+// ── 只读用途的手工候选授权走批量廉价复核（2026-09-04）─────────────────────────
+// authorizeFormalNewsSet 对每条手工候选原本要跑两遍完整验签（authorizeManualItem 里
+// 一遍、最终守卫前的循环里再一遍），一次审核页请求里被完整跑好几轮。按 purpose 白名单
+// 分流：只读投影走批量复核，写入 / 发布 / 投递一律保持完整验签。
+describe('formal news authorization manual fast path', () => {
+  async function twoAuthorizedManualItems() {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+    const first = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT,
+      expected_batch_revision: frozen.batch.batch_revision,
+    }, 'policy-fast-1', 100);
+    const second = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: 'Anthropic发布Claude5',
+      expected_batch_revision: frozen.batch.batch_revision + 1,
+    }, 'policy-fast-2', 101);
+    expect(first.ok && second.ok).toBe(true);
+    const ids = [
+      `blog:manual:${first.ok ? first.lead.id : ''}`,
+      `blog:manual:${second.ok ? second.lead.id : ''}`,
+    ];
+    return { state, ids };
+  }
+
+  function countPrepared(state: { db: SqliteD1 }, marker: string): number {
+    return state.db.preparedSql.filter((sql) => sql.includes(marker)).length;
+  }
+
+  async function authorizeWith(state: { db: SqliteD1; env: Env }, ids: string[], purpose: string) {
+    state.db.preparedSql.length = 0;
+    const result = await authorizeFormalNewsSet(state.env, '2026-08-28', ids, purpose);
+    return {
+      result,
+      fullVerifications: countPrepared(state, 'manual_verification:policy_dispatch'),
+      bulkReads: countPrepared(state, 'news_review:manual_candidate_proof_bulk'),
+    };
+  }
+
+  test('只读投影零次完整验签，判定结果与完整验签逐字相同', async () => {
+    const { state, ids } = await twoAuthorizedManualItems();
+
+    const fast = await authorizeWith(state, ids, 'review_api_final_projection');
+    const full = await authorizeWith(state, ids, 'review_submit_final_guard');
+
+    expect(fast.fullVerifications).toBe(0);
+    expect(fast.bulkReads).toBe(1);
+    expect(full.fullVerifications).toBeGreaterThan(0);
+    // 同一批数据两条路径对拍。
+    expect(fast.result.allowed_ids).toEqual(ids);
+    expect(fast.result.allowed_ids).toEqual(full.result.allowed_ids);
+    expect(JSON.stringify(fast.result.decisions)).toBe(JSON.stringify(full.result.decisions));
+  });
+
+  test('daily_api_snapshot 这一类纯读取同样走批量复核', async () => {
+    const { state, ids } = await twoAuthorizedManualItems();
+
+    for (const purpose of [
+      'daily_api_snapshot', 'daily_api_snapshot_final_projection', 'historical_review_api',
+    ]) {
+      const fast = await authorizeWith(state, ids, purpose);
+      expect(fast.fullVerifications).toBe(0);
+      expect(fast.result.allowed_ids).toEqual(ids);
+    }
+  });
+
+  test('发布 / 投递 / 写入这一侧保持完整验签', async () => {
+    const { state, ids } = await twoAuthorizedManualItems();
+
+    for (const purpose of [
+      'codex_finalize_locked', 'email_delivery', 'daily_release_final_guard',
+      'review_freeze_write_guard', 'published_selection',
+    ]) {
+      const full = await authorizeWith(state, ids, purpose);
+      expect(full.fullVerifications).toBeGreaterThan(0);
+      expect(full.bulkReads).toBe(0);
+      expect(full.result.allowed_ids).toEqual(ids);
+    }
+  });
+
+  test('没登记过的新 purpose 默认落到完整验签这一侧', async () => {
+    const { state, ids } = await twoAuthorizedManualItems();
+
+    const unknown = await authorizeWith(state, ids, 'some_purpose_added_later');
+
+    expect(unknown.fullVerifications).toBeGreaterThan(0);
+    expect(unknown.bulkReads).toBe(0);
+  });
+
+  test('proof 行被篡改时，只读用途照样剔除，结果与完整验签一致', async () => {
+    const { state, ids } = await twoAuthorizedManualItems();
+    const tamperedLeadId = ids[1].slice('blog:manual:'.length);
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications SET hmac_sha256 = ?
+      WHERE lead_id = ? AND status = 'active'`).run('0'.repeat(64), tamperedLeadId);
+
+    const fast = await authorizeWith(state, ids, 'review_api_final_projection');
+    // 对不上的那一条回退完整验签，其余仍走廉价路径。
+    expect(fast.fullVerifications).toBe(1);
+    expect(fast.result.allowed_ids).toEqual([ids[0]]);
+    expect(fast.result.decisions.map((decision) => [decision.item_id, decision.code])).toEqual([
+      [ids[0], 'ALLOW_VERIFIED_MANUAL'],
+      [ids[1], 'DENY_UNVERIFIED_MANUAL'],
+    ]);
+  });
+
+  test('线索本身失效（proof 行没了）时，只读用途也回退完整验签并剔除', async () => {
+    const { state, ids } = await twoAuthorizedManualItems();
+    const droppedLeadId = ids[0].slice('blog:manual:'.length);
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications
+      SET status = 'invalidated' WHERE lead_id = ?`).run(droppedLeadId);
+
+    const fast = await authorizeWith(state, ids, 'review_api_final_projection');
+    const full = await authorizeWith(state, ids, 'review_submit_final_guard');
+
+    expect(fast.fullVerifications).toBe(1);
+    expect(fast.result.allowed_ids).toEqual([ids[1]]);
+    expect(JSON.stringify(fast.result.decisions)).toBe(JSON.stringify(full.result.decisions));
+  });
+});
