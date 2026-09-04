@@ -214,6 +214,21 @@ function response(payload: unknown, status = 200): Response {
   });
 }
 
+/**
+ * 异常消息脱敏后才允许进日志。
+ *
+ * 先抹掉三类可能带凭证的东西：URL（query 里常挂 token）、`token=` / `key=` / `secret=` 这类
+ * 键值对、以及 32 位以上的十六进制串（本项目的 token 与摘要都是这个形状）。剩下的部分才是
+ * 定位需要的：抛出点写的那句话。
+ */
+function sanitizedFailureMessage(message: string): string {
+  return message
+    .replace(/https?:\/\/\S+/gi, '[url]')
+    .replace(/\b(token|key|secret|password|authorization|bearer)\b\s*[=:]?\s*\S+/gi, '$1=[redacted]')
+    .replace(/\b[a-f0-9]{32,}\b/gi, '[hex]')
+    .slice(0, 300);
+}
+
 function requestErrorResponse(error: unknown): Response {
   const code = error instanceof Error ? error.message : 'internal_error';
   if (code === 'request_too_large') return response({ ok: false, error: code }, 413);
@@ -225,8 +240,12 @@ function requestErrorResponse(error: unknown): Response {
     || code === 'invalid_candidate_authorization' || code === 'invalid_owner_asserted'
     || code === 'invalid_vouch_statement'
     || code.startsWith('unsafe_url:')) return response({ ok: false, error: code }, 400);
+  // 只记 name 时 prod 上是一句 {"error":"Error"}，定位不了任何东西 —— 2026-09-04 晚
+  // PR #249 的 500 就是这么变成瞎猜然后只能回滚的。message 会带上抛出点的具体原因
+  // （Workers 的子请求上限、D1 约束冲突等都在这里），截断并抹掉 URL 与疑似 token。
   console.error('[manual-news-leads-api] internal request failure', {
     error: error instanceof Error ? error.name : typeof error,
+    message: error instanceof Error ? sanitizedFailureMessage(error.message) : '',
   });
   return response({ ok: false, error: 'internal_error' }, 500);
 }
