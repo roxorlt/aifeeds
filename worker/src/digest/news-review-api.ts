@@ -1,4 +1,5 @@
 import type { Env } from '../index';
+import { timedNewsReviewStep } from './news-review-timing';
 import {
   createNewsReviewToken,
   authorizeNewsReviewBatchSnapshot,
@@ -10,7 +11,6 @@ import {
   newsReviewSecret,
   sanitizeCurrentNewsReviewBatch,
   submitNewsReviewSelection,
-  timedNewsReviewStep,
   verifyNewsReviewTokenSignature,
   type NewsReviewBatch,
 } from './news-review';

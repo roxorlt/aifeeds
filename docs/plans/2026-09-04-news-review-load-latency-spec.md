@@ -172,27 +172,80 @@ prod 实测约 1.8s/条，与「每多一条候选加约 1.8s」完全对上。
 「读取已发布选择」和「据此决定改写」拆成两步（前者廉价、后者在真要写时才完整验签），
 **等 prod 实测分布出来再定**。
 
-#### D. 实测埋点
+#### D. 实测埋点与 prod 第一轮分布
 
-`timedNewsReviewStep`（`news-review.ts:1108`）在下列步骤各打一条
-`[news-review-timing] <步骤名> <毫秒>ms`，只记步骤名与耗时，不记数据内容：
+`timedNewsReviewStep`（`news-review-timing.ts`）打
+`[news-review-timing] <步骤名> <毫秒>ms`，只记步骤名与耗时。
 
-| 步骤名 | 覆盖 |
-|---|---|
-| `api.resolve.sanitize` | date-only 分支的整个 sanitize |
-| `api.detail.sanitize` | 带 batch+token 分支的整个 sanitize |
-| `api.projection.reads` | 投影里的已发布选择 / 阶段状态 / 对外授权（并发） |
-| `sanitize.active_batch_read` | 读当前批次行 |
-| `sanitize.candidate_policy` | 定时候选授权 + 手工签名批量复核（并发） |
-| `sanitize.manual_full_recheck` | 落回完整重算的那几条（正常为 0 条，不打点） |
-| `sanitize.published_selection` | sanitize 内的已发布选择 |
+**prod 第一轮实测（2026-09-04，12 条候选其中 2 条手工，单次请求 6.14s）**：
 
-只读用途的手工候选授权还可以按 `news_review:manual_candidate_proof_bulk` 与
-`manual_verification:policy_dispatch` 两个 SQL 注释在 D1 查询日志里对照：前者每轮 1 条，
-后者在只读投影里应当为 0。
+```
+sanitize.active_batch_read      191ms
+sanitize.candidate_policy      1865ms
+sanitize.published_selection   1816ms
+api.resolve.sanitize           3872ms   （= 上面三项之和，串行）
+api.projection.reads           1965ms
+```
 
-部署后 `wrangler tail` 按 `[news-review-timing]` 过滤即可取真实分布，**回填到本节**再决定
-是否继续合并 C 节里的项。
+三块各约 1.9s，正好对应三轮 `authorizeFormalNewsSet`。
+
+#### E. 单轮 1.9s 的真因：不是 SQL，是 D1 往返
+
+**prod 只读 `EXPLAIN QUERY PLAN` 实测（2026-09-04，D1 `xlist`，`served_by_colo: LAX`）**：
+
+`formal_news:final_guard_single_snapshot`（`executeFormalNewsFinalGuard`）：
+
+```
+SCAN json_each VIRTUAL TABLE INDEX 1:
+SEARCH i USING INDEX sqlite_autoindex_items_1 (id=?) LEFT-JOIN
+SCAN json_each VIRTUAL TABLE INDEX 1: LEFT-JOIN
+SEARCH s USING INDEX sqlite_autoindex_sources_1 (id=?) LEFT-JOIN
+SEARCH l USING INDEX sqlite_autoindex_manual_news_leads_1 (id=?) LEFT-JOIN
+SEARCH v USING INDEX sqlite_autoindex_manual_news_assessment_verifications_1 (verification_id=?) LEFT-JOIN
+CORRELATED SCALAR SUBQUERY 3/4/5/6
+  SEARCH *_assessment USING COVERING INDEX sqlite_autoindex_manual_news_event_assessments_1 (lead_id=? AND assessment_version=?)
+USE TEMP B-TREE FOR ORDER BY
+→ sql_duration_ms 11.1
+```
+
+`formal_news:early_authorization`：`SEARCH i USING INDEX sqlite_autoindex_items_1 (id=?)`，
+真实执行 `sql_duration_ms 8.5` / `rows_read 36`。
+`formal_news:early_scheduled_join`：`SEARCH i ... (id=?)` + `SEARCH s ... (id=?)`，
+真实执行 `sql_duration_ms 3.9` / `rows_read 40`。
+`news_review:manual_candidate_proof_bulk`：
+`SEARCH l USING INDEX sqlite_autoindex_manual_news_leads_1 (id=?)` +
+`SEARCH v USING INDEX idx_manual_news_verification_one_active_lead (lead_id=?)`，`sql_duration_ms 0.5`。
+
+**结论：`json_extract` 没有毁掉任何索引。** 关键在于最终守卫里的 `json_extract` 全部作用在
+**外层 CTE 的 `e.value`** 上（对每一行是常量），而不是作用在被索引列上，所以
+`i.id=json_extract(e.value,'$.item_id')` 照样走 `items` 主键索引。9/2 那次 CPU 超限是
+「列包函数」——函数套在被索引列上，这里不是同一形态。
+
+一轮 `authorizeFormalNewsSet` 的 3–4 条 SQL 服务端执行合计约 **13–25ms**，而 worker 侧量到
+**约 1.9s**，即每次 D1 往返约 **450–620ms**。成本 100% 在往返延迟（worker colo 与 D1 主副本
+LAX 之间），不在查询本身。**所以能改的只有往返次数，改 SQL 没有意义。**
+
+#### F. 据此做的两处并发化（无 SQL 改动）
+
+1. **sanitize 内两轮授权并发**：`getPublishedNewsReviewSelection(env, date, current)` 的入参
+   只有 `(env, date, current)`，与候选重建那一路（`scheduledPolicy` / `signedSnapshots` /
+   `candidates`）没有任何数据依赖。改为提前发起、循环之后再收，并挂空 catch 防止主路径先
+   抛错时它变成未处理的 rejection。1865 + 1816 → max ≈ 1.9s。
+2. **单轮内两条 preflight 查询并发**：`loadScheduledAuthorizationRows` 原本要等
+   `loadRequestedItems` 回来才知道哪些是定时候选。但它本身就是逐 id 的 LEFT JOIN，
+   **直接收全量 id 结果完全一样**——手工 id 只多带回一行注册表 / 源站全为 NULL 的记录，
+   而判定循环对手工行根本不查 `scheduledById`。于是两条并发发起，每轮 3 次串行往返变 2 次。
+
+预期：`api.resolve.sanitize` 从 3872ms 降到约 1300ms（191 + 约 1100），
+`api.projection.reads` 从 1965ms 降到约 1500ms，单次请求约 **6.1s → 3.0s**。
+第二轮实测分布回填到本节。
+
+#### G. 还没动的往返
+
+- 每轮里 `final_guard` 必须等 preflight 的判定结果，无法并发，这一次往返省不掉。
+- `published_selection` 里 `readRawPublishedNewsReviewSelection` 那次 `.first()` 只在
+  `applied_selected_ids` 为 null 时才跑，跑到时会多一次串行往返。
+- 三轮授权本身不能合并（id 集合不同，见 C2）。
 
 ## 4. 验收
 

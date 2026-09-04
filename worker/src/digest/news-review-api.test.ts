@@ -17,7 +17,6 @@ vi.mock('./news-review', () => ({
   newsReviewSecret: vi.fn((env) => env.DAILY_NEWS_REVIEW_SECRET || ''),
   sanitizeCurrentNewsReviewBatch: vi.fn(),
   submitNewsReviewSelection: vi.fn(),
-  timedNewsReviewStep: vi.fn(async (_step: string, run: () => Promise<unknown>) => run()),
   verifyNewsReviewTokenSignature: vi.fn(async () => true),
 }));
 vi.mock('./codex-push', () => ({
