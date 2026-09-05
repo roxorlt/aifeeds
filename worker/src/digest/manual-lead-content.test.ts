@@ -130,12 +130,14 @@ describe('交给生成函数的素材正文', () => {
     );
   });
 
-  test('按既有口径截到 4000 字', () => {
+  test('超长素材按上限截断，上限本身要容得下两份素材', () => {
     const excerpt = manualLeadContentExcerpt([
-      classifyManualLeadMaterial(material({ text: '甲'.repeat(9_000) })),
+      classifyManualLeadMaterial(material({ text: '甲'.repeat(20_000) })),
     ]);
     expect(excerpt.length).toBe(MANUAL_LEAD_CONTENT_EXCERPT_MAX_CHARS);
-    expect(MANUAL_LEAD_CONTENT_EXCERPT_MAX_CHARS).toBe(4_000);
+    // 常规新闻单篇文章是 4000。补录喂的是「链接正文 + 搜索召回」两份，4000 会把第二份
+    // 挤掉大半，所以这里必须明显大于它 —— 断言的是这个关系，不是某个具体数字。
+    expect(MANUAL_LEAD_CONTENT_EXCERPT_MAX_CHARS).toBeGreaterThanOrEqual(8_000);
   });
 
   test('一份素材都没有时是空串', () => {

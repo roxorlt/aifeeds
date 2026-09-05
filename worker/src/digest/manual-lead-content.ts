@@ -70,8 +70,16 @@ export interface ManualLeadContentMaterial {
   handle: string;
 }
 
-/** 交给生成函数的素材正文上限，与 `selectEnrichExcerptForFeeds` 的 `slice(0, 4000)` 同口径。 */
-export const MANUAL_LEAD_CONTENT_EXCERPT_MAX_CHARS = 4_000;
+/**
+ * 交给生成函数的素材正文上限。
+ *
+ * 常规新闻走 `selectEnrichExcerptForFeeds` 的 4000 —— 那是单篇文章的量。补录喂进去的是
+ * 「owner 给的链接正文 + 搜索召回的报道」两份合起来，4000 会把第二份挤掉大半，模型只能
+ * 看着半截素材写。本仓别处同类调用（`manual-news-leads-runtime.ts` 的评估、
+ * `classify-translate.ts` 的正文翻译）用的是 8000–24000，这里取 12000 是同一量级。
+ * 补录一天也就几条，宽裕一点换的是内容质量。
+ */
+export const MANUAL_LEAD_CONTENT_EXCERPT_MAX_CHARS = 12_000;
 
 /**
  * 整轮加工的总上限。到点立刻走兜底入池，不得挂住。
@@ -80,7 +88,7 @@ export const MANUAL_LEAD_CONTENT_EXCERPT_MAX_CHARS = 4_000;
  * 挑一个好看的小数字。2026-09-05 生产实测：抓正文 0.3–2.3s、ScrapeBadger 搜索 8–26s、
  * 生成那一次 DeepSeek 调用本身允许 60s（`classify-translate.ts` 的 `callJson`）。
  */
-export const MANUAL_LEAD_CONTENT_BUDGET_MS = 180_000;
+export const MANUAL_LEAD_CONTENT_BUDGET_MS = 240_000;
 /**
  * 分段预算。
  *
@@ -92,9 +100,9 @@ export const MANUAL_LEAD_CONTENT_STAGE_BUDGET_MS: Readonly<Record<
   'fetching_source' | 'analyzing' | 'searching' | 'drafting', number
 >> = {
   fetching_source: 30_000,
-  analyzing: 30_000,
+  analyzing: 45_000,
   searching: 50_000,
-  drafting: 70_000,
+  drafting: 100_000,
 };
 
 const TIER_ORDER: Readonly<Record<Exclude<ManualLeadMaterialTier, 'none'>, number>> = {
@@ -161,7 +169,7 @@ export function orderManualLeadMaterials(
     .map((entry) => entry.material);
 }
 
-/** 把排好序的素材逐份加前缀拼成一份正文，按既有口径截到 4000 字。 */
+/** 把排好序的素材逐份加前缀拼成一份正文，按上面的上限截断。 */
 export function manualLeadContentExcerpt(
   materials: readonly ManualLeadContentMaterial[],
 ): string {

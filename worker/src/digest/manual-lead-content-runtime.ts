@@ -105,7 +105,7 @@ export function parseManualLeadContentAnalysis(payload: unknown): ManualLeadCont
 }
 
 /** 补录生成的 token 上限：素材是两份合起来的，比常规新闻的 800 需要更多余量。 */
-export const MANUAL_LEAD_GENERATE_MAX_TOKENS = 2_500;
+export const MANUAL_LEAD_GENERATE_MAX_TOKENS = 8_000;
 
 export function createManualLeadContentAdapters(
   env: Env,
@@ -145,7 +145,7 @@ export function createManualLeadContentAdapters(
         // 输出被 token 上限截断时,callDeepSeekJson 会把整份结果作废(宁可没有也不要半成品)。
       // 500 太紧:2026-09-05 生产上分析这一步对干净的文章正文也一直返回空,连微信公众号那种
       // 标题清清楚楚的文章都判不出来。抬到 2000 并允许重试一次。
-      { systemPrompt: prompt.system, maxTokens: 2_000, timeoutMs: 25_000, retries: 1 },
+      { systemPrompt: prompt.system, maxTokens: 4_000, timeoutMs: 40_000, retries: 1 },
       );
       return parseManualLeadContentAnalysis(result.data);
     },
