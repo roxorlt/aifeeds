@@ -6,11 +6,32 @@ import {
   processManualNewsLeadWithEnv,
 } from './manual-news-leads-runtime';
 import { claimManualNewsLeadProcessing, failManualNewsLeadAfterExhaustion } from './manual-news-leads-store';
+import {
+  isManualLeadContentWorkflowParams,
+  runManualLeadContentEntryWorkflow,
+  type ManualLeadContentWorkflowParams,
+  type ManualLeadContentWorkflowStep,
+} from './manual-lead-content-workflow';
 
 export interface ManualNewsLeadWorkflowParams {
   lead_id: string;
   processing_owner?: string;
 }
+
+/**
+ * 这个绑定上跑着两条互不相干的路，靠 payload 分流。
+ *
+ * - 取证那条（`{ lead_id }`）：搜索取证 → 事实核验 → 评分，要占 `processing_owner` 租约，
+ *   失败要回写 `error_code`；它决定线索能不能入池。
+ * - 一步录入的内容加工那条（`{ kind: 'manual_lead_content_entry', … }`）：抓正文 → 拟检索词
+ *   → 搜索 → 生成 → 入池，一个租约都不占。
+ *
+ * 复用同一个绑定是为了不新增 Cloudflare 侧资源；两条路的实例 id 前缀不同
+ * （`manual-news-…` 对 `content-…`），不会互相覆盖。
+ */
+export type ManualNewsLeadWorkflowPayload =
+  | ManualNewsLeadWorkflowParams
+  | ManualLeadContentWorkflowParams;
 
 export const MANUAL_NEWS_MAX_PROVIDER_CALLS_PER_STEP = 3;
 export const MANUAL_NEWS_NON_PROVIDER_BUDGET_MS = 180_000;
@@ -54,8 +75,16 @@ export async function runManualNewsLeadWorkflow(
   }
 }
 
-export class ManualNewsLeadWorkflow extends WorkflowEntrypoint<Env, ManualNewsLeadWorkflowParams> {
-  async run(event: WorkflowEvent<ManualNewsLeadWorkflowParams>, step: WorkflowStep): Promise<void> {
-    await runManualNewsLeadWorkflow(this.env, event.payload, step);
+export class ManualNewsLeadWorkflow extends WorkflowEntrypoint<Env, ManualNewsLeadWorkflowPayload> {
+  async run(event: WorkflowEvent<ManualNewsLeadWorkflowPayload>, step: WorkflowStep): Promise<void> {
+    if (isManualLeadContentWorkflowParams(event.payload)) {
+      // `WorkflowStep.do` 的泛型带 `Rpc.Serializable` 约束，而内容加工那条路的每一步返回的
+      // 是普通 JSON 对象（素材、起草结果），形状对得上但类型层面套不进那个约束。
+      await runManualLeadContentEntryWorkflow(
+        this.env, event.payload, step as unknown as ManualLeadContentWorkflowStep,
+      );
+      return;
+    }
+    await runManualNewsLeadWorkflow(this.env, event.payload as ManualNewsLeadWorkflowParams, step);
   }
 }

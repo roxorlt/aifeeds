@@ -270,6 +270,20 @@ export interface ManualLeadContentResult {
   detail: string;
 }
 
+/** 一份「什么都没取到」的结果：兜底入池与加工没跑起来时用它，调用方拿到的形状不变。 */
+export function emptyManualLeadContentResult(detail: string): ManualLeadContentResult {
+  return {
+    drafted: null,
+    excerptZh: '',
+    aiCategory: '',
+    materialExcerpt: '',
+    materialTier: 'none',
+    materials: [],
+    stoppedAt: null,
+    detail,
+  };
+}
+
 /** 让一步受一个时限约束。超时不是错误，是「这一步这次没拿到东西」。 */
 function withBudget<T>(work: Promise<T>, budgetMs: number): Promise<T | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;

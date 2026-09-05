@@ -3127,8 +3127,8 @@ export type ManualLeadEntryOutcome =
  * （{@link assertManualNewsLeadCandidate} 带上 `drafted` 续做同一行）。
  *
  * 建出来的行是 `needs_review` 且 `confirmed_at IS NULL` —— 也就是「还没进候选池」。
- * 加工那一轮无论成败都会去入池；万一整个 isolate 被回收，`content_deadline_at` 过期后
- * 由 {@link listStaleManualLeadContentEntries} 把它捡回来补入池。
+ * 加工那一轮无论成败都会去入池；万一整条 workflow 都没了，`content_deadline_at` 过期后
+ * 由 {@link listStaleManualLeadContentEntries} 把它捡回来直接补入池。
  *
  * 幂等与一步录入完全一致：同一个 `Idempotency-Key` 落在同一天同一份输入上时命中已有
  * 线索并原样返回；输入变了则抛 `idempotency_key_reused_with_different_payload`。
@@ -3260,11 +3260,37 @@ export async function setManualLeadContentStage(
 }
 
 /**
+ * 只把兜底期限往后推，不动阶段。
+ *
+ * 兜底入池挂在列表 GET 上，页面一直在轮询；推一次期限就等于「这一轮兜底我接手了，下次
+ * 轮询别再来」。刻意不写 `content_stage`：卡片上显示到哪一步是加工那边的事，兜底只是
+ * 换一个时间点再看。
+ */
+export async function touchManualLeadContentDeadline(
+  env: Env,
+  leadId: string,
+  deadlineAt: number,
+  now = Date.now(),
+): Promise<void> {
+  try {
+    await env.DB.prepare(
+      `/* manual_lead:content_deadline */ UPDATE manual_news_leads SET
+         content_deadline_at = ?, updated_at = ?
+       WHERE id = ?`,
+    ).bind(deadlineAt, now, leadId).run();
+  } catch (error) {
+    console.warn(`[manual-lead-content] lead=${leadId} deadline touch failed:`,
+      String((error as Error)?.message || error).slice(0, 200));
+  }
+}
+
+/**
  * 找出「后台那一轮加工没跑完就没了下文」的一步录入线索。
  *
- * 加工挂在 `ctx.waitUntil` 上，isolate 被回收就再没有第二次机会 —— 线索会一直停在
- * `needs_review` 且 `confirmed_at IS NULL`，也就是没进候选池。入池永不失败这条硬约束
- * 靠这个扫描兜底：面板轮询当天线索列表时顺手捡，捡到就补一次入池。
+ * 加工跑在 workflow 上（`manual-lead-content-workflow.ts`），每进一步就把
+ * `content_deadline_at` 往后续一次。整条 workflow 真的没了就没人再续，这一列过期而
+ * 线索仍停在 `needs_review` 且 `confirmed_at IS NULL`，也就是没进候选池。入池永不失败
+ * 这条硬约束靠这个扫描兜底：面板轮询当天线索列表时顺手捡，捡到就直接补入池（不重跑加工）。
  *
  * 选行只靠 `(review_date, content_deadline_at)` 这个索引，`LIMIT` 卡死一轮的条数；
  * 绑参个数固定 3 个，不随集合大小展开（2026-09-04 D1 绑参上限事故）。
