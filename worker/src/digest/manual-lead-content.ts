@@ -184,6 +184,11 @@ export interface ManualLeadContentAdapters {
   }): Promise<FeedEnrichment | null>;
 }
 
+/** 分段预算的可覆盖形状，供调用方按需收紧某一步。 */
+export type ManualLeadContentStageBudget = Partial<Record<
+  'fetching_source' | 'analyzing' | 'searching' | 'drafting', number
+>>;
+
 export interface ManualLeadContentHooks {
   /** 每进入一个阶段报一次，供卡片实时显示。它自己抛异常伤不到整轮。 */
   onStage(stage: ManualLeadContentStage): Promise<void> | void;
@@ -245,12 +250,7 @@ export async function runManualLeadContentPipeline(
   clue: { url: string | null; text: string; date: string },
   adapters: ManualLeadContentAdapters,
   hooks: ManualLeadContentHooks,
-  opts: {
-    budgetMs?: number;
-    stageBudgetMs?: Partial<Record<
-      'fetching_source' | 'analyzing' | 'searching' | 'drafting', number
-    >>;
-  } = {},
+  opts: { budgetMs?: number; stageBudgetMs?: ManualLeadContentStageBudget } = {},
 ): Promise<ManualLeadContentResult> {
   const budgets = { ...MANUAL_LEAD_CONTENT_STAGE_BUDGET_MS, ...(opts.stageBudgetMs || {}) };
   const collected: ManualLeadContentMaterial[] = [];

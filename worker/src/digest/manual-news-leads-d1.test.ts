@@ -5245,73 +5245,6 @@ describe('manual lead enrichment', () => {
     expect(itemExtraOf(state, itemId).manual_evidence_text).toBe('先到的背景。');
   });
 
-  // -------------------------------------------------------------------------
-  // 2026-09-05 排查：owner 直接录入成功入池后，背景素材始终没写进
-  // items.extra.manual_evidence_text，prod 上一行 [manual-lead-enrichment] 日志都没有。
-  // 这条用例走真实路径（HTTP 入口 → 真 store → 真 waitUntil → 真适配器），只把最外层
-  // 的 fetch 换成桩：调用链里但凡有一环没被执行，这里就会失败。
-  // -------------------------------------------------------------------------
-  test('排查:直接录入的 HTTP 请求确实派发了取材,素材落进 extra', async () => {
-    const state = await stuckZeroEvidenceFixture();
-    await frozenAssertedBatch(state);
-    const calls: string[] = [];
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
-      const target = String(typeof input === 'string' ? input : (input as Request).url || input);
-      calls.push(target);
-      if (target.includes('/v1/plain-text')) {
-        return new Response(JSON.stringify({
-          text: 'OpenAI 今天发布 Astra，面向企业客户开放。', url: 'https://openai.com/index/astra/',
-          publisher: 'openai.com', kind: 'document',
-        }), { headers: { 'Content-Type': 'application/json' } });
-      }
-      return new Response(JSON.stringify({
-        choices: [{ message: { content: JSON.stringify({ background: '取回来的背景。' }) },
-          finish_reason: 'stop' }],
-      }), { headers: { 'Content-Type': 'application/json' } });
-    }) as typeof fetch;
-    const pending: Promise<unknown>[] = [];
-    const logged: string[] = [];
-    const originalLog = console.log;
-    console.log = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
-    try {
-      const response = await handleManualNewsLeadsApi(new Request(
-        'https://api.example.test/api/digest/daily-news-leads',
-        {
-          method: 'POST',
-          headers: {
-            Authorization: 'Bearer owner-asserted-review-secret',
-            'Content-Type': 'application/json',
-            'Idempotency-Key': 'repro-enrichment-1',
-          },
-          body: JSON.stringify({
-            date: '2026-08-28', text: ASSERTED_STATEMENT, owner_asserted: true,
-            statement: ASSERTED_STATEMENT,
-          }),
-        },
-      ), {
-        ...state.env,
-        DAILY_NEWS_REVIEW_ENABLED: '1',
-        MANUAL_NEWS_RESEARCH_ORIGIN: 'https://gateway.example',
-        MANUAL_NEWS_RESEARCH_TOKEN: 'gateway-token',
-        DEEPSEEK_API_KEY: 'deepseek-key',
-      } as Env, { waitUntil(work: Promise<unknown>) { pending.push(work); } } as never, 100);
-      expect(response.status).toBe(200);
-      const payload = await response.json() as { ok: boolean; lead: { id: string } };
-      expect(payload.ok).toBe(true);
-      await Promise.all(pending);
-      expect(calls.some((url) => url.includes('/v1/plain-text'))).toBe(true);
-      const extra = itemExtraOf(state, `blog:manual:${payload.lead.id}`);
-      expect(extra.manual_evidence_text).toBe('取回来的背景。');
-      // 那行无条件日志确实打了出来,且三项都是「该派发取材」的取值。
-      expect(logged.filter((line) => line.startsWith('[manual-lead-enrichment] schedule')))
-        .toEqual([`[manual-lead-enrichment] schedule ok=true lead=${payload.lead.id} evidence=0`]);
-    } finally {
-      globalThis.fetch = originalFetch;
-      console.log = originalLog;
-    }
-  });
-
   test('候选行不存在时安静跳过,不炸也不建行', async () => {
     const { state } = await assertedCandidate();
     await expect(runManualLeadEnrichment(state.env, {
@@ -6392,5 +6325,246 @@ describe('一步录入拆成「先建行、后加工入池」', () => {
       date: '2026-08-28', text: ASSERTED_STATEMENT, url: '', note: '',
     }, 'expired-entry', 4_102_444_800_000))
       .resolves.toMatchObject({ ok: false, status: 409, error: 'review_expired' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 端到端：一步录入 → 后台加工 → 入池（2026-09-05 规格第 9 节验收 1–7）
+//
+// 走的是真实路径：HTTP 入口 → 真 store → 真 waitUntil → 真流水线 → 真适配器，只把最外层
+// 的 fetch 换成桩（取证网关的 /v1/plain-text 与 DeepSeek）。调用链里但凡有一环没被执行、
+// 或者签名投影与 items 行对不上，这里就会红。
+// ---------------------------------------------------------------------------
+describe('一步录入端到端：真链接 → 真加工 → 真入池', () => {
+  const ARTICLE_BODY = 'OpenAI 今天发布 Astra，面向企业客户开放，是这一系列的第一款产品。';
+  const DRAFT_TITLE = 'OpenAI 发布企业级模型 Astra';
+  const DRAFT_SUMMARY = 'OpenAI 发布 Astra，把企业级推理能力做成可直接采购的产品，面向企业客户开放。';
+  const DRAFT_EXCERPT = 'OpenAI 今日发布 Astra，这是面向企业客户的推理模型，也是该系列的第一款产品。';
+
+  interface StubOptions {
+    source?: Record<string, unknown> | null;
+    search?: Record<string, unknown> | null;
+    /** 让 DeepSeek 那一路整个失败，模拟生成挂掉。 */
+    llmDown?: boolean;
+    /** 记录发给网关的每一份请求体。 */
+    gatewayBodies?: Record<string, unknown>[];
+  }
+
+  function stubbedFetch(opts: StubOptions = {}) {
+    return (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const target = String(typeof input === 'string' ? input : (input as Request).url || input);
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (target.includes('/v1/plain-text')) {
+        opts.gatewayBodies?.push(body);
+        const material = body.url
+          ? (opts.source === undefined
+            ? { text: ARTICLE_BODY, url: String(body.url), publisher: 'openai.com', kind: 'document' }
+            : opts.source)
+          : (opts.search === undefined
+            ? {
+              text: '路透社报道：Astra 面向企业开放。', url: 'https://reuters.com/astra',
+              publisher: 'reuters.com', kind: 'search+document',
+            }
+            : opts.search);
+        return material
+          ? new Response(JSON.stringify(material), { headers: { 'Content-Type': 'application/json' } })
+          : new Response(JSON.stringify({ text: '', kind: 'none' }),
+            { headers: { 'Content-Type': 'application/json' } });
+      }
+      if (opts.llmDown) return new Response('nope', { status: 500 });
+      // 两条 DeepSeek 提示词靠 system 里的关键词区分：拟检索词那条写着「检索词」，
+      // 写标题摘要那条是常规新闻共用的 ELI25 提示词。
+      const messages = (body.messages || []) as Array<{ role: string; content: string }>;
+      const system = messages.find((message) => message.role === 'system')?.content || '';
+      const content = system.includes('ELI25')
+        ? JSON.stringify({
+          ai_category: 'model-release', title_zh: DRAFT_TITLE,
+          excerpt_zh: DRAFT_EXCERPT, ai_summary_zh: DRAFT_SUMMARY,
+        })
+        : JSON.stringify({ headline: 'OpenAI 发布 Astra', query: 'OpenAI Astra 企业模型' });
+      return new Response(JSON.stringify({
+        choices: [{ message: { content }, finish_reason: 'stop' }],
+      }), { headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+  }
+
+  async function submitOnce(
+    body: Record<string, unknown>,
+    opts: StubOptions & { key?: string } = {},
+  ) {
+    const state = await stuckZeroEvidenceFixture();
+    await frozenAssertedBatch(state);
+    const pending: Promise<unknown>[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stubbedFetch(opts);
+    try {
+      const response = await handleManualNewsLeadsApi(new Request(
+        'https://api.example.test/api/digest/daily-news-leads',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer owner-asserted-review-secret',
+            'Content-Type': 'application/json',
+            'Idempotency-Key': opts.key || 'e2e-single-submit',
+          },
+          body: JSON.stringify({ date: '2026-08-28', owner_asserted: true, ...body }),
+        },
+      ), {
+        ...state.env,
+        DAILY_NEWS_REVIEW_ENABLED: '1',
+        MANUAL_NEWS_RESEARCH_ORIGIN: 'https://gateway.example',
+        MANUAL_NEWS_RESEARCH_TOKEN: 'gateway-token',
+        DEEPSEEK_API_KEY: 'deepseek-key',
+      } as Env, { waitUntil(work: Promise<unknown>) { pending.push(work); } } as never, 100);
+      const payload = await response.json() as { ok: boolean; lead: { id: string } };
+      await Promise.all(pending);
+      return { state, response, payload, leadId: payload.lead.id };
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+
+  function extraOf(state: { db: SqliteD1 }, itemId: string): Record<string, unknown> {
+    const row = state.db.sqlite.prepare('SELECT extra FROM items WHERE id = ?')
+      .get(itemId) as { extra: string | null } | undefined;
+    return JSON.parse(row?.extra || '{}') as Record<string, unknown>;
+  }
+
+  function leadRowOf(state: { db: SqliteD1 }, leadId: string) {
+    return state.db.sqlite.prepare(
+      `SELECT status, confirmed_at, content_stage, content_stage_detail, content_material_tier
+       FROM manual_news_leads WHERE id = ?`,
+    ).get(leadId) as Record<string, unknown>;
+  }
+
+  // 规格第 9 节第 1 / 2 条：给一个真实文章链接，候选标题与摘要来自文章正文。
+  test('给文章链接：标题与摘要来自正文，不是 owner 那句话', async () => {
+    const gatewayBodies: Record<string, unknown>[] = [];
+    const { state, response, leadId } = await submitOnce({
+      text: ASSERTED_STATEMENT, url: 'https://openai.com/index/astra/',
+    }, { gatewayBodies });
+
+    // 提交立刻返回，加工在后台。
+    expect(response.status).toBe(202);
+    const itemId = `blog:manual:${leadId}`;
+    expect(state.db.sqlite.prepare('SELECT title, url, author FROM items WHERE id = ?')
+      .get(itemId)).toMatchObject({
+      title: DRAFT_TITLE, url: 'https://openai.com/index/astra/', author: 'openai.com',
+    });
+    const extra = extraOf(state, itemId);
+    expect(extra.title_zh).toBe(DRAFT_TITLE);
+    expect(extra.ai_summary_zh).toBe(DRAFT_SUMMARY);
+    // 生成出来的正文中译进 excerpt_zh，卡片图与小红书正文靠它变厚。
+    expect(extra.excerpt_zh).toBe(DRAFT_EXCERPT);
+    expect(extra.ai_category).toBe('model-release');
+    expect(extra.manual_evidence_text).toBe(DRAFT_EXCERPT);
+    // 抓正文与搜索是两次请求，两次都带审核日期。
+    expect(gatewayBodies).toEqual([
+      { url: 'https://openai.com/index/astra/', date: '2026-08-28' },
+      { query: 'OpenAI Astra 企业模型', date: '2026-08-28' },
+    ]);
+    expect(leadRowOf(state, leadId)).toMatchObject({
+      status: 'needs_review', confirmed_at: 100,
+      content_stage: 'done', content_material_tier: 'report',
+    });
+  });
+
+  // 规格第 9 节第 7 条。
+  test('入池之后：正式新闻门放行，连续两次 sanitize 都不判 drift', async () => {
+    const { state, leadId } = await submitOnce({
+      text: ASSERTED_STATEMENT, url: 'https://openai.com/index/astra/',
+    });
+    const itemId = `blog:manual:${leadId}`;
+
+    await expect(authorizeFormalNewsSet(state.env, '2026-08-28', [itemId], 'e2e-gate'))
+      .resolves.toMatchObject({
+        allowed_ids: [itemId],
+        decisions: [{ allowed: true, code: 'ALLOW_VERIFIED_MANUAL' }],
+      });
+    const first = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 500);
+    const second = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 500);
+    expect(first.changed).toBe(false);
+    expect(second.changed).toBe(false);
+  });
+
+  // 规格第 9 节第 3 条：只给一句话，不给链接。
+  test('只给一句话：不抓链接、不分析，直接拿那句话去搜', async () => {
+    const gatewayBodies: Record<string, unknown>[] = [];
+    const { state, leadId } = await submitOnce({ text: ASSERTED_STATEMENT }, { gatewayBodies });
+
+    expect(gatewayBodies).toEqual([{ query: ASSERTED_STATEMENT, date: '2026-08-28' }]);
+    expect(state.db.sqlite.prepare('SELECT title, author FROM items WHERE id = ?')
+      .get(`blog:manual:${leadId}`)).toMatchObject({
+      title: DRAFT_TITLE, author: 'reuters.com',
+    });
+    expect(leadRowOf(state, leadId)).toMatchObject({ content_material_tier: 'report' });
+  });
+
+  // 规格第 9 节第 4 条：普通博主的 X 链接。
+  test('普通博主的 X 链接：入池，素材标成博主发文，口播素材里写明非媒体报道', async () => {
+    const { state, leadId } = await submitOnce({
+      text: ASSERTED_STATEMENT, url: 'https://x.com/some_blogger/status/1234567890',
+    }, {
+      source: {
+        text: '博主说 Astra 明天发。', url: 'https://x.com/some_blogger/status/1234567890',
+        publisher: 'X @some_blogger', kind: 'tweet',
+      },
+      search: null,
+    });
+
+    expect(leadRowOf(state, leadId)).toMatchObject({
+      confirmed_at: 100, content_stage: 'done', content_material_tier: 'tweet',
+    });
+    // 出处说明只走素材正文前缀，共享提示词一个字没改 —— 这里验的是它确实进了模型手里。
+    expect(extraOf(state, `blog:manual:${leadId}`).manual_evidence_source)
+      .toMatchObject({ tier: 'tweet', publisher: 'X @some_blogger' });
+  });
+
+  // 规格第 9 节第 5 条：白名单里的官方 X 账号。
+  test('官方 X 账号的链接：素材标成第一方公告', async () => {
+    const { state, leadId } = await submitOnce({
+      text: ASSERTED_STATEMENT, url: 'https://x.com/OpenAI/status/1234567890',
+    }, {
+      source: {
+        text: 'We are releasing Astra today.', url: 'https://x.com/OpenAI/status/1234567890',
+        publisher: 'X @OpenAI', kind: 'tweet',
+      },
+      search: null,
+    });
+
+    expect(leadRowOf(state, leadId)).toMatchObject({
+      confirmed_at: 100, content_stage: 'done', content_material_tier: 'official_x',
+    });
+  });
+
+  // 规格第 9 节第 6 条：断网 / 搜索全挂。这是整份规格最不能破的那一条。
+  test('取材与生成全挂：照样入池，标题退回 owner 那句话，卡片写明只能依据那句话', async () => {
+    const { state, response, leadId } = await submitOnce({
+      text: ASSERTED_STATEMENT, url: 'https://openai.com/index/astra/',
+    }, { source: null, search: null, llmDown: true });
+
+    expect(response.status).toBe(202);
+    const itemId = `blog:manual:${leadId}`;
+    expect(state.db.sqlite.prepare('SELECT title FROM items WHERE id = ?').get(itemId))
+      .toMatchObject({ title: ASSERTED_STATEMENT });
+    const row = leadRowOf(state, leadId);
+    expect(row).toMatchObject({
+      confirmed_at: 100, content_stage: 'done', content_material_tier: 'none',
+    });
+    expect(String(row.content_stage_detail)).toContain('未取到任何公开素材');
+    await expect(authorizeFormalNewsSet(state.env, '2026-08-28', [itemId], 'e2e-fallback-gate'))
+      .resolves.toMatchObject({ allowed_ids: [itemId] });
+  });
+
+  test('取到素材但生成挂了：照样入池，卡片写明这一轮没写出标题', async () => {
+    const { state, leadId } = await submitOnce({
+      text: ASSERTED_STATEMENT, url: 'https://openai.com/index/astra/',
+    }, { llmDown: true });
+
+    expect(state.db.sqlite.prepare('SELECT title FROM items WHERE id = ?')
+      .get(`blog:manual:${leadId}`)).toMatchObject({ title: ASSERTED_STATEMENT });
+    const row = leadRowOf(state, leadId);
+    expect(row).toMatchObject({ confirmed_at: 100, content_stage: 'done' });
+    expect(String(row.content_stage_detail)).toContain('生成');
   });
 });

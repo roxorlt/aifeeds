@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 
 vi.mock('./manual-news-leads-store', () => ({
   assertManualNewsLeadCandidate: vi.fn(),
+  beginOwnerAssertedEntry: vi.fn(),
+  listStaleManualLeadContentEntries: vi.fn(async () => []),
   confirmManualNewsLeadCandidate: vi.fn(),
   vouchManualNewsLeadCandidate: vi.fn(),
   getManualNewsCandidateAuthorization: vi.fn(),
@@ -23,10 +25,17 @@ vi.mock('./manual-lead-enrichment', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./manual-lead-enrichment')>()),
   runManualLeadEnrichment: vi.fn(async () => 'written' as const),
 }));
+vi.mock('./manual-lead-content-entry', () => ({
+  runManualLeadContentEntry: vi.fn(async () => ({
+    pooled: true, stage: 'done', detail: '', content: null,
+  })),
+}));
 
 import { handleManualNewsLeadsApi } from './manual-news-leads-api';
 import {
   assertManualNewsLeadCandidate,
+  beginOwnerAssertedEntry,
+  listStaleManualLeadContentEntries,
   confirmManualNewsLeadCandidate,
   vouchManualNewsLeadCandidate,
   getManualNewsCandidateAuthorization,
@@ -41,6 +50,7 @@ import {
 } from './manual-news-leads-store';
 import { processManualNewsLeadWithEnv } from './manual-news-leads-runtime';
 import { runManualLeadEnrichment } from './manual-lead-enrichment';
+import { runManualLeadContentEntry } from './manual-lead-content-entry';
 
 const record = {
   id: 'ml-20260811-abc123def456', review_date: '2026-08-11', input_type: 'text',
@@ -866,22 +876,39 @@ describe('manual daily news leads API · owner vouch', () => {
 });
 
 describe('manual daily news leads API · owner asserted direct entry', () => {
-  const assertedLead = { ...record, status: 'needs_review', version: 2, confirmed_at: 100 };
+  // 一步录入 2026-09-05 起拆成两步：提交只建线索行(202)，内容加工与随后的签名入池都在
+  // 后台跑。候选的标题与摘要要由模型从抓回的正文写出来，而它们进的是被签名覆盖的投影
+  // —— 签名之前就得确定，所以入池只能等加工跑完。
+  const entryLead = {
+    ...record, status: 'needs_review', version: 1, confirmed_at: null,
+    input_text: 'OpenAI发布Astra', input_url: 'https://openai.com/astra/', note: '早报',
+    content_progress: {
+      stage: 'submitted', detail: '', material_tier: 'none', deadline_at: 120_100,
+    },
+  };
+
+  function collectingCtx() {
+    const queued: Promise<unknown>[] = [];
+    return { queued, ctx: { waitUntil(promise: Promise<unknown>) { queued.push(promise); } } as never };
+  }
 
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(getManualNewsLead).mockResolvedValue(record as never);
+    vi.mocked(listStaleManualLeadContentEntries).mockResolvedValue([] as never);
+    vi.mocked(getManualNewsLead).mockResolvedValue(entryLead as never);
     vi.mocked(getManualNewsCandidateAuthorization).mockResolvedValue({
-      candidate_authorization: 'owner_asserted_v1',
-      vouch: { statement: 'OpenAI发布Astra', vouched_at: 100 },
+      candidate_authorization: null, vouch: null,
     } as never);
-    vi.mocked(assertManualNewsLeadCandidate).mockResolvedValue({
-      ok: true, changed: true, lead: assertedLead,
-      batch: null, pending_initial_freeze: true, rerender_enqueued: false,
+    vi.mocked(beginOwnerAssertedEntry).mockResolvedValue({
+      ok: true, created: true, lead: entryLead,
+    } as never);
+    vi.mocked(runManualLeadContentEntry).mockResolvedValue({
+      pooled: true, stage: 'done', detail: '', content: null,
     } as never);
   });
 
-  test('routes owner_asserted submissions to the direct entry store call', async () => {
+  test('提交只建线索行并立刻返回 202，加工挂在 waitUntil 上', async () => {
+    const { queued, ctx } = collectingCtx();
     const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
       method: 'POST',
       headers: { 'Idempotency-Key': 'asserted-1' },
@@ -890,63 +917,128 @@ describe('manual daily news leads API · owner asserted direct entry', () => {
         statement: 'OpenAI发布Astra', note: '早报', url: 'https://openai.com/astra/',
         expected_batch_revision: 3,
       }),
-    }), env(), { waitUntil() {} } as never);
+    }), env(), ctx);
 
-    const payload = await response.json<Record<string, unknown>>();
-    // 没有异步阶段,所以是 200 不是 202。
-    expect(response.status).toBe(200);
-    expect(payload).toMatchObject({
-      ok: true, changed: true, rerender_enqueued: false, pending_initial_freeze: true, batch: null,
-    });
-    expect(payload.lead).toMatchObject({
-      response_profile: 'manual_news_lead_detail_v1',
-      candidate_authorization: 'owner_asserted_v1',
-      vouch: { statement: 'OpenAI发布Astra', vouched_at: 100 },
-    });
-    expect(assertManualNewsLeadCandidate).toHaveBeenCalledWith(expect.anything(), {
+    expect(response.status).toBe(202);
+    expect(await response.json<Record<string, unknown>>()).toMatchObject({ ok: true, created: true });
+    expect(beginOwnerAssertedEntry).toHaveBeenCalledWith(expect.anything(), {
       date: '2026-08-11', text: 'OpenAI发布Astra', url: 'https://openai.com/astra/', note: '早报',
-      statement: 'OpenAI发布Astra', expected_batch_revision: 3,
+      statement: 'OpenAI发布Astra',
     }, 'asserted-1', expect.any(Number));
+    // 入池那一步这时候还没发生 —— 它在后台那一半。
+    expect(assertManualNewsLeadCandidate).not.toHaveBeenCalled();
     expect(submitManualNewsLead).not.toHaveBeenCalled();
-    // 不派发 Workflow、不做任何取证。
     expect(workflowCreate).not.toHaveBeenCalled();
+    expect(queued).toHaveLength(1);
+    await expect(queued[0]).resolves.toBeUndefined();
+    expect(runManualLeadContentEntry).toHaveBeenCalledWith(expect.anything(), {
+      id: entryLead.id,
+      review_date: '2026-08-11',
+      input_url: 'https://openai.com/astra/',
+      input_text: 'OpenAI发布Astra',
+      note: '早报',
+      // 后台那一半靠这个键找回同一行续做，两侧必须是同一个值。
+      submit_idempotency_key: 'asserted-1',
+    }, expect.objectContaining({
+      fetchSource: expect.any(Function), analyze: expect.any(Function),
+      search: expect.any(Function), generate: expect.any(Function),
+    }), { now: expect.any(Number) });
   });
 
-  test('omits expected_batch_revision and statement when the caller did not send them', async () => {
+  test('卡片要读的加工进度出现在详情里', async () => {
+    const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': 'asserted-progress' },
+      body: JSON.stringify({ date: '2026-08-11', text: 'OpenAI发布Astra', owner_asserted: true }),
+    }), env(), collectingCtx().ctx);
+
+    expect((await response.json<{ lead: Record<string, unknown> }>()).lead).toMatchObject({
+      response_profile: 'manual_news_lead_detail_v1',
+      content_progress: {
+        stage: 'submitted', detail: '', material_tier: 'none', deadline_at: 120_100,
+      },
+    });
+  });
+
+  test('expected_batch_revision 不再往下传：加工跑完再读当前批次版本才是入池该用的口径', async () => {
     await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
       method: 'POST',
       headers: { 'Idempotency-Key': 'asserted-2' },
-      body: JSON.stringify({ date: '2026-08-11', text: 'OpenAI发布Astra', owner_asserted: true }),
-    }), env(), { waitUntil() {} } as never);
+      body: JSON.stringify({
+        date: '2026-08-11', text: 'OpenAI发布Astra', owner_asserted: true,
+        expected_batch_revision: 7,
+      }),
+    }), env(), collectingCtx().ctx);
 
-    expect(assertManualNewsLeadCandidate).toHaveBeenCalledWith(expect.anything(), {
+    expect(beginOwnerAssertedEntry).toHaveBeenCalledWith(expect.anything(), {
       date: '2026-08-11', text: 'OpenAI发布Astra', url: undefined, note: undefined,
     }, 'asserted-2', expect.any(Number));
   });
 
-  test('passes store validation and conflict failures through with their status', async () => {
-    vi.mocked(assertManualNewsLeadCandidate).mockResolvedValueOnce({
+  test('同一个幂等键重放时回 200，也不再派发第二轮加工', async () => {
+    vi.mocked(beginOwnerAssertedEntry).mockResolvedValueOnce({
+      ok: true, created: false, lead: entryLead,
+    } as never);
+    const { queued, ctx } = collectingCtx();
+    const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': 'asserted-replay' },
+      body: JSON.stringify({ date: '2026-08-11', text: 'OpenAI发布Astra', owner_asserted: true }),
+    }), env(), ctx);
+
+    expect(response.status).toBe(200);
+    expect(queued).toHaveLength(0);
+    expect(runManualLeadContentEntry).not.toHaveBeenCalled();
+  });
+
+  test('建行本身被拒时按 store 给的状态码回，也不派发加工', async () => {
+    vi.mocked(beginOwnerAssertedEntry).mockResolvedValueOnce({
       ok: false, status: 400, error: 'invalid_vouch_statement',
     } as never);
-    const invalid = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
+    const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
       method: 'POST',
       headers: { 'Idempotency-Key': 'asserted-invalid' },
       body: JSON.stringify({ date: '2026-08-11', text: '。。。。。。', owner_asserted: true }),
-    }), env(), { waitUntil() {} } as never);
-    expect(invalid.status).toBe(400);
-    expect(await invalid.json()).toEqual({ ok: false, status: 400, error: 'invalid_vouch_statement' });
+    }), env(), collectingCtx().ctx);
 
-    vi.mocked(assertManualNewsLeadCandidate).mockResolvedValueOnce({
-      ok: false, status: 409, error: 'candidate_batch_revision_conflict', lead: record,
-    } as never);
-    const conflict = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ ok: false, status: 400, error: 'invalid_vouch_statement' });
+    expect(runManualLeadContentEntry).not.toHaveBeenCalled();
+  });
+
+  test('加工那一半抛异常伤不到已经返回的 202', async () => {
+    vi.mocked(runManualLeadContentEntry).mockRejectedValueOnce(new Error('boom') as never);
+    const { queued, ctx } = collectingCtx();
+    const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
       method: 'POST',
-      headers: { 'Idempotency-Key': 'asserted-conflict' },
+      headers: { 'Idempotency-Key': 'asserted-async-boom' },
       body: JSON.stringify({ date: '2026-08-11', text: 'OpenAI发布Astra', owner_asserted: true }),
-    }), env(), { waitUntil() {} } as never);
-    expect(conflict.status).toBe(409);
-    expect(await conflict.json<{ error: string }>())
-      .toMatchObject({ error: 'candidate_batch_revision_conflict' });
+    }), env(), ctx);
+
+    expect(response.status).toBe(202);
+    // 挂上去的那个 promise 自己把异常吃掉，不会变成 worker 的 unhandled rejection。
+    await expect(queued[0]).resolves.toBeUndefined();
+  });
+
+  test('派发那一刻同步抛异常时同样只影响加工，不影响 202', async () => {
+    vi.mocked(runManualLeadContentEntry).mockImplementationOnce(() => {
+      throw new Error('adapters blew up synchronously');
+    });
+    const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': 'asserted-sync-boom' },
+      body: JSON.stringify({ date: '2026-08-11', text: 'OpenAI发布Astra', owner_asserted: true }),
+    }), env(), collectingCtx().ctx);
+    expect(response.status).toBe(202);
+  });
+
+  test('waitUntil 自己抛异常时也不影响 202', async () => {
+    const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': 'asserted-waituntil' },
+      body: JSON.stringify({ date: '2026-08-11', text: 'OpenAI发布Astra', owner_asserted: true }),
+    }), env(), { waitUntil() { throw new Error('waitUntil unavailable'); } } as never);
+    expect(response.status).toBe(202);
   });
 
   test('rejects a non-boolean owner_asserted instead of silently taking the normal path', async () => {
@@ -954,11 +1046,11 @@ describe('manual daily news leads API · owner asserted direct entry', () => {
       method: 'POST',
       headers: { 'Idempotency-Key': 'asserted-bad' },
       body: JSON.stringify({ date: '2026-08-11', text: 'OpenAI发布Astra', owner_asserted: 'yes' }),
-    }), env(), { waitUntil() {} } as never);
+    }), env(), collectingCtx().ctx);
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ ok: false, error: 'invalid_owner_asserted' });
-    expect(assertManualNewsLeadCandidate).not.toHaveBeenCalled();
+    expect(beginOwnerAssertedEntry).not.toHaveBeenCalled();
     expect(submitManualNewsLead).not.toHaveBeenCalled();
   });
 
@@ -968,15 +1060,14 @@ describe('manual daily news leads API · owner asserted direct entry', () => {
       method: 'POST',
       headers: { 'Idempotency-Key': 'asserted-false' },
       body: JSON.stringify({ date: '2026-08-11', text: 'OpenAI发布Astra', owner_asserted: false }),
-    }), env(), { waitUntil() {} } as never);
+    }), env(), collectingCtx().ctx);
 
     expect(response.status).toBe(202);
     expect(submitManualNewsLead).toHaveBeenCalled();
-    expect(assertManualNewsLeadCandidate).not.toHaveBeenCalled();
+    expect(beginOwnerAssertedEntry).not.toHaveBeenCalled();
   });
 
-  test('still works when the research and workflow dependencies are unavailable', async () => {
-    // 取证链路挂掉正是这条通道存在的理由,不能跟着一起 503。
+  test('取证链路整个挂掉时照样能提交 —— 这条通道存在的理由就是这个', async () => {
     const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
       method: 'POST',
       headers: { 'Idempotency-Key': 'asserted-no-deps' },
@@ -984,10 +1075,10 @@ describe('manual daily news leads API · owner asserted direct entry', () => {
     }), env({
       MANUAL_NEWS_LEAD_WORKFLOW: undefined, MANUAL_NEWS_RESEARCH_ORIGIN: undefined,
       MANUAL_NEWS_RESEARCH_TOKEN: undefined, DEEPSEEK_API_KEY: undefined,
-    }), { waitUntil() {} } as never);
+    }), collectingCtx().ctx);
 
-    expect(response.status).toBe(200);
-    expect(assertManualNewsLeadCandidate).toHaveBeenCalled();
+    expect(response.status).toBe(202);
+    expect(beginOwnerAssertedEntry).toHaveBeenCalled();
   });
 
   test('503s when the signing keys themselves are unavailable', async () => {
@@ -995,11 +1086,39 @@ describe('manual daily news leads API · owner asserted direct entry', () => {
       method: 'POST',
       headers: { 'Idempotency-Key': 'asserted-no-keys' },
       body: JSON.stringify({ date: '2026-08-11', text: 'OpenAI发布Astra', owner_asserted: true }),
-    }), env({ MANUAL_NEWS_VERIFICATION_SECRET: undefined }), { waitUntil() {} } as never);
+    }), env({ MANUAL_NEWS_VERIFICATION_SECRET: undefined }), collectingCtx().ctx);
 
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ ok: false, error: 'dependency_unavailable' });
-    expect(assertManualNewsLeadCandidate).not.toHaveBeenCalled();
+    expect(beginOwnerAssertedEntry).not.toHaveBeenCalled();
+  });
+
+  // 加工挂在 waitUntil 上，isolate 被回收就再没人去入池。面板轮询列表时把过期还没入池的
+  // 捡回来补跑 —— 入池永不失败这条硬约束靠它兜住最后那一种情况。
+  test('列表 GET 顺手把加工没跑完的线索捡回来补入池', async () => {
+    vi.mocked(listStaleManualLeadContentEntries).mockResolvedValueOnce([{
+      id: 'ml-20260811-stale0000000', input_url: '', input_text: '一句线索', note: '',
+      submit_idempotency_key: 'stale-key', review_date: '2026-08-11',
+    }] as never);
+    vi.mocked(listManualNewsLeads).mockResolvedValue([] as never);
+    vi.mocked(getManualNewsLeadCandidateState).mockResolvedValue({} as never);
+    vi.mocked(listManualNewsCandidateAuthorizations).mockResolvedValue(new Map() as never);
+    const { queued, ctx } = collectingCtx();
+
+    const response = await handleManualNewsLeadsApi(
+      request('/api/digest/daily-news-leads?date=2026-08-11'), env(), ctx,
+    );
+
+    expect(response.status).toBe(200);
+    expect(runManualLeadContentEntry).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        id: 'ml-20260811-stale0000000', submit_idempotency_key: 'stale-key',
+      }),
+      expect.anything(),
+      { now: expect.any(Number) },
+    );
+    await expect(Promise.all(queued)).resolves.toBeDefined();
   });
 });
 
@@ -1020,27 +1139,26 @@ describe('manual daily news leads API · lead enrichment', () => {
     return { queued, ctx: { waitUntil(promise: Promise<unknown>) { queued.push(promise); } } as never };
   }
 
-  async function directEntry(ctx: unknown) {
-    return handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
-      method: 'POST',
-      headers: { 'Idempotency-Key': 'enrich-assert-1' },
-      body: JSON.stringify({
-        date: '2026-08-11', text: 'OpenAI发布Astra', owner_asserted: true,
-        url: 'https://openai.com/astra/',
-      }),
-    }), env(), ctx as never);
+  async function vouchEntry(ctx: unknown, key = 'enrich-vouch-x') {
+    return handleManualNewsLeadsApi(request(
+      `/api/digest/daily-news-leads/${record.id}/vouch-candidate`,
+      {
+        method: 'POST',
+        headers: { 'Idempotency-Key': key },
+        body: JSON.stringify({
+          expected_version: 4, expected_batch_revision: 1, statement: 'OpenAI发布Astra',
+        }),
+      },
+    ), env(), ctx as never);
   }
 
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(runManualLeadEnrichment).mockResolvedValue('written' as never);
+    vi.mocked(listStaleManualLeadContentEntries).mockResolvedValue([] as never);
     vi.mocked(getManualNewsLead).mockResolvedValue(assertedZeroEvidence as never);
     vi.mocked(getManualNewsCandidateAuthorization).mockResolvedValue({
       candidate_authorization: 'owner_asserted_v1', vouch: null,
-    } as never);
-    vi.mocked(assertManualNewsLeadCandidate).mockResolvedValue({
-      ok: true, changed: true, lead: assertedZeroEvidence,
-      batch: null, pending_initial_freeze: true, rerender_enqueued: false,
     } as never);
     vi.mocked(vouchManualNewsLeadCandidate).mockResolvedValue({
       ok: true, changed: true, lead: assertedZeroEvidence,
@@ -1048,9 +1166,9 @@ describe('manual daily news leads API · lead enrichment', () => {
     } as never);
   });
 
-  test('直接录入之后带着线索的链接与文字去补素材,不让确认等它', async () => {
+  test('担保之后带着线索的链接与文字去补素材,不让确认等它', async () => {
     const { queued, ctx } = collectingCtx();
-    const response = await directEntry(ctx);
+    const response = await vouchEntry(ctx, 'enrich-vouch-material');
 
     expect(response.status).toBe(200);
     expect(runManualLeadEnrichment).toHaveBeenCalledWith(
@@ -1072,20 +1190,20 @@ describe('manual daily news leads API · lead enrichment', () => {
   });
 
   test('线索没有链接时 url 传 null,让取材走搜索那条路', async () => {
-    vi.mocked(assertManualNewsLeadCandidate).mockResolvedValueOnce({
+    vi.mocked(vouchManualNewsLeadCandidate).mockResolvedValueOnce({
       ok: true, changed: true, lead: { ...assertedZeroEvidence, input_url: '' },
       batch: null, pending_initial_freeze: true, rerender_enqueued: false,
     } as never);
-    await directEntry(collectingCtx().ctx);
+    await vouchEntry(collectingCtx().ctx, 'enrich-vouch-nourl');
     expect(runManualLeadEnrichment).toHaveBeenCalledWith(
       expect.anything(), expect.objectContaining({ url: null }), expect.anything(),
     );
   });
 
-  test('补充抛异常时确认仍然成功返回 200', async () => {
+  test('补充抛异常时担保仍然成功返回 200', async () => {
     vi.mocked(runManualLeadEnrichment).mockRejectedValueOnce(new Error('gateway exploded') as never);
     const { queued, ctx } = collectingCtx();
-    const response = await directEntry(ctx);
+    const response = await vouchEntry(ctx, 'enrich-vouch-async-boom');
 
     expect(response.status).toBe(200);
     expect(await response.json<Record<string, unknown>>()).toMatchObject({ ok: true, changed: true });
@@ -1093,29 +1211,29 @@ describe('manual daily news leads API · lead enrichment', () => {
     await expect(queued[0]).resolves.toBeUndefined();
   });
 
-  test('补充在派发那一刻同步抛异常时,确认同样成功返回', async () => {
+  test('补充在派发那一刻同步抛异常时,担保同样成功返回', async () => {
     vi.mocked(runManualLeadEnrichment).mockImplementationOnce(() => {
       throw new Error('adapters blew up synchronously');
     });
-    const response = await directEntry(collectingCtx().ctx);
+    const response = await vouchEntry(collectingCtx().ctx, 'enrich-vouch-sync-boom');
     expect(response.status).toBe(200);
     expect(await response.json<Record<string, unknown>>()).toMatchObject({ ok: true });
   });
 
-  test('waitUntil 自己抛异常时确认也不受影响', async () => {
-    const response = await directEntry({
+  test('waitUntil 自己抛异常时担保也不受影响', async () => {
+    const response = await vouchEntry({
       waitUntil() { throw new Error('waitUntil unavailable'); },
-    });
+    }, 'enrich-vouch-waituntil');
     expect(response.status).toBe(200);
     expect(await response.json<Record<string, unknown>>()).toMatchObject({ ok: true });
   });
 
-  test('直接录入失败时不补素材', async () => {
+  test('担保失败时不补素材', async () => {
     // 409 也会带回线索本身(store 的既有形状),所以这里只有 ok 那道判断能挡住派发。
-    vi.mocked(assertManualNewsLeadCandidate).mockResolvedValueOnce({
+    vi.mocked(vouchManualNewsLeadCandidate).mockResolvedValueOnce({
       ok: false, status: 409, error: 'candidate_batch_revision_conflict', lead: assertedZeroEvidence,
     } as never);
-    const response = await directEntry(collectingCtx().ctx);
+    const response = await vouchEntry(collectingCtx().ctx, 'enrich-vouch-conflict');
     expect(response.status).toBe(409);
     expect(runManualLeadEnrichment).not.toHaveBeenCalled();
   });
