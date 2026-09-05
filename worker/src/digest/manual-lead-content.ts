@@ -73,16 +73,28 @@ export interface ManualLeadContentMaterial {
 /** 交给生成函数的素材正文上限，与 `selectEnrichExcerptForFeeds` 的 `slice(0, 4000)` 同口径。 */
 export const MANUAL_LEAD_CONTENT_EXCERPT_MAX_CHARS = 4_000;
 
-/** 整轮加工的总上限（规格第 4 节）。到点立刻走兜底入池，不得挂住。 */
-export const MANUAL_LEAD_CONTENT_BUDGET_MS = 120_000;
-/** 分段预算：抓正文 30s、分析拟检索词 30s、搜索 45s、生成 30s。 */
+/**
+ * 整轮加工的总上限。到点立刻走兜底入池，不得挂住。
+ *
+ * owner 明确说过「一两分钟都可以等，只要拿到结果」，所以这里按各段实际需要给足，而不是
+ * 挑一个好看的小数字。2026-09-05 生产实测：抓正文 0.3–2.3s、ScrapeBadger 搜索 8–26s、
+ * 生成那一次 DeepSeek 调用本身允许 60s（`classify-translate.ts` 的 `callJson`）。
+ */
+export const MANUAL_LEAD_CONTENT_BUDGET_MS = 180_000;
+/**
+ * 分段预算。
+ *
+ * **生成这一段必须大于它内部那次模型调用的超时**，否则预算比调用还短，慢一点就必被掐死
+ * ——2026-09-05 首轮验收就是这么失败的：素材抓到了（档位 report），生成停在 30s 被砍，
+ * 候选只能退回 owner 那句话。
+ */
 export const MANUAL_LEAD_CONTENT_STAGE_BUDGET_MS: Readonly<Record<
   'fetching_source' | 'analyzing' | 'searching' | 'drafting', number
 >> = {
   fetching_source: 30_000,
   analyzing: 30_000,
-  searching: 45_000,
-  drafting: 30_000,
+  searching: 50_000,
+  drafting: 70_000,
 };
 
 const TIER_ORDER: Readonly<Record<Exclude<ManualLeadMaterialTier, 'none'>, number>> = {
