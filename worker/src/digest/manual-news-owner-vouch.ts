@@ -34,8 +34,13 @@ const MANUAL_NEWS_OWNER_VOUCH_HMAC_DOMAIN = 'manual-news-owner-vouch-hmac-v1\0';
 const MANUAL_NEWS_OWNER_VOUCH_EVENT_DOMAIN = 'mnvo1\0';
 const MANUAL_NEWS_OWNER_VOUCH_EVENT_PREFIX = 'mnvo1:';
 
-/** 控制字符、bidi 改写、零宽字符：陈述会直接当标题渲染，一律拒绝。 */
-const OWNER_VOUCH_UNSAFE_UNICODE =
+/**
+ * 控制字符、bidi 改写、零宽字符：陈述会直接当标题渲染，一律拒绝。
+ *
+ * 导出给 `manual-news-owner-asserted.ts` 复用：模型从正文起草的标题与摘要同样会被直接
+ * 渲染，两处必须是同一份口径，各写一份迟早会漂。
+ */
+export const OWNER_VOUCH_UNSAFE_UNICODE =
   /[\u0000-\u001f\u007f\u061c\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/u;
 
 const OWNER_VOUCH_MIN_CODE_POINTS = 6;

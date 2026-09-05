@@ -5240,6 +5240,73 @@ describe('manual lead enrichment', () => {
     expect(itemExtraOf(state, itemId).manual_evidence_text).toBe('先到的背景。');
   });
 
+  // -------------------------------------------------------------------------
+  // 2026-09-05 排查：owner 直接录入成功入池后，背景素材始终没写进
+  // items.extra.manual_evidence_text，prod 上一行 [manual-lead-enrichment] 日志都没有。
+  // 这条用例走真实路径（HTTP 入口 → 真 store → 真 waitUntil → 真适配器），只把最外层
+  // 的 fetch 换成桩：调用链里但凡有一环没被执行，这里就会失败。
+  // -------------------------------------------------------------------------
+  test('排查:直接录入的 HTTP 请求确实派发了取材,素材落进 extra', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    await frozenAssertedBatch(state);
+    const calls: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const target = String(typeof input === 'string' ? input : (input as Request).url || input);
+      calls.push(target);
+      if (target.includes('/v1/plain-text')) {
+        return new Response(JSON.stringify({
+          text: 'OpenAI 今天发布 Astra，面向企业客户开放。', url: 'https://openai.com/index/astra/',
+          publisher: 'openai.com', kind: 'document',
+        }), { headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({ background: '取回来的背景。' }) },
+          finish_reason: 'stop' }],
+      }), { headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const pending: Promise<unknown>[] = [];
+    const logged: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
+    try {
+      const response = await handleManualNewsLeadsApi(new Request(
+        'https://api.example.test/api/digest/daily-news-leads',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer owner-asserted-review-secret',
+            'Content-Type': 'application/json',
+            'Idempotency-Key': 'repro-enrichment-1',
+          },
+          body: JSON.stringify({
+            date: '2026-08-28', text: ASSERTED_STATEMENT, owner_asserted: true,
+            statement: ASSERTED_STATEMENT,
+          }),
+        },
+      ), {
+        ...state.env,
+        DAILY_NEWS_REVIEW_ENABLED: '1',
+        MANUAL_NEWS_RESEARCH_ORIGIN: 'https://gateway.example',
+        MANUAL_NEWS_RESEARCH_TOKEN: 'gateway-token',
+        DEEPSEEK_API_KEY: 'deepseek-key',
+      } as Env, { waitUntil(work: Promise<unknown>) { pending.push(work); } } as never, 100);
+      expect(response.status).toBe(200);
+      const payload = await response.json() as { ok: boolean; lead: { id: string } };
+      expect(payload.ok).toBe(true);
+      await Promise.all(pending);
+      expect(calls.some((url) => url.includes('/v1/plain-text'))).toBe(true);
+      const extra = itemExtraOf(state, `blog:manual:${payload.lead.id}`);
+      expect(extra.manual_evidence_text).toBe('取回来的背景。');
+      // 那行无条件日志确实打了出来,且三项都是「该派发取材」的取值。
+      expect(logged.filter((line) => line.startsWith('[manual-lead-enrichment] schedule')))
+        .toEqual([`[manual-lead-enrichment] schedule ok=true lead=${payload.lead.id} evidence=0`]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.log = originalLog;
+    }
+  });
+
   test('候选行不存在时安静跳过,不炸也不建行', async () => {
     const { state } = await assertedCandidate();
     await expect(runManualLeadEnrichment(state.env, {
