@@ -206,6 +206,11 @@ function scheduleLeadEnrichment(
 ): void {
   try {
     const lead = outcome.ok ? outcome.lead : undefined;
+    // 无条件先记一行：2026-09-05 排查「取材一行日志都没有」时，光靠下游的失败日志分不清
+    // 是没被调用、被这两个条件挡住、还是调用了但静默失败。这行日志把前两种直接区分开。
+    console.log('[manual-lead-enrichment] schedule'
+      + ` ok=${outcome.ok} lead=${lead ? lead.id : 'none'}`
+      + ` evidence=${lead ? (lead.evidence?.length ?? -1) : -1}`);
     if (!lead || !manualLeadNeedsEnrichment(lead)) return;
     ctx.waitUntil(runManualLeadEnrichment(env, {
       leadId: lead.id,
