@@ -58,7 +58,9 @@ import {
   loadVerifiedManualSourceSupportProofs,
   loadVerifiedManualAssessment,
   MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL,
+  MANUAL_VERIFICATION_SNAPSHOT_SET_GUARD_SQL,
   manualVerificationSnapshotGuardBindings,
+  manualVerificationSnapshotSetGuardBinding,
   type PersistedManualVerificationRow,
 } from './manual-news-leads-verification';
 import type {
@@ -140,27 +142,52 @@ function sourceSupportEvidenceSnapshotGuard(
   sql: string;
   bindings: unknown[];
 } {
-  const predicates = evidence.map(() => `EXISTS (
-    SELECT 1 FROM manual_news_evidence e
-    WHERE e.lead_id = ? AND e.evidence_id = ? AND e.response_key_id = ?
-      AND e.url = ? AND e.source_type = ? AND e.publisher = ?
-      AND e.published_at IS ? AND e.retrieved_at = ? AND e.title = ? AND e.excerpt = ?
-      AND e.claims_supported_json = ? AND e.fetch_audit_json = ? AND e.reliable = ?
-  )`);
   return {
     // 证据集为空时只剩「这条线索确实一条证据都没有」这一句 —— owner 直接录入
     // (owner_asserted_v1) 就是这种形态,不能像以前那样直接判 false。
+    //
+    // 证据逐条展开会各占 13 个绑参,取满 8 条(MANUAL_NEWS_EVIDENCE_MAX_COUNT)光这一段
+    // 就 104 个,越过 D1 单语句 100 个的绑参上限。改成整批打成一个 JSON 绑参、
+    // json_each 展开逐字段比对:字段集合、比较方式(published_at 仍用 NULL 安全的 IS,
+    // 其余仍用 =)、reliable / retrieved_at 的数字形态都与逐条展开逐字一致。
     sql: `(SELECT COUNT(*) FROM manual_news_evidence WHERE lead_id = ?) = ?
-      AND ${predicates.length ? predicates.join(' AND ') : '1 = 1'}`,
+      AND NOT EXISTS (
+        SELECT 1 FROM json_each(?) evidence_entry
+        WHERE NOT EXISTS (
+          SELECT 1 FROM manual_news_evidence e
+          WHERE e.lead_id = json_extract(evidence_entry.value, '$.lead_id')
+            AND e.evidence_id = json_extract(evidence_entry.value, '$.evidence_id')
+            AND e.response_key_id = json_extract(evidence_entry.value, '$.response_key_id')
+            AND e.url = json_extract(evidence_entry.value, '$.url')
+            AND e.source_type = json_extract(evidence_entry.value, '$.source_type')
+            AND e.publisher = json_extract(evidence_entry.value, '$.publisher')
+            AND e.published_at IS json_extract(evidence_entry.value, '$.published_at')
+            AND e.retrieved_at = json_extract(evidence_entry.value, '$.retrieved_at')
+            AND e.title = json_extract(evidence_entry.value, '$.title')
+            AND e.excerpt = json_extract(evidence_entry.value, '$.excerpt')
+            AND e.claims_supported_json = json_extract(evidence_entry.value, '$.claims_supported_json')
+            AND e.fetch_audit_json = json_extract(evidence_entry.value, '$.fetch_audit_json')
+            AND e.reliable = json_extract(evidence_entry.value, '$.reliable')
+        )
+      )`,
     bindings: [
       leadId,
       evidence.length,
-      ...evidence.flatMap((item) => [
-        leadId, item.id, item.response_key_id || '', item.url, item.source_type, item.publisher,
-        item.published_at, item.retrieved_at, item.title, item.excerpt,
-        JSON.stringify(item.claims_supported), JSON.stringify(item.fetch_audit || null),
-        item.reliable ? 1 : 0,
-      ]),
+      JSON.stringify(evidence.map((item) => ({
+        lead_id: leadId,
+        evidence_id: item.id,
+        response_key_id: item.response_key_id || '',
+        url: item.url,
+        source_type: item.source_type,
+        publisher: item.publisher,
+        published_at: item.published_at ?? null,
+        retrieved_at: Number(item.retrieved_at),
+        title: item.title,
+        excerpt: item.excerpt,
+        claims_supported_json: JSON.stringify(item.claims_supported),
+        fetch_audit_json: JSON.stringify(item.fetch_audit || null),
+        reliable: item.reliable ? 1 : 0,
+      }))),
     ],
   };
 }
@@ -1401,11 +1428,9 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       if (!Number.isSafeInteger(generation) || generation < 0) {
         throw new Error('invalid_news_review_candidate_generation');
       }
-      const existingProofGuard = existingManual.length
-        ? existingManual.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
-        : '1 = 1';
-      const existingProofBindings = existingManual.flatMap((entry) =>
-        manualVerificationSnapshotGuardBindings(entry.lead_id, entry.verification));
+      // 整批已确认快照只占 1 个绑参 —— 按条数展开会随当天候选条数撞 D1 100 个绑参上限。
+      const existingProofGuard = MANUAL_VERIFICATION_SNAPSHOT_SET_GUARD_SQL;
+      const existingProofBindings = [manualVerificationSnapshotSetGuardBinding(existingManual)];
       const sharedGate = `EXISTS (
         SELECT 1 FROM manual_news_leads l
         WHERE l.id = ? AND l.version = ? AND l.status = 'verifying'
@@ -1590,11 +1615,9 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     const inheritedSelectionHash = inheritsHumanSelection
       ? await newsReviewSelectionHash(merged.default_selected_ids)
       : null;
-    const existingProofGuard = existingManual.length
-      ? existingManual.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
-      : '1 = 1';
-    const existingProofBindings = existingManual.flatMap((entry) =>
-      manualVerificationSnapshotGuardBindings(entry.lead_id, entry.verification));
+    // 同上：整批已确认快照打成一个 JSON 绑参。
+    const existingProofGuard = MANUAL_VERIFICATION_SNAPSHOT_SET_GUARD_SQL;
+    const existingProofBindings = [manualVerificationSnapshotSetGuardBinding(existingManual)];
     const activeSnapshotGuard = `EXISTS (
       SELECT 1 FROM daily_news_review_batches b
       WHERE b.review_date = ? AND b.lineage_id = ? AND b.batch_id = ?
@@ -3401,11 +3424,9 @@ export async function confirmManualNewsLeadCandidate(
     ? await newsReviewSelectionHash(merged.default_selected_ids)
     : null;
   const existingManualVerifications = activeSanitization?.manual_verifications || [];
-  const existingManualGuard = existingManualVerifications.length
-    ? existingManualVerifications.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
-    : '1 = 1';
-  const existingManualBindings = existingManualVerifications.flatMap((snapshot) =>
-    manualVerificationSnapshotGuardBindings(snapshot.lead_id, snapshot.verification));
+  // 同上：整批已确认快照打成一个 JSON 绑参。
+  const existingManualGuard = MANUAL_VERIFICATION_SNAPSHOT_SET_GUARD_SQL;
+  const existingManualBindings = [manualVerificationSnapshotSetGuardBinding(existingManualVerifications)];
 
   const statements = [
     confirmedLeadItemStatement(
@@ -3580,9 +3601,8 @@ function confirmedLeadItemStatement(
          AND (SELECT COUNT(*) FROM manual_news_leads
            WHERE review_date = ? AND confirmed_at IS NOT NULL) < ${MANUAL_NEWS_REVIEW_CANDIDATE_LIMIT}`
       : '';
-  const existingManualGuard = requiredManualVerifications.length
-    ? requiredManualVerifications.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
-    : '1 = 1';
+  // 同上：整批已确认快照打成一个 JSON 绑参。
+  const existingManualGuard = MANUAL_VERIFICATION_SNAPSHOT_SET_GUARD_SQL;
   const values: unknown[] = [
     candidate.item_id,
     `manual:${lead.id}`,
@@ -3597,8 +3617,7 @@ function confirmedLeadItemStatement(
     lead.id,
     expectedVersion,
     ...manualVerificationSnapshotGuardBindings(lead.id, verification),
-    ...requiredManualVerifications.flatMap((snapshot) =>
-      manualVerificationSnapshotGuardBindings(snapshot.lead_id, snapshot.verification)),
+    manualVerificationSnapshotSetGuardBinding(requiredManualVerifications),
   ];
   if (expectedActiveBatch) {
     values.push(lead.review_date, lead.review_date, expectedActiveBatch.batch_id, expectedActiveBatch.batch_revision);

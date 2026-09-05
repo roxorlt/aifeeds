@@ -21,8 +21,8 @@ import {
 import {
   loadSignedManualCandidateSnapshots,
   loadVerifiedManualCandidateProof,
-  MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL,
-  manualVerificationSnapshotGuardBindings,
+  MANUAL_VERIFICATION_SNAPSHOT_SET_GUARD_SQL,
+  manualVerificationSnapshotSetGuardBinding,
   type PersistedManualVerificationRow,
 } from './manual-news-leads-verification';
 
@@ -779,11 +779,9 @@ export async function submitNewsReviewSelection(
       selected_ids: selectedIds,
     };
   }
-  const verificationGuard = sanitized.manual_verifications.length
-    ? sanitized.manual_verifications.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
-    : '1 = 1';
-  const verificationBindings = sanitized.manual_verifications.flatMap((snapshot) =>
-    manualVerificationSnapshotGuardBindings(snapshot.lead_id, snapshot.verification));
+  // 整批已确认快照只占 1 个绑参 —— 按条数展开会随当天候选条数撞 D1 100 个绑参上限。
+  const verificationGuard = MANUAL_VERIFICATION_SNAPSHOT_SET_GUARD_SQL;
+  const verificationBindings = [manualVerificationSnapshotSetGuardBinding(sanitized.manual_verifications)];
   const writeAuthorization = await authorizeFormalNewsSet(
     env, input.date, batch.candidate_ids, 'review_submit_write_guard',
   );
@@ -1279,11 +1277,9 @@ async function sanitizeCurrentNewsReviewBatchAttempt(
   const selectionHash = appliedSelected ? await newsReviewSelectionHash(appliedSelected) : null;
   const editRevision = publishedChanged ? current.edit_revision + 1 : current.edit_revision;
   const publishStatus = publishedChanged ? 'pending' : current.publish_status;
-  const verificationGuard = manualVerifications.length
-    ? manualVerifications.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
-    : '1 = 1';
-  const verificationBindings = manualVerifications.flatMap((snapshot) =>
-    manualVerificationSnapshotGuardBindings(snapshot.lead_id, snapshot.verification));
+  // 同上：整批已确认快照打成一个 JSON 绑参。
+  const verificationGuard = MANUAL_VERIFICATION_SNAPSHOT_SET_GUARD_SQL;
+  const verificationBindings = [manualVerificationSnapshotSetGuardBinding(manualVerifications)];
   const sanitizeWriteAuthorization = await authorizeFormalNewsSet(
     env, date, candidateIds, 'review_sanitize_write_guard',
   );

@@ -153,6 +153,59 @@ export function manualVerificationSnapshotGuardBindings(
   ];
 }
 
+/**
+ * 集合版快照门禁。语义与「把 `MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL` 按条数 AND 起来」
+ * 逐字等价（同样的 11 个字段、同样用 `=` 比较、同样只认 status='active'、快照集合为空时恒真），
+ * 区别只在绑参个数：从 `11 × N` 降到固定 1 个 JSON 字符串。
+ *
+ * 为什么必须这么写：D1 单条语句的绑参上限是 100 个（clawhub.ts 有实测记录）。当天每多一条
+ * 已确认的手工候选就往同一条原子写门禁里多塞 11 个绑参，7 条就越界，直接 500
+ * （`D1_ERROR: too many SQL variables`）。写法照抄仓库既有范式 `executeFormalNewsFinalGuard`：
+ * 整个数组 `JSON.stringify` 当单个参数传进去，SQL 里 `json_each(?)` 展开、`json_extract` 取字段。
+ *
+ * 「NOT EXISTS(有一条快照对不上)」等价于「每条快照都对得上」；`json_each('[]')` 不产行，
+ * 所以空集合恒真，与旧写法的 `'1 = 1'` 一致。
+ */
+export const MANUAL_VERIFICATION_SNAPSHOT_SET_GUARD_SQL = `NOT EXISTS (
+  SELECT 1 FROM json_each(?) snapshot_entry
+  WHERE NOT EXISTS (
+    SELECT 1 FROM manual_news_assessment_verifications verification
+    WHERE verification.verification_id = json_extract(snapshot_entry.value, '$.verification_id')
+      AND verification.lead_id = json_extract(snapshot_entry.value, '$.lead_id')
+      AND verification.assessment_version = json_extract(snapshot_entry.value, '$.assessment_version')
+      AND verification.policy_version = json_extract(snapshot_entry.value, '$.policy_version')
+      AND verification.verification_key_id = json_extract(snapshot_entry.value, '$.verification_key_id')
+      AND verification.canonical_digest = json_extract(snapshot_entry.value, '$.canonical_digest')
+      AND verification.hmac_sha256 = json_extract(snapshot_entry.value, '$.hmac_sha256')
+      AND verification.verification_json = json_extract(snapshot_entry.value, '$.verification_json')
+      AND verification.processing_owner = json_extract(snapshot_entry.value, '$.processing_owner')
+      AND verification.processing_attempt = json_extract(snapshot_entry.value, '$.processing_attempt')
+      AND verification.creation_nonce = json_extract(snapshot_entry.value, '$.creation_nonce')
+      AND verification.status = 'active'
+  )
+)`;
+
+/** `MANUAL_VERIFICATION_SNAPSHOT_SET_GUARD_SQL` 的唯一绑参：整批快照打成一个 JSON 字符串。 */
+export function manualVerificationSnapshotSetGuardBinding(
+  snapshots: ReadonlyArray<{ lead_id: string; verification: PersistedManualVerificationRow }>,
+): string {
+  return JSON.stringify(snapshots.map((snapshot) => ({
+    // 字段顺序与 manualVerificationSnapshotGuardBindings 一一对应，数字字段照样走 Number()，
+    // 好让 json_extract 取出来的是 INTEGER 而不是 TEXT。
+    verification_id: snapshot.verification.verification_id ?? null,
+    lead_id: snapshot.lead_id ?? null,
+    assessment_version: Number(snapshot.verification.assessment_version),
+    policy_version: snapshot.verification.policy_version ?? null,
+    verification_key_id: snapshot.verification.verification_key_id ?? null,
+    canonical_digest: snapshot.verification.canonical_digest ?? null,
+    hmac_sha256: snapshot.verification.hmac_sha256 ?? null,
+    verification_json: snapshot.verification.verification_json ?? null,
+    processing_owner: snapshot.verification.processing_owner ?? null,
+    processing_attempt: Number(snapshot.verification.processing_attempt),
+    creation_nonce: snapshot.verification.creation_nonce ?? null,
+  })));
+}
+
 function parseJson<T>(value: string | null | undefined, fallback: T): T {
   try { return JSON.parse(value || '') as T; } catch { return fallback; }
 }
