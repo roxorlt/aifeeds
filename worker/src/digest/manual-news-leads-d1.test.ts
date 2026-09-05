@@ -40,6 +40,9 @@ import {
   submitManualNewsLead,
   vouchManualNewsLeadCandidate,
   assertManualNewsLeadCandidate,
+  beginOwnerAssertedEntry,
+  listStaleManualLeadContentEntries,
+  setManualLeadContentStage,
 } from './manual-news-leads-store';
 import {
   loadManualNewsEvidence,
@@ -101,7 +104,9 @@ class SqliteD1 {
         submit_idempotency_key TEXT NOT NULL, last_mutation_kind TEXT, last_mutation_idempotency_key TEXT,
         last_mutation_nonce TEXT,
         processing_owner TEXT, processing_attempt INTEGER NOT NULL DEFAULT 0, processing_lease_until INTEGER,
-        confirmed_batch_id TEXT, confirmed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+        confirmed_batch_id TEXT, confirmed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        content_stage TEXT, content_stage_detail TEXT, content_material_tier TEXT,
+        content_deadline_at INTEGER
       );
       CREATE TABLE manual_news_evidence (
         lead_id TEXT NOT NULL, evidence_id TEXT NOT NULL,
@@ -6179,4 +6184,213 @@ describe('manual news atomic write bind budget', () => {
     expect(state.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM items
       WHERE source_ref = 'manual_lead'`).get()).toEqual({ count: 12 });
   }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// 一步录入拆成两步（2026-09-05 规格第 1 / 4 / 8 节）
+//
+// 候选的标题与摘要要由模型从抓回的正文写出来，而它们进的是被签名覆盖的投影 —— 签名之前
+// 就确定，不是事后改写。所以签名必须等内容加工跑完，而加工要一两分钟：提交这一步只建行
+// 并立刻返回，加工与随后的签名入池都在后台跑。
+//
+// 这一组用例守的是那条硬约束：**入池永不失败，也不被取材或生成连坐**。
+// ---------------------------------------------------------------------------
+describe('一步录入拆成「先建行、后加工入池」', () => {
+  const DRAFTED = {
+    title: 'OpenAI 发布企业级模型 Astra',
+    summary: 'OpenAI 今日发布 Astra，面向企业客户开放，是这一系列的第一款产品。',
+    source: 'openai.com',
+    url: 'https://openai.com/index/astra/',
+  };
+
+  async function entryFixture(inputUrl = 'https://openai.com/index/astra/') {
+    const state = await stuckZeroEvidenceFixture(inputUrl);
+    const frozen = await frozenAssertedBatch(state);
+    const begun = await beginOwnerAssertedEntry(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT, url: inputUrl, note: '',
+    }, 'two-phase-entry', 100);
+    expect(begun.ok).toBe(true);
+    return { state, frozen, lead: begun.ok ? begun.lead : null! };
+  }
+
+  function itemRowOf(state: { db: SqliteD1 }, itemId: string) {
+    return state.db.sqlite.prepare(
+      'SELECT title, content, content_translated, author, url, published_at FROM items WHERE id = ?',
+    ).get(itemId) as Record<string, unknown> | undefined;
+  }
+
+  function extraOf(state: { db: SqliteD1 }, itemId: string): Record<string, unknown> {
+    const row = state.db.sqlite.prepare('SELECT extra FROM items WHERE id = ?')
+      .get(itemId) as { extra: string | null } | undefined;
+    return JSON.parse(row?.extra || '{}') as Record<string, unknown>;
+  }
+
+  function verificationPayloadOf(state: { db: SqliteD1 }, leadId: string): Record<string, unknown> {
+    const row = state.db.sqlite.prepare(
+      'SELECT verification_json FROM manual_news_assessment_verifications WHERE lead_id = ?',
+    ).get(leadId) as { verification_json: string } | undefined;
+    return JSON.parse(row?.verification_json || '{}') as Record<string, unknown>;
+  }
+
+  test('建行这一步不签名、不入池，卡片上是「已提交，排队中」', async () => {
+    const { state, lead } = await entryFixture();
+
+    expect(lead).toMatchObject({
+      status: 'needs_review', version: 1, confirmed_at: null,
+      content_progress: { stage: 'submitted', detail: '', material_tier: 'none' },
+    });
+    expect(lead.content_progress?.deadline_at).toBe(100 + 120_000);
+    // 还没进候选池：没有签名快照，items 里也还没有这一行。
+    expect(state.db.sqlite.prepare(
+      'SELECT COUNT(*) AS n FROM manual_news_assessment_verifications WHERE lead_id = ?',
+    ).get(lead.id)).toEqual({ n: 0 });
+    expect(itemRowOf(state, `blog:manual:${lead.id}`)).toBeUndefined();
+    // 但 submit 审计已经如实记下来了。
+    expect(state.db.sqlite.prepare(
+      `SELECT action, to_status FROM manual_news_lead_audit WHERE lead_id = ?`,
+    ).all(lead.id)).toEqual([{ action: 'submit', to_status: 'needs_review' }]);
+  });
+
+  test('同一个幂等键重放时命中已有线索，不建第二行', async () => {
+    const { state, lead } = await entryFixture();
+    const again = await beginOwnerAssertedEntry(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT, url: 'https://openai.com/index/astra/', note: '',
+    }, 'two-phase-entry', 200);
+    expect(again).toMatchObject({ ok: true, created: false, lead: { id: lead.id } });
+    expect(state.db.sqlite.prepare(
+      `SELECT COUNT(*) AS n FROM manual_news_leads WHERE submit_idempotency_key = ?`,
+    ).get('two-phase-entry')).toEqual({ n: 1 });
+  });
+
+  test('同一个幂等键换了内容时拒掉，不悄悄改写已建的行', async () => {
+    const { state } = await entryFixture();
+    await expect(beginOwnerAssertedEntry(state.env, {
+      date: '2026-08-28', text: '换了一句别的', url: '', note: '',
+    }, 'two-phase-entry', 200))
+      .rejects.toThrow('idempotency_key_reused_with_different_payload');
+  });
+
+  test('加工进度回写不动 version，也不动任何被门禁绑定的东西', async () => {
+    const { state, lead } = await entryFixture();
+    await setManualLeadContentStage(state.env, lead.id, {
+      stage: 'searching', detail: '正在检索相关报道',
+    }, 150);
+    const after = await getManualNewsLead(state.env, lead.id);
+    expect(after).toMatchObject({
+      version: 1, status: 'needs_review', confirmed_at: null,
+      content_progress: { stage: 'searching', detail: '正在检索相关报道' },
+    });
+  });
+
+  test('起草结果进签名投影：入池后的标题与摘要就是模型写的那一份', async () => {
+    const { state, frozen, lead } = await entryFixture();
+
+    const result = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT, url: 'https://openai.com/index/astra/', note: '',
+      expected_batch_revision: frozen.batch.batch_revision,
+      drafted: DRAFTED,
+    }, 'two-phase-entry', 300);
+
+    expect(result.ok).toBe(true);
+    const itemId = `blog:manual:${lead.id}`;
+    const extra = extraOf(state, itemId);
+    expect(extra.title_zh).toBe(DRAFTED.title);
+    expect(extra.ai_summary_zh).toBe(DRAFTED.summary);
+    expect(extra.source_company).toBe(DRAFTED.source);
+    // 被门禁绑定的列也拿的是起草结果 —— 它是签名投影的一部分，不是事后改写。
+    expect(itemRowOf(state, itemId)).toMatchObject({
+      title: DRAFTED.title, url: DRAFTED.url, author: DRAFTED.source,
+    });
+    // 陈述留在 payload 里当锚点，没被起草结果顶掉。
+    expect(verificationPayloadOf(state, lead.id))
+      .toMatchObject({ statement: ASSERTED_STATEMENT, drafted: DRAFTED });
+  });
+
+  test('起草结果入池后：正式新闻门放行，连续两次 sanitize 都不判 drift', async () => {
+    const { state, frozen, lead } = await entryFixture();
+    await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT, url: 'https://openai.com/index/astra/', note: '',
+      expected_batch_revision: frozen.batch.batch_revision, drafted: DRAFTED,
+    }, 'two-phase-entry', 300);
+    const itemId = `blog:manual:${lead.id}`;
+
+    await expect(authorizeFormalNewsSet(
+      state.env, '2026-08-28', [itemId], 'two-phase-gate',
+    )).resolves.toMatchObject({
+      allowed_ids: [itemId],
+      decisions: [{ allowed: true, code: 'ALLOW_VERIFIED_MANUAL' }],
+    });
+    const first = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 400);
+    const second = await sanitizeCurrentNewsReviewBatch(state.env, '2026-08-28', 400);
+    expect(first.changed).toBe(false);
+    expect(second.changed).toBe(false);
+  });
+
+  test('什么都没起草出来时照样入池，标题退回 owner 那句话', async () => {
+    const { state, frozen, lead } = await entryFixture();
+
+    const result = await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT, url: 'https://openai.com/index/astra/', note: '',
+      expected_batch_revision: frozen.batch.batch_revision,
+    }, 'two-phase-entry', 300);
+
+    expect(result.ok).toBe(true);
+    expect(itemRowOf(state, `blog:manual:${lead.id}`)).toMatchObject({
+      title: ASSERTED_STATEMENT,
+    });
+    await expect(authorizeFormalNewsSet(
+      state.env, '2026-08-28', [`blog:manual:${lead.id}`], 'two-phase-fallback-gate',
+    )).resolves.toMatchObject({ allowed_ids: [`blog:manual:${lead.id}`] });
+  });
+
+  test('总预算过了还没入池的线索被扫出来，供轮询时补入池', async () => {
+    const { state, lead } = await entryFixture();
+
+    await expect(listStaleManualLeadContentEntries(state.env, '2026-08-28', 100 + 119_000))
+      .resolves.toEqual([]);
+    await expect(listStaleManualLeadContentEntries(state.env, '2026-08-28', 100 + 121_000))
+      .resolves.toEqual([{
+        id: lead.id,
+        input_url: 'https://openai.com/index/astra/',
+        input_text: ASSERTED_STATEMENT,
+        note: '',
+        submit_idempotency_key: 'two-phase-entry',
+        review_date: '2026-08-28',
+      }]);
+  });
+
+  test('已经入池的线索不会再被扫出来', async () => {
+    const { state, frozen } = await entryFixture();
+    await assertManualNewsLeadCandidate(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT, url: 'https://openai.com/index/astra/', note: '',
+      expected_batch_revision: frozen.batch.batch_revision, drafted: DRAFTED,
+    }, 'two-phase-entry', 300);
+
+    await expect(listStaleManualLeadContentEntries(state.env, '2026-08-28', 100 + 121_000))
+      .resolves.toEqual([]);
+  });
+
+  // 两条路必须算出同一个 lead id：先建行那一步与直接一步录入用的是同一份推导，分叉了
+  // 会让「先建行」建出来的那条永远等不到后面那次续做（而是被当成另一条新线索）。
+  test('先建行与直接一步录入算出同一个 lead id', async () => {
+    const viaEntry = await entryFixture('');
+    const viaAssert = await stuckZeroEvidenceFixture('');
+    const frozen = await frozenAssertedBatch(viaAssert);
+    const asserted = await assertManualNewsLeadCandidate(viaAssert.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT, url: '', note: '',
+      expected_batch_revision: frozen.batch.batch_revision,
+    }, 'two-phase-entry', 100);
+
+    expect(asserted.ok).toBe(true);
+    expect(asserted.ok && asserted.lead.id).toBe(viaEntry.lead.id);
+  });
+
+  test('审核窗口已过时连行都不建，不留一条建了又用不上的线索', async () => {
+    const state = await stuckZeroEvidenceFixture();
+    await frozenAssertedBatch(state);
+    await expect(beginOwnerAssertedEntry(state.env, {
+      date: '2026-08-28', text: ASSERTED_STATEMENT, url: '', note: '',
+    }, 'expired-entry', 4_102_444_800_000))
+      .resolves.toMatchObject({ ok: false, status: 409, error: 'review_expired' });
+  });
 });

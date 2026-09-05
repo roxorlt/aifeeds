@@ -34,6 +34,10 @@ import {
   type ManualNewsSourceSupportPayload,
   type ManualNewsSourceSupportPriorEvent,
 } from './manual-news-leads';
+import type {
+  ManualLeadContentStage,
+  ManualLeadMaterialTier,
+} from './manual-lead-content';
 import {
   isTransientTweetEvidenceError,
   isTwitterStatusUrl,
@@ -53,6 +57,22 @@ import {
 
 export type ProcessedManualLeadAssessment = ManualNewsProcessedAssessment;
 
+/**
+ * 一步录入线索的内容加工进度（规格第 4 节）。
+ *
+ * 与线索自己的 `status` 是两件事：`status` 说的是这条线索在取证状态机里的位置，进度说的
+ * 是「提交之后那一轮内容加工现在到哪一步了」。只有走一步录入的线索有这一项，其余线索
+ * 读出来是 `undefined`，面板照旧只看 `status`。
+ */
+export interface ManualLeadContentProgress {
+  stage: ManualLeadContentStage;
+  /** 一句中文说明，直接显示给 owner：这一轮缺了什么、卡在哪一步。没有异常时是空串。 */
+  detail: string;
+  material_tier: ManualLeadMaterialTier;
+  /** 总预算到点的时刻；过了这个点还没入池的，由面板轮询顺手捡回来补入池。 */
+  deadline_at: number | null;
+}
+
 export interface ManualNewsLeadRecord {
   id: string;
   review_date: string;
@@ -71,6 +91,7 @@ export interface ManualNewsLeadRecord {
   processing_lease_until: number | null;
   assessment: ProcessedManualLeadAssessment | null;
   evidence: ManualNewsEvidence[];
+  content_progress?: ManualLeadContentProgress;
   confirmed_batch_id: string | null;
   confirmed_at: number | null;
   created_at: number;

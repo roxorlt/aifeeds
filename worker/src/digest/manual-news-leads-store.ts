@@ -63,9 +63,11 @@ import {
   manualVerificationSnapshotSetGuardBinding,
   type PersistedManualVerificationRow,
 } from './manual-news-leads-verification';
+import { MANUAL_LEAD_CONTENT_BUDGET_MS } from './manual-lead-content';
 import type {
   ManualAssessmentGenerationCycleState,
   ManualAssessmentGenerationValidationResult,
+  ManualLeadContentProgress,
   ManualLeadProcessingStore,
   ManualLeadTransitionPatch,
   ManualNewsLeadRecord,
@@ -117,6 +119,10 @@ interface ManualLeadRow {
   confirmed_at: number | null;
   created_at: number;
   updated_at: number;
+  content_stage: string | null;
+  content_stage_detail: string | null;
+  content_material_tier: string | null;
+  content_deadline_at: number | null;
   evidence_count?: number;
 }
 
@@ -485,6 +491,32 @@ async function loadCurrentAssessmentGenerationAudit(
   });
 }
 
+const MANUAL_LEAD_CONTENT_STAGES: ReadonlySet<string> = new Set([
+  'submitted', 'fetching_source', 'analyzing', 'searching', 'drafting', 'done', 'failed',
+]);
+const MANUAL_LEAD_MATERIAL_TIERS: ReadonlySet<string> = new Set([
+  'report', 'official_x', 'tweet', 'none',
+]);
+
+/**
+ * 把四个进度列读成一项。**读不出合法取值就当没有进度**：这几列只有一步录入的线索会写，
+ * 老行与其余线索读出来是 NULL，面板照旧只看 status。
+ */
+function contentProgressFromRow(row: ManualLeadRow): ManualLeadContentProgress | null {
+  const stage = String(row.content_stage || '');
+  if (!MANUAL_LEAD_CONTENT_STAGES.has(stage)) return null;
+  const tier = String(row.content_material_tier || 'none');
+  return {
+    stage: stage as ManualLeadContentProgress['stage'],
+    detail: String(row.content_stage_detail || ''),
+    material_tier: (MANUAL_LEAD_MATERIAL_TIERS.has(tier)
+      ? tier : 'none') as ManualLeadContentProgress['material_tier'],
+    deadline_at: row.content_deadline_at === null || row.content_deadline_at === undefined
+      ? null
+      : Number(row.content_deadline_at),
+  };
+}
+
 async function leadFromRow(env: Env, row: ManualLeadRow): Promise<ManualNewsLeadRecord> {
   const [evidence, providerFailure, assessmentGeneration] = await Promise.all([
     loadManualNewsEvidence(env, row.id),
@@ -514,6 +546,7 @@ async function leadFromRow(env: Env, row: ManualLeadRow): Promise<ManualNewsLead
       : Number(row.processing_lease_until),
     assessment: verified?.assessment || null,
     evidence,
+    ...(contentProgressFromRow(row) ? { content_progress: contentProgressFromRow(row)! } : {}),
     confirmed_batch_id: row.confirmed_batch_id,
     confirmed_at: row.confirmed_at,
     created_at: Number(row.created_at),
@@ -551,6 +584,7 @@ export async function listManualNewsLeads(env: Env, date: string): Promise<Manua
     processing_lease_until: row.processing_lease_until === null || row.processing_lease_until === undefined
       ? null
       : Number(row.processing_lease_until),
+    ...(contentProgressFromRow(row) ? { content_progress: contentProgressFromRow(row)! } : {}),
     confirmed_batch_id: row.confirmed_batch_id,
     confirmed_at: row.confirmed_at,
     created_at: Number(row.created_at),
@@ -2769,6 +2803,7 @@ async function writeOwnerAssertedProof(
     auditAction: MANUAL_NEWS_OWNER_ASSERTED_AUDIT_ACTION,
     mutationKind: MANUAL_NEWS_OWNER_ASSERTED_MUTATION_KIND,
   },
+  drafted?: unknown,
 ): Promise<OwnerAuthorizationWriteResult> {
   const assessmentVersion = lead.version * 1_000_000 + 800_000;
   if (!Number.isSafeInteger(assessmentVersion) || assessmentVersion <= 0) {
@@ -2778,6 +2813,7 @@ async function writeOwnerAssertedProof(
     lead: { id: lead.id, review_date: lead.review_date, input_url: lead.input_url },
     statement,
     evidence: lead.evidence,
+    ...(drafted === undefined ? {} : { drafted }),
     asserted_at: now,
   });
   const proof = await createManualNewsOwnerAssertedProof(
@@ -2943,6 +2979,11 @@ export async function assertManualNewsLeadCandidate(
     note?: unknown;
     statement?: unknown;
     expected_batch_revision?: unknown;
+    /**
+     * 从抓回的正文起草的标题与摘要。给了就进签名投影，成为候选的标题与摘要；不给（或
+     * 内容加工那一轮什么都没取到）就退回 owner 那句话。**签名之前确定，不是事后改写。**
+     */
+    drafted?: unknown;
   },
   idempotencyKey: string,
   now = Date.now(),
@@ -2986,22 +3027,12 @@ export async function assertManualNewsLeadCandidate(
     const existingLead = await leadFromRow(env, existingRow);
     return continueOwnerAssertedEntry(
       env, existingLead, statement, idempotencyKey, confirmKey, expectedBatchRevision, now,
+      input.drafted,
     );
   }
-  const submitIdentityDigest = await manualNewsSubmitIdentityDigest({
-    date: normalized.date,
-    input_type: normalized.input_type,
-    text: normalized.text,
-    url: normalized.url,
-    note: normalized.note,
-    candidate_authorization: MANUAL_NEWS_OWNER_ASSERTED_POLICY,
-  });
-  const hash = await sha256Hex(
-    `manual-news-owner-asserted-lead-id-v1\0${normalized.date}\0${idempotencyKey}\0${submitIdentityDigest}`,
-  );
-  const id = `ml-${normalized.date.replace(/-/g, '')}-${hash.slice(0, 12)}`;
+  const id = await ownerAssertedLeadId(normalized, idempotencyKey);
   const created = await createOwnerAssertedLead(env, {
-    id, normalized, statement, idempotencyKey, now,
+    id, normalized, statement, idempotencyKey, now, drafted: input.drafted,
   });
   if (!created.ok) return created;
   const lead = await getManualNewsLead(env, id);
@@ -3018,6 +3049,7 @@ async function continueOwnerAssertedEntry(
   confirmKey: string,
   expectedBatchRevision: number,
   now: number,
+  drafted?: unknown,
 ): Promise<ManualNewsLeadCandidateMutationOutcome> {
   const activeVerification = await env.DB.prepare(
     `/* manual_owner_vouch:active_verification */ SELECT verification_id
@@ -3040,7 +3072,9 @@ async function continueOwnerAssertedEntry(
   }
   let written: Awaited<ReturnType<typeof writeOwnerAssertedProof>>;
   try {
-    written = await writeOwnerAssertedProof(env, lead, statement, idempotencyKey, now);
+    written = await writeOwnerAssertedProof(
+      env, lead, statement, idempotencyKey, now, undefined, drafted,
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : '';
     if (message === 'owner_asserted_payload_invalid' || message.startsWith('manual_news_evidence_')) {
@@ -3053,6 +3087,211 @@ async function continueOwnerAssertedEntry(
   return confirmManualNewsLeadCandidate(
     env, lead.id, lead.version + 1, expectedBatchRevision, confirmKey, now,
   );
+}
+
+/**
+ * 一步录入线索的 id 推导。**两条路必须算出同一个 id**：先建行等后台加工的那条路
+ * （{@link beginOwnerAssertedEntry}）建完行之后，加工完成再调
+ * {@link assertManualNewsLeadCandidate}，后者靠 `(review_date, submit_idempotency_key)`
+ * 找回同一行续做；算法一旦分叉就会变成两条线索。
+ */
+async function ownerAssertedLeadId(
+  normalized: ReturnType<typeof validateManualNewsLeadInput>,
+  idempotencyKey: string,
+): Promise<string> {
+  const submitIdentityDigest = await manualNewsSubmitIdentityDigest({
+    date: normalized.date,
+    input_type: normalized.input_type,
+    text: normalized.text,
+    url: normalized.url,
+    note: normalized.note,
+    candidate_authorization: MANUAL_NEWS_OWNER_ASSERTED_POLICY,
+  });
+  const hash = await sha256Hex(
+    `manual-news-owner-asserted-lead-id-v1\0${normalized.date}\0${idempotencyKey}\0${submitIdentityDigest}`,
+  );
+  return `ml-${normalized.date.replace(/-/g, '')}-${hash.slice(0, 12)}`;
+}
+
+export type ManualLeadEntryOutcome =
+  | { ok: true; created: boolean; lead: ManualNewsLeadRecord }
+  | { ok: false; status: number; error: string; lead?: ManualNewsLeadRecord };
+
+/**
+ * 一步录入的第一步：**只建线索行，不签名、不入池**。
+ *
+ * 为什么要拆成两步：候选的标题与摘要要由模型从抓回的正文写出来，而它们进的是**被签名
+ * 覆盖的投影**（规格第 8 节第二条：签名之前确定，不是事后改写）。所以签名必须等内容
+ * 加工跑完，而加工要一两分钟 —— owner 不该对着转圈等那么久。于是提交这一步只把线索
+ * 落进库并立刻返回，加工与随后的签名入池都在后台跑
+ * （{@link assertManualNewsLeadCandidate} 带上 `drafted` 续做同一行）。
+ *
+ * 建出来的行是 `needs_review` 且 `confirmed_at IS NULL` —— 也就是「还没进候选池」。
+ * 加工那一轮无论成败都会去入池；万一整个 isolate 被回收，`content_deadline_at` 过期后
+ * 由 {@link listStaleManualLeadContentEntries} 把它捡回来补入池。
+ *
+ * 幂等与一步录入完全一致：同一个 `Idempotency-Key` 落在同一天同一份输入上时命中已有
+ * 线索并原样返回；输入变了则抛 `idempotency_key_reused_with_different_payload`。
+ */
+export async function beginOwnerAssertedEntry(
+  env: Env,
+  input: { date?: unknown; text?: unknown; url?: unknown; note?: unknown; statement?: unknown },
+  idempotencyKey: string,
+  now = Date.now(),
+  opts: { deadlineAt?: number } = {},
+): Promise<ManualLeadEntryOutcome> {
+  const normalized = validateManualNewsLeadInput({
+    date: input.date, text: input.text, url: input.url, note: input.note,
+  });
+  try {
+    // 陈述这时候就要验一遍：加工跑完再发现它不合法，线索已经建出来了，白占一行。
+    normalizeOwnerVouchStatement(
+      input.statement === undefined || input.statement === null || input.statement === ''
+        ? normalized.text
+        : input.statement,
+    );
+  } catch {
+    return { ok: false, status: 400, error: 'invalid_vouch_statement' };
+  }
+  if (now >= newsReviewExpiresAt(normalized.date)) {
+    return { ok: false, status: 409, error: 'review_expired' };
+  }
+  const existingRow = await env.DB.prepare(
+    `/* manual_lead:by_submit_key */ SELECT * FROM manual_news_leads
+     WHERE review_date = ? AND submit_idempotency_key = ?`,
+  ).bind(normalized.date, idempotencyKey).first<ManualLeadRow>();
+  if (existingRow) {
+    if (existingRow.input_type !== normalized.input_type
+      || existingRow.input_text !== normalized.text
+      || existingRow.input_url !== normalized.url
+      || (existingRow.note || '') !== normalized.note) {
+      throw new Error('idempotency_key_reused_with_different_payload');
+    }
+    return { ok: true, created: false, lead: await leadFromRow(env, existingRow) };
+  }
+
+  const id = await ownerAssertedLeadId(normalized, idempotencyKey);
+  const mutationNonce = createMutationNonce(MANUAL_NEWS_OWNER_ASSERTED_MUTATION_KIND);
+  const deadlineAt = opts.deadlineAt ?? (now + MANUAL_LEAD_CONTENT_BUDGET_MS);
+  const leadGuard = `EXISTS (
+    SELECT 1 FROM manual_news_leads l
+    WHERE l.id = ? AND l.version = 1 AND l.status = 'needs_review' AND l.confirmed_at IS NULL
+      AND l.review_date = ? AND l.submit_idempotency_key = ? AND l.last_mutation_nonce = ?
+  )`;
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `/* manual_lead:entry_insert */ INSERT OR IGNORE INTO manual_news_leads (
+         id, review_date, input_type, input_text, input_url, note, status, version,
+         error_code, error_message, submit_idempotency_key, last_mutation_kind,
+         last_mutation_idempotency_key, last_mutation_nonce, processing_owner,
+         processing_attempt, processing_lease_until, created_at, updated_at,
+         content_stage, content_stage_detail, content_material_tier, content_deadline_at
+       ) VALUES (?, ?, ?, ?, ?, ?, 'needs_review', 1, NULL, NULL, ?, ?, ?, ?, NULL, 0, NULL, ?, ?,
+         'submitted', '', 'none', ?)`,
+    ).bind(
+      id, normalized.date, normalized.input_type, normalized.text, normalized.url, normalized.note,
+      idempotencyKey, MANUAL_NEWS_OWNER_ASSERTED_MUTATION_KIND, idempotencyKey, mutationNonce,
+      now, now, deadlineAt,
+    ),
+    env.DB.prepare(
+      `/* manual_lead:entry_submit_audit */ INSERT INTO manual_news_lead_audit (
+         lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
+         resulting_version, metadata_json, created_at
+       ) SELECT ?, 'submit', NULL, 'needs_review', ?, ?, 1, ?, ? WHERE ${leadGuard}`,
+    ).bind(
+      id, idempotencyKey, mutationNonce, JSON.stringify({
+        input_type: normalized.input_type,
+        candidate_authorization: MANUAL_NEWS_OWNER_ASSERTED_POLICY,
+      }), now,
+      id, normalized.date, idempotencyKey, mutationNonce,
+    ),
+  ]) as Array<{ meta?: { changes?: number } }>;
+  const changes = results.map((entry) => Number(entry?.meta?.changes || 0));
+  if (changes.every((value) => value === 0)) {
+    // 幂等键被并发重放抢先用掉了：按已有那一行继续，不再建第二行。
+    const raced = await getManualNewsLead(env, id);
+    return raced
+      ? { ok: true, created: false, lead: raced }
+      : { ok: false, status: 409, error: 'lead_version_conflict' };
+  }
+  if (changes.some((value) => value !== 1)) throw new Error('manual_lead_audit_causality_mismatch');
+  const lead = await getManualNewsLead(env, id);
+  if (!lead) throw new Error('manual_news_lead_insert_failed');
+  return { ok: true, created: true, lead };
+}
+
+/**
+ * 回写内容加工进度。**不动 version、不动任何被门禁绑定的东西** —— 它只是给卡片看的一行
+ * 字，绝不能因为写进度而让签名快照或候选投影产生 drift。
+ *
+ * 写失败只记一行日志：进度写不进去顶多是卡片停在上一步，不该让加工这一轮作废。
+ */
+export async function setManualLeadContentStage(
+  env: Env,
+  leadId: string,
+  patch: {
+    stage: ManualLeadContentProgress['stage'];
+    detail?: string;
+    materialTier?: ManualLeadContentProgress['material_tier'];
+    deadlineAt?: number | null;
+  },
+  now = Date.now(),
+): Promise<void> {
+  try {
+    await env.DB.prepare(
+      `/* manual_lead:content_stage */ UPDATE manual_news_leads SET
+         content_stage = ?,
+         content_stage_detail = COALESCE(?, content_stage_detail),
+         content_material_tier = COALESCE(?, content_material_tier),
+         content_deadline_at = COALESCE(?, content_deadline_at),
+         updated_at = ?
+       WHERE id = ?`,
+    ).bind(
+      patch.stage,
+      patch.detail === undefined ? null : patch.detail,
+      patch.materialTier === undefined ? null : patch.materialTier,
+      patch.deadlineAt === undefined ? null : patch.deadlineAt,
+      now, leadId,
+    ).run();
+  } catch (error) {
+    console.warn(`[manual-lead-content] lead=${leadId} stage write failed:`,
+      String((error as Error)?.message || error).slice(0, 200));
+  }
+}
+
+/**
+ * 找出「后台那一轮加工没跑完就没了下文」的一步录入线索。
+ *
+ * 加工挂在 `ctx.waitUntil` 上，isolate 被回收就再没有第二次机会 —— 线索会一直停在
+ * `needs_review` 且 `confirmed_at IS NULL`，也就是没进候选池。入池永不失败这条硬约束
+ * 靠这个扫描兜底：面板轮询当天线索列表时顺手捡，捡到就补一次入池。
+ *
+ * 选行只靠 `(review_date, content_deadline_at)` 这个索引，`LIMIT` 卡死一轮的条数；
+ * 绑参个数固定 3 个，不随集合大小展开（2026-09-04 D1 绑参上限事故）。
+ */
+export async function listStaleManualLeadContentEntries(
+  env: Env,
+  date: string,
+  now = Date.now(),
+  limit = 10,
+): Promise<Array<{ id: string; input_url: string; input_text: string; note: string;
+    submit_idempotency_key: string; review_date: string }>> {
+  try {
+    const rows = await env.DB.prepare(
+      `/* manual_lead:content_stale */ SELECT id, input_url, input_text, note,
+         submit_idempotency_key, review_date
+       FROM manual_news_leads
+       WHERE review_date = ? AND content_deadline_at IS NOT NULL AND content_deadline_at < ?
+         AND confirmed_at IS NULL AND status = 'needs_review'
+       ORDER BY content_deadline_at ASC LIMIT ?`,
+    ).bind(date, now, limit).all<{ id: string; input_url: string; input_text: string;
+      note: string; submit_idempotency_key: string; review_date: string }>();
+    return rows.results || [];
+  } catch (error) {
+    console.warn('[manual-lead-content] stale scan failed:',
+      String((error as Error)?.message || error).slice(0, 200));
+    return [];
+  }
 }
 
 /**
@@ -3069,6 +3308,7 @@ async function createOwnerAssertedLead(
     statement: string;
     idempotencyKey: string;
     now: number;
+    drafted?: unknown;
   },
 ): Promise<{ ok: true } | { ok: false; status: 409; error: string }> {
   const { id, normalized, statement, idempotencyKey, now } = input;
@@ -3077,6 +3317,7 @@ async function createOwnerAssertedLead(
     lead: { id, review_date: normalized.date, input_url: normalized.url },
     statement,
     evidence: [],
+    ...(input.drafted === undefined ? {} : { drafted: input.drafted }),
     asserted_at: now,
   });
   const proof = await createManualNewsOwnerAssertedProof(
