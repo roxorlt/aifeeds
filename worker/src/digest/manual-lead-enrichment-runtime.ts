@@ -21,9 +21,16 @@ import {
   type ManualLeadEnrichmentAdapters,
 } from './manual-lead-enrichment';
 
-/** 单条链接的抓取预算。搜索那条路更慢，网关自己还有 15s 的搜索预算。 */
-export const MANUAL_LEAD_ENRICHMENT_FETCH_TIMEOUT_MS = 25_000;
-export const MANUAL_LEAD_ENRICHMENT_SEARCH_TIMEOUT_MS = 40_000;
+/**
+ * 两条取材路各自的时限，按规格第 4 节的分段预算：抓正文 30s、搜索 45s。
+ *
+ * 2026-09-05 实测（prod 网关）：抓正文 0.3–2.3s（境外站经香港代理），ScrapeBadger 搜索
+ * 一轮 8–26s。旧的 25s / 40s 是照着「网关自己有 15s 搜索预算」估的，那个预算同期要放宽
+ * 到单家 45s、总 60s（改在面板仓的 manual-news-research-gateway-assembly.mjs），云端这
+ * 边不跟着放就等于自己把搜索掐死。
+ */
+export const MANUAL_LEAD_ENRICHMENT_FETCH_TIMEOUT_MS = 30_000;
+export const MANUAL_LEAD_ENRICHMENT_SEARCH_TIMEOUT_MS = 45_000;
 /** 喂给模型的正文上限：够写背景就行，再多只是烧 token。 */
 export const MANUAL_LEAD_ENRICHMENT_PROMPT_MAX_CHARS = 8_000;
 

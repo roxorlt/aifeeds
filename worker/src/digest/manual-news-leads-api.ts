@@ -4,7 +4,7 @@ import {
   manualNewsVerificationKeyring,
 } from '../security/manual-news-keyring';
 import {
-  assertManualNewsLeadCandidate,
+  beginOwnerAssertedEntry,
   confirmManualNewsLeadCandidate,
   getManualNewsCandidateAuthorization,
   getManualNewsLead,
@@ -14,6 +14,7 @@ import {
   markManualNewsLeadEnqueueFailure,
   recoverStaleManualNewsLeads,
   listManualNewsCandidateAuthorizations,
+  listStaleManualLeadContentEntries,
   retryManualNewsLead,
   submitManualNewsLead,
   vouchManualNewsLeadCandidate,
@@ -25,6 +26,11 @@ import {
   type ManualEvidenceMaterialSource,
 } from './manual-lead-enrichment';
 import { createManualLeadEnrichmentAdapters } from './manual-lead-enrichment-runtime';
+import {
+  runManualLeadContentEntry,
+  type ManualLeadContentEntryInput,
+} from './manual-lead-content-entry';
+import { createManualLeadContentAdapters } from './manual-lead-content-runtime';
 import { newsReviewSecret } from './news-review';
 import {
   MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
@@ -57,6 +63,8 @@ function manualNewsLeadBase(lead: ManualNewsListInput) {
     confirmed_at: lead.confirmed_at,
     created_at: lead.created_at,
     updated_at: lead.updated_at,
+    // 一步录入线索的加工进度（规格第 4 / 5 节）。其余线索是 null，面板照旧只看 status。
+    content_progress: lead.content_progress ?? null,
   };
 }
 
@@ -217,9 +225,64 @@ function scheduleLeadEnrichment(
       itemId: `blog:manual:${lead.id}`,
       url: lead.input_url || null,
       text: lead.input_text || '',
+      // 审核日期要一路带到网关：搜索那一路少了它就抛 Invalid time value。
+      date: lead.review_date,
     }, createManualLeadEnrichmentAdapters(env)).then(() => undefined, () => undefined));
   } catch (error) {
     console.warn('[manual-lead-enrichment] schedule failed:', String((error as Error)?.message || error).slice(0, 200));
+  }
+}
+
+/**
+ * 一步录入的后台那一半：跑内容加工，然后签名入池。
+ *
+ * **用 `ctx.waitUntil` 而不是派发 Workflow**：Workflow 那条路要先占 `processing_owner`
+ * 租约、失败要回写 `error_code`，那整套是为「取证决定线索能不能入池」设计的状态机；这里
+ * 是「先入池，内容尽力而为」，套上去只会让一条注定要入池的线索显示成失败。
+ *
+ * `waitUntil` 的代价是 isolate 被回收就没有第二次机会。兜底在 GET 那一侧：面板轮询当天
+ * 线索时会把 `content_deadline_at` 过期还没入池的捡回来补跑
+ * （{@link scheduleStaleContentEntries}）。
+ *
+ * 三道保险挡住它伤到刚建好的那一行：这里的 try / catch 挡同步异常，`.catch` 挡异步异常，
+ * {@link runManualLeadContentEntry} 自己也从不往外抛。
+ */
+function scheduleContentEntry(
+  env: Env,
+  ctx: Pick<ExecutionContext, 'waitUntil'>,
+  lead: ManualLeadContentEntryInput,
+  now: number,
+): void {
+  try {
+    console.log(`[manual-lead-content] schedule lead=${lead.id} url=${lead.input_url ? 'yes' : 'no'}`);
+    // `now` 取的是 owner 按下提交那一刻，不是加工跑完那一刻：审核窗口该按提交时间算，
+    // 让一条卡在窗口边上的线索因为多花了一分钟加工就被判过期是说不通的。
+    ctx.waitUntil(
+      runManualLeadContentEntry(env, lead, createManualLeadContentAdapters(env), { now })
+        .then(() => undefined, () => undefined),
+    );
+  } catch (error) {
+    console.warn('[manual-lead-content] schedule failed:',
+      String((error as Error)?.message || error).slice(0, 200));
+  }
+}
+
+/**
+ * 把「加工跑到一半没了下文」的线索捡回来补入池。
+ *
+ * 挂在列表 GET 上：owner 盯着卡片看进度时页面本来就在轮询，捡回来的时机正好。入池永不
+ * 失败这条约束靠它兜住 `waitUntil` 丢任务那一种情况。
+ */
+async function scheduleStaleContentEntries(
+  env: Env,
+  ctx: Pick<ExecutionContext, 'waitUntil'>,
+  date: string,
+  now: number,
+): Promise<void> {
+  const stale = await listStaleManualLeadContentEntries(env, date, now);
+  for (const row of stale) {
+    console.warn(`[manual-lead-content] recovering stale entry lead=${row.id}`);
+    scheduleContentEntry(env, ctx, row, now);
   }
 }
 
@@ -361,6 +424,8 @@ async function handleManualNewsLeadsApiInternal(
         ? await recoverStaleManualNewsLeads(env, date, now)
         : [];
       for (const lead of recovered) scheduleLeadProcessing(env, ctx, lead);
+      // 一步录入那条路的兜底：加工挂在 waitUntil 上，isolate 被回收就再没人去入池。
+      if (signingKeysAvailable(env)) await scheduleStaleContentEntries(env, ctx, date, now);
       const [leads, candidateBatch, authorizations] = await Promise.all([
         listManualNewsLeads(env, date),
         getManualNewsLeadCandidateState(env, date),
@@ -384,23 +449,36 @@ async function handleManualNewsLeadsApiInternal(
         throw new Error('invalid_owner_asserted');
       }
       if (body.owner_asserted === true) {
-        // owner 直接录入：不派发 Workflow、不做任何取证，一步入池，所以是 200 不是 202。
+        // 一步录入：提交这一步只建线索行就返回（202），内容加工与随后的签名入池都在后台
+        // 跑。候选的标题与摘要由模型从抓回的正文写出来，而它们进的是被签名覆盖的投影 ——
+        // 签名之前就得确定，所以入池只能等加工跑完（规格第 1 / 8 节）。
+        // 签名密钥这时候就要查：后台那一半必定要签名，缺密钥就别先把线索建出来。
         if (!signingKeysAvailable(env)) return response({ ok: false, error: 'dependency_unavailable' }, 503);
-        const asserted = await assertManualNewsLeadCandidate(env, {
+        const begun = await beginOwnerAssertedEntry(env, {
           date: body.date,
           text: body.text,
           url: body.url,
           note: body.note,
           ...('statement' in body ? { statement: body.statement } : {}),
-          ...('expected_batch_revision' in body
-            ? { expected_batch_revision: body.expected_batch_revision }
-            : {}),
         }, key, now);
-        scheduleLeadEnrichment(env, ctx, asserted);
-        return response(
-          await manualNewsMutationResult(env, asserted),
-          asserted.ok ? 200 : asserted.status,
-        );
+        if (!begun.ok) {
+          return response(await manualNewsMutationResult(env, begun), begun.status);
+        }
+        if (begun.created) {
+          scheduleContentEntry(env, ctx, {
+            id: begun.lead.id,
+            review_date: begun.lead.review_date,
+            input_url: begun.lead.input_url,
+            input_text: begun.lead.input_text,
+            note: begun.lead.note,
+            submit_idempotency_key: key,
+          }, now);
+        }
+        return response({
+          ok: true,
+          created: begun.created,
+          lead: await manualNewsLeadDetail(env, begun.lead),
+        }, begun.created ? 202 : 200);
       }
       if (!processingDependenciesAvailable(env)) {
         return response({ ok: false, error: 'dependency_unavailable' }, 503);

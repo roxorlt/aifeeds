@@ -5,15 +5,37 @@
     "schema_version": 1,
     "route": "/api/digest/daily-news-leads?date=YYYY-MM-DD",
     "top_level_fields": ["ok", "response_profile", "schema_version", "date", "leads", "candidate_batch"],
-    "lead_fields": ["id", "review_date", "input_type", "input_text", "input_url", "note", "status", "version", "error_code", "error_message", "processing_owner", "processing_attempt", "processing_lease_until", "confirmed_batch_id", "confirmed_at", "created_at", "updated_at", "evidence_count", "candidate_authorization", "vouch"]
+    "lead_fields": ["id", "review_date", "input_type", "input_text", "input_url", "note", "status", "version", "error_code", "error_message", "processing_owner", "processing_attempt", "processing_lease_until", "confirmed_batch_id", "confirmed_at", "created_at", "updated_at", "evidence_count", "candidate_authorization", "vouch", "content_progress"]
   },
   "detail": {
     "response_profile": "manual_news_lead_detail_v1",
     "schema_version": 1,
     "route": "/api/digest/daily-news-leads/:lead_id",
     "top_level_fields": ["ok", "lead"],
-    "lead_required_fields": ["response_profile", "schema_version", "id", "review_date", "input_type", "input_text", "input_url", "note", "status", "version", "error_code", "error_message", "processing_owner", "processing_attempt", "processing_lease_until", "confirmed_batch_id", "confirmed_at", "created_at", "updated_at", "assessment", "evidence", "candidate_authorization", "vouch"],
+    "lead_required_fields": ["response_profile", "schema_version", "id", "review_date", "input_type", "input_text", "input_url", "note", "status", "version", "error_code", "error_message", "processing_owner", "processing_attempt", "processing_lease_until", "confirmed_batch_id", "confirmed_at", "created_at", "updated_at", "assessment", "evidence", "candidate_authorization", "vouch", "content_progress"],
     "evidence_fields": ["id", "url", "source_type", "evidence_kind", "source_label", "publisher", "published_at", "retrieved_at", "title", "excerpt", "reliable"]
+  },
+  "content_progress": {
+    "note": "一步录入线索的内容加工进度；其余线索恒为 null。提交返回 202 之后卡片按 stage 轮询这一项显示进度。",
+    "nullable": true,
+    "fields": ["stage", "detail", "material_tier", "deadline_at"],
+    "stage_values": ["submitted", "fetching_source", "analyzing", "searching", "drafting", "done", "failed"],
+    "stage_copy": {
+      "submitted": "已提交，排队中",
+      "fetching_source": "正在抓取你给的链接正文",
+      "analyzing": "正在读懂这是什么新闻",
+      "searching": "正在检索相关报道",
+      "drafting": "正在生成标题与口播词",
+      "done": "已加入候选池",
+      "failed": "没能加入候选池，detail 里写了原因"
+    },
+    "material_tier_values": ["report", "official_x", "tweet", "none"],
+    "material_tier_copy": {
+      "report": "素材来自公开报道",
+      "official_x": "素材来自官方账号公告（第一方）",
+      "tweet": "素材来自 X 博主发文，非公开报道；口播会注明是博主发文",
+      "none": "未取到任何公开素材，标题与口播只能依据你写的这句话"
+    }
   },
   "mutations": {
     "routes": ["submit", "retry", "confirm-candidate", "vouch-candidate"],

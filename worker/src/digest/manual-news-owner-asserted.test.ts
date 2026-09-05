@@ -282,3 +282,146 @@ describe('createManualNewsOwnerAssertedProof', () => {
     expect(proof.hmac_sha256).not.toBe(vouchProof.hmac_sha256);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 从抓回的正文起草标题与摘要（2026-09-05）
+//
+// owner 写的那句话是**线索**，不是成品：「直接加入，就只有依赖我填写的几个字来生成标题
+// 和口播词，这完全不是我想要的」。据此找到真实报道、抓回正文之后，标题与摘要由模型从正文
+// 生成，owner 的陈述留在 payload 里当锚点。起草结果必须被签名覆盖，所以它是 payload 的
+// **输入**（可选键 `drafted`），而不是从陈述推导出来的东西 —— 验签时整份 payload 会被
+// 逐字重建，推导不出来的东西必须存下来。
+// ---------------------------------------------------------------------------
+describe('从正文起草的标题与摘要', () => {
+  const DRAFTED = {
+    title: 'OpenAI 发布企业级模型 Astra',
+    summary: 'OpenAI 今日发布 Astra，面向企业客户开放。该模型是这一系列的第一款产品。',
+    source: 'openai.com',
+    url: 'https://openai.com/index/astra/',
+  };
+
+  function draftedInput(drafted: Record<string, unknown>, overrides: Record<string, unknown> = {}) {
+    return payloadInput({ drafted, ...overrides });
+  }
+
+  test('起草结果进投影，陈述留在 payload 里当锚点', async () => {
+    const payload = await createManualNewsOwnerAssertedPayload(draftedInput(DRAFTED));
+
+    expect(payload.statement).toBe(STATEMENT);
+    expect(payload.drafted).toEqual(DRAFTED);
+    expect(payload.item_projection).toEqual({
+      item_id: `blog:manual:${LEAD_ID}`,
+      source_id: `manual:${LEAD_ID}`,
+      title: DRAFTED.title,
+      summary: DRAFTED.summary,
+      source: DRAFTED.source,
+      score: null,
+      url: DRAFTED.url,
+      published_at: null,
+    });
+    expect(ownerAssertedCandidateFromPayload(payload)).toMatchObject({ title: DRAFTED.title });
+  });
+
+  test('没有起草结果时逐字保持原样：老快照不带这个键，重建后仍然一致', async () => {
+    const legacy = await createManualNewsOwnerAssertedPayload(payloadInput());
+    expect('drafted' in legacy).toBe(false);
+    expect(legacy.item_projection.title).toBe(STATEMENT);
+
+    const proof = await createManualNewsOwnerAssertedProof(
+      { lead_id: LEAD_ID, input_url: '', assessment_version: 1_800_000, payload: legacy },
+      testManualNewsVerificationKeyring(VERIFICATION_SECRET), testManualNewsResponseKeyring(),
+    );
+    await expect(isCurrentManualNewsOwnerAssertedProof(
+      { lead_id: LEAD_ID, input_url: '', assessment_version: 1_800_000, payload: legacy },
+      proof, testManualNewsVerificationKeyring(VERIFICATION_SECRET), testManualNewsResponseKeyring(),
+    )).resolves.toBe(true);
+  });
+
+  test('带起草结果的快照能签也能验', async () => {
+    const payload = await createManualNewsOwnerAssertedPayload(draftedInput(DRAFTED));
+    const proof = await createManualNewsOwnerAssertedProof(
+      { lead_id: LEAD_ID, input_url: '', assessment_version: 1_800_000, payload },
+      testManualNewsVerificationKeyring(VERIFICATION_SECRET), testManualNewsResponseKeyring(),
+    );
+
+    await expect(isCurrentManualNewsOwnerAssertedProof(
+      { lead_id: LEAD_ID, input_url: '', assessment_version: 1_800_000, payload },
+      proof, testManualNewsVerificationKeyring(VERIFICATION_SECRET), testManualNewsResponseKeyring(),
+    )).resolves.toBe(true);
+  });
+
+  test('投影被改成与起草结果不一致时验不过', async () => {
+    const payload = await createManualNewsOwnerAssertedPayload(draftedInput(DRAFTED));
+    const proof = await createManualNewsOwnerAssertedProof(
+      { lead_id: LEAD_ID, input_url: '', assessment_version: 1_800_000, payload },
+      testManualNewsVerificationKeyring(VERIFICATION_SECRET), testManualNewsResponseKeyring(),
+    );
+    const tampered = {
+      ...payload,
+      item_projection: { ...payload.item_projection, title: '改过的标题' },
+    };
+
+    await expect(isCurrentManualNewsOwnerAssertedProof(
+      { lead_id: LEAD_ID, input_url: '', assessment_version: 1_800_000, payload: tampered },
+      proof, testManualNewsVerificationKeyring(VERIFICATION_SECRET), testManualNewsResponseKeyring(),
+    )).resolves.toBe(false);
+  });
+
+  test('起草结果本身被改时验不过（canonical digest 覆盖它）', async () => {
+    const payload = await createManualNewsOwnerAssertedPayload(draftedInput(DRAFTED));
+    const proof = await createManualNewsOwnerAssertedProof(
+      { lead_id: LEAD_ID, input_url: '', assessment_version: 1_800_000, payload },
+      testManualNewsVerificationKeyring(VERIFICATION_SECRET), testManualNewsResponseKeyring(),
+    );
+    const tampered = await createManualNewsOwnerAssertedPayload(draftedInput({
+      ...DRAFTED, title: '别人塞进来的标题',
+    }));
+
+    await expect(isCurrentManualNewsOwnerAssertedProof(
+      { lead_id: LEAD_ID, input_url: '', assessment_version: 1_800_000, payload: tampered },
+      proof, testManualNewsVerificationKeyring(VERIFICATION_SECRET), testManualNewsResponseKeyring(),
+    )).resolves.toBe(false);
+  });
+
+  test('起草结果做同一套规范化：重建时逐字相同，验签才稳', async () => {
+    const payload = await createManualNewsOwnerAssertedPayload(draftedInput({
+      ...DRAFTED, title: '  OpenAI  发布企业级模型 Astra  ', summary: `${DRAFTED.summary}\n`,
+    }));
+
+    expect(payload.drafted).toEqual({ ...DRAFTED, title: 'OpenAI 发布企业级模型 Astra' });
+    expect(canonicalJson(await createManualNewsOwnerAssertedPayload(
+      draftedInput(payload.drafted as unknown as Record<string, unknown>),
+    ))).toBe(canonicalJson(payload));
+  });
+
+  test.each([
+    ['标题太短', { title: '短' }],
+    ['标题过长', { title: '长'.repeat(81) }],
+    ['摘要太短', { summary: '短' }],
+    ['摘要过长', { summary: '长'.repeat(301) }],
+    ['带控制字符', { title: 'OpenAI\u0007 发布 Astra 企业模型' }],
+    ['带零宽字符', { summary: `${'摘要内容'.repeat(4)}\u200b` }],
+    ['来源不是 https', { url: 'http://openai.com/index/astra/' }],
+    ['来源署名为空', { source: '   ' }],
+    ['起草结果少了一个键', { title: undefined }],
+  ] as const)('起草结果不合规时整份 payload 被拒：%s', async (_label, override) => {
+    const drafted: Record<string, unknown> = { ...DRAFTED, ...override };
+    if ((override as Record<string, unknown>).title === undefined) delete drafted.title;
+    await expect(createManualNewsOwnerAssertedPayload(draftedInput(drafted)))
+      .rejects.toThrow('owner_asserted_payload_invalid');
+  });
+
+  test('起草结果有证据时仍以起草结果为准，证据只决定发布时间', async () => {
+    const payload = await createManualNewsOwnerAssertedPayload(
+      draftedInput(DRAFTED, { evidence: [evidence()] }),
+    );
+
+    expect(payload.item_projection).toMatchObject({
+      title: DRAFTED.title,
+      summary: DRAFTED.summary,
+      source: DRAFTED.source,
+      url: DRAFTED.url,
+      published_at: '2026-09-04T00:00:00.000Z',
+    });
+  });
+});

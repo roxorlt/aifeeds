@@ -31,7 +31,7 @@ import {
   sha256Hex,
   type ManualNewsEvidence,
 } from './manual-news-leads';
-import { normalizeOwnerVouchStatement } from './manual-news-owner-vouch';
+import { normalizeOwnerVouchStatement, OWNER_VOUCH_UNSAFE_UNICODE } from './manual-news-owner-vouch';
 
 export const MANUAL_NEWS_OWNER_ASSERTED_POLICY = 'owner_asserted_v1' as const;
 /** `manual_news_lead_audit.action`：owner 一步直接录入这一步的授权记录。 */
@@ -53,11 +53,33 @@ const MANUAL_NEWS_OWNER_ASSERTED_HMAC_DOMAIN = 'manual-news-owner-asserted-hmac-
 const MANUAL_NEWS_OWNER_ASSERTED_EVENT_DOMAIN = 'mnoa1\0';
 const MANUAL_NEWS_OWNER_ASSERTED_EVENT_PREFIX = 'mnoa1:';
 
+/**
+ * 模型从抓回的正文起草的标题与摘要，以及这份正文的出处。
+ *
+ * **为什么它必须是 payload 的输入而不是推导结果**：验签会拿 payload 里的输入原样重建
+ * 一份再逐字比对（{@link validatedManualNewsOwnerAssertedPayload}），推导不出来的东西
+ * 存不进投影。标题与摘要来自模型，重建时无法再生成同一份，所以它们必须自己存下来，被
+ * `canonical_digest` / `hmac_sha256` 覆盖。
+ *
+ * owner 写的那句话仍然留在 `statement` 里：它是「这条新闻讲的是什么」的锚点，起草时约束
+ * 模型不跑题，事后也是分辨候选来历的依据。
+ */
+export interface ManualNewsOwnerAssertedDraft {
+  title: string;
+  summary: string;
+  /** 正文出处的署名（发布方域名或名称），进候选的 `source` 与 `items.author`。 */
+  source: string;
+  /** 正文出处的 https 链接，进候选的 `url`。 */
+  url: string;
+}
+
 export interface ManualNewsOwnerAssertedPayload {
   policy_version: typeof MANUAL_NEWS_OWNER_ASSERTED_POLICY;
   lead_id: string;
   review_date: string;
   statement: string;
+  /** 取材成功时才有；缺这个键的快照是「只有 owner 那句话」的兜底形态（也是老行的形态）。 */
+  drafted?: ManualNewsOwnerAssertedDraft;
   evidence: ManualNewsEvidence[];
   event_identity: { event_key: string };
   item_projection: {
@@ -86,6 +108,81 @@ const OWNER_ASSERTED_PAYLOAD_KEYS = [
 ] as const;
 
 /**
+ * 带起草结果的快照多一个 `drafted` 键。两套键并存是为了**不动已经签好的老行**：
+ * 2026-09-05 之前入池的候选没有这个键，加一个必填键会让它们当场验不过而被隔离。
+ */
+const OWNER_ASSERTED_DRAFTED_PAYLOAD_KEYS = [
+  ...OWNER_ASSERTED_PAYLOAD_KEYS, 'drafted',
+] as const;
+
+const OWNER_ASSERTED_DRAFT_KEYS = ['title', 'summary', 'source', 'url'] as const;
+/** 标题够写一行卡片、进得了口播；上下限按 owner 陈述那套的量级放宽一档。 */
+const DRAFT_TITLE_MIN_CODE_POINTS = 6;
+const DRAFT_TITLE_MAX_CODE_POINTS = 80;
+/** 摘要是 2–3 句中文背景，短于一句话说明模型什么都没写出来。 */
+const DRAFT_SUMMARY_MIN_CODE_POINTS = 10;
+const DRAFT_SUMMARY_MAX_CODE_POINTS = 300;
+const DRAFT_SOURCE_MAX_CODE_POINTS = 120;
+const DRAFT_URL_MAX_LENGTH = 500;
+
+/**
+ * 起草文字的规范化：NFC + 折叠空白 + trim，再按 code point 卡上下限。
+ *
+ * 幂等是硬要求 —— 存进 payload 的是规范化之后的结果，验签重建时会再跑一遍这个函数，
+ * 两次结果不一致的话每一条起草候选都会当场验不过。
+ */
+function normalizedDraftText(raw: unknown, min: number, max: number): string {
+  if (typeof raw !== 'string') throw new Error('owner_asserted_payload_invalid');
+  // 与 owner 陈述那条规则的差别：先折叠空白再查危险字符。陈述是 owner 一行一行敲进来的，
+  // 里面出现换行本身就说明输入不对；起草结果是模型写的，末尾带个换行是常态，为这个把
+  // 整轮取材作废没道理。折叠之后仍留下的控制字符 / bidi / 零宽字符才是真要拒的东西。
+  const normalized = raw.normalize('NFC').replace(/\s+/gu, ' ').trim();
+  if (OWNER_VOUCH_UNSAFE_UNICODE.test(normalized)) {
+    throw new Error('owner_asserted_payload_invalid');
+  }
+  const codePoints = Array.from(normalized).length;
+  if (codePoints < min || codePoints > max) throw new Error('owner_asserted_payload_invalid');
+  return normalized;
+}
+
+/** 起草结果的规范化与校验。任何一项不合规都拒整份 payload，绝不悄悄丢字段。 */
+function normalizedOwnerAssertedDraft(raw: unknown): ManualNewsOwnerAssertedDraft {
+  if (!hasExactKeys(raw, OWNER_ASSERTED_DRAFT_KEYS)) {
+    throw new Error('owner_asserted_payload_invalid');
+  }
+  const url = typeof raw.url === 'string' ? raw.url.trim() : '';
+  if (!/^https:\/\//.test(url) || url.length > DRAFT_URL_MAX_LENGTH
+    || OWNER_VOUCH_UNSAFE_UNICODE.test(url) || /\s/u.test(url)) {
+    throw new Error('owner_asserted_payload_invalid');
+  }
+  return {
+    title: normalizedDraftText(raw.title, DRAFT_TITLE_MIN_CODE_POINTS, DRAFT_TITLE_MAX_CODE_POINTS),
+    summary: normalizedDraftText(
+      raw.summary, DRAFT_SUMMARY_MIN_CODE_POINTS, DRAFT_SUMMARY_MAX_CODE_POINTS,
+    ),
+    source: normalizedDraftText(raw.source, 1, DRAFT_SOURCE_MAX_CODE_POINTS),
+    url,
+  };
+}
+
+/**
+ * 起草结果的**安全**规范化：不合规回 `null` 而不是抛。
+ *
+ * 取材那条路要在写签名快照**之前**自己先判一遍。理由是入池永不失败这条硬约束：模型偶尔
+ * 会吐出一个 5 个字的标题或一段 400 字的摘要，那种东西进不了签名快照 —— 但它只该让这条
+ * 候选退回「用 owner 那句话当标题」，绝不能变成「这条线索没能入池」。
+ */
+export function safeManualNewsOwnerAssertedDraft(
+  raw: unknown,
+): ManualNewsOwnerAssertedDraft | null {
+  try {
+    return normalizedOwnerAssertedDraft(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 投影里的 url 兜底：线索自带的 https 网址。http / 空值一律退成空串。
  *
  * ⚠️ **空串不是 null**：候选写进 items 时走 `candidate.url || ''`，正式新闻门再用
@@ -108,6 +205,7 @@ export async function createManualNewsOwnerAssertedPayload(input: {
   lead: { id: string; review_date: string; input_url: string };
   statement: string;
   evidence: readonly ManualNewsEvidence[];
+  drafted?: unknown;
   asserted_at: number;
 }): Promise<ManualNewsOwnerAssertedPayload> {
   assertManualNewsEvidenceSet(input.evidence);
@@ -119,11 +217,13 @@ export async function createManualNewsOwnerAssertedPayload(input: {
   const statement = normalizeOwnerVouchStatement(input.statement);
   const evidence = canonicalEvidence(input.evidence) as ManualNewsEvidence[];
   const primary = ownerAssertedPrimaryEvidence(evidence);
+  const drafted = input.drafted === undefined ? undefined : normalizedOwnerAssertedDraft(input.drafted);
   return {
     policy_version: MANUAL_NEWS_OWNER_ASSERTED_POLICY,
     lead_id: input.lead.id,
     review_date: input.lead.review_date,
     statement,
+    ...(drafted ? { drafted } : {}),
     evidence,
     event_identity: {
       // 事件身份绑线索 id:直接录入没有来源可绑,也刻意不参与跨天事件去重。
@@ -133,11 +233,14 @@ export async function createManualNewsOwnerAssertedPayload(input: {
     item_projection: {
       item_id: `blog:manual:${input.lead.id}`,
       source_id: `manual:${input.lead.id}`,
-      title: statement,
-      summary: statement,
-      source: primary?.publisher || MANUAL_NEWS_OWNER_ASSERTED_FALLBACK_SOURCE,
+      // 取到正文时标题与摘要来自模型对正文的转写；取不到才退回 owner 那句话。
+      title: drafted?.title || statement,
+      summary: drafted?.summary || statement,
+      source: drafted?.source || primary?.publisher || MANUAL_NEWS_OWNER_ASSERTED_FALLBACK_SOURCE,
       score: null,
-      url: primary?.url || ownerAssertedFallbackUrl(input.lead.input_url),
+      url: drafted?.url || primary?.url || ownerAssertedFallbackUrl(input.lead.input_url),
+      // 发布时间只认签名证据带回来的那个：取材那条轻量通道不产生带签名的时间，
+      // 凭正文猜一个时间会让「来源发布时间」变成我们自己编的数。
       published_at: primary?.published_at || null,
     },
     asserted_at: input.asserted_at,
@@ -163,7 +266,8 @@ async function validatedManualNewsOwnerAssertedPayload(
   input: { lead_id: string; input_url: string },
   payload: ManualNewsOwnerAssertedPayload,
 ): Promise<ManualNewsOwnerAssertedPayload> {
-  if (!hasExactKeys(payload, OWNER_ASSERTED_PAYLOAD_KEYS)
+  if (!(hasExactKeys(payload, OWNER_ASSERTED_PAYLOAD_KEYS)
+    || hasExactKeys(payload, OWNER_ASSERTED_DRAFTED_PAYLOAD_KEYS))
     || payload.policy_version !== MANUAL_NEWS_OWNER_ASSERTED_POLICY
     || payload.lead_id !== input.lead_id) {
     throw new Error('owner_asserted_payload_invalid');
@@ -172,6 +276,7 @@ async function validatedManualNewsOwnerAssertedPayload(
     lead: { id: payload.lead_id, review_date: payload.review_date, input_url: input.input_url },
     statement: payload.statement,
     evidence: payload.evidence,
+    ...('drafted' in payload ? { drafted: payload.drafted } : {}),
     asserted_at: payload.asserted_at,
   });
   if (canonicalJson(rebuilt) !== canonicalJson(payload)) {
