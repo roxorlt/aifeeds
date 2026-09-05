@@ -175,6 +175,40 @@ export function manualLeadContentExcerpt(
     .slice(0, MANUAL_LEAD_CONTENT_EXCERPT_MAX_CHARS);
 }
 
+/**
+ * 检索词的长度上限（规格第 10.3 节）。
+ *
+ * 2026-09-05 同一个 ScrapeBadger 接口实测：`英伟达 收购 Hugging Face` 回 200 / 5 条，
+ * `英伟达确认以 129 亿美元收购 Hugging Face` 回 **502 / 41s**；英文那句
+ * `NVIDIA acquires Hugging Face` 回 200 / 4 条。所以掐的是「中文写成一整句」这种检索式，
+ * 英文长查询本来就是好的，不跟着一起收紧。
+ */
+export const MANUAL_LEAD_CONTENT_CJK_QUERY_MAX_CHARS = 20;
+export const MANUAL_LEAD_CONTENT_QUERY_MAX_CHARS = 60;
+/** 压不出检索词时的退路：取 owner 那句话的前 12 个字符。 */
+export const MANUAL_LEAD_CONTENT_FALLBACK_QUERY_MAX_CHARS = 12;
+
+/** 压不出检索词时用的退路。整句话不能直接拿去搜。 */
+export function manualLeadFallbackQuery(value: string): string {
+  return Array.from(String(value || '').replace(/\s+/g, ' ').trim())
+    .slice(0, MANUAL_LEAD_CONTENT_FALLBACK_QUERY_MAX_CHARS)
+    .join('')
+    .trim();
+}
+
+/** 发出去之前的最后一道闸：模型不守规矩吐回一整句时，按上限截，尽量截在空格上。 */
+export function manualLeadSearchQuery(value: string): string {
+  const collapsed = String(value || '').replace(/\s+/g, ' ').trim();
+  const max = /[\u3400-\u9fff]/u.test(collapsed)
+    ? MANUAL_LEAD_CONTENT_CJK_QUERY_MAX_CHARS
+    : MANUAL_LEAD_CONTENT_QUERY_MAX_CHARS;
+  const chars = Array.from(collapsed);
+  if (chars.length <= max) return collapsed;
+  const cut = chars.slice(0, max).join('');
+  const boundary = cut.lastIndexOf(' ');
+  return (boundary > 0 ? cut.slice(0, boundary) : cut).trim();
+}
+
 /** 模型读完正文之后给的两样东西：这条新闻的原标题，以及找同一件事其他报道用的检索词。 */
 export interface ManualLeadContentAnalysis {
   headline: string;
@@ -184,8 +218,13 @@ export interface ManualLeadContentAnalysis {
 export interface ManualLeadContentAdapters {
   /** 抓 owner 给的那条链接的正文。抓不到回 `null`。 */
   fetchSource(url: string, date: string): Promise<ManualEnrichmentMaterial | null>;
-  /** 读懂正文是什么新闻，给出原标题与检索词。给不出回 `null`。 */
-  analyze(input: { clue: string; material: ManualEnrichmentMaterial }):
+  /**
+   * 读懂这是什么新闻，给出原标题与检索词。给不出回 `null`。
+   *
+   * `material` 是抓回的正文；没有链接（或没抓到）时是 `null`，那一路只读 owner 那句话，
+   * 把它压成几个关键词 —— 整句话直接拿去搜会 502（规格第 10.3 节）。
+   */
+  analyze(input: { clue: string; material: ManualEnrichmentMaterial | null }):
   Promise<ManualLeadContentAnalysis | null>;
   /** 按检索词搜同一件事的其他报道并抓回正文。搜不到回 `null`。 */
   search(query: string, date: string): Promise<ManualEnrichmentMaterial | null>;
@@ -351,24 +390,32 @@ export async function runManualLeadContentPipeline(
   const work = (async (): Promise<void> => {
     const url = String(clue.url || '').trim();
     const clueText = String(clue.text || '').trim();
-    let query = clueText;
+    let query = '';
 
+    let source: ManualEnrichmentMaterial | null = null;
     if (url) {
-      const source = await run(
+      source = await run(
         { stage: 'fetching_source', name: 'fetch-source', budgetMs: budgets.fetching_source },
         () => adapters.fetchSource(url, clue.date),
       );
-      if (source && String(source.text || '').trim()) {
-        collected.push(classifyManualLeadMaterial(source));
-        const analysis = await run(
-          { stage: 'analyzing', name: 'analyze', budgetMs: budgets.analyzing },
-          () => adapters.analyze({ clue: clueText, material: source }),
-        );
-        // 分析这一步只影响「拿什么去搜」。它挂了就退回 owner 那句话，整轮照跑。
-        if (analysis?.query?.trim()) query = analysis.query.trim();
-        if (analysis?.headline?.trim()) headline = analysis.headline.trim();
-      }
+      if (source && String(source.text || '').trim()) collected.push(classifyManualLeadMaterial(source));
+      else source = null;
     }
+
+    // **有没有链接都走这一步**（规格第 10.3 节）：owner 那句整话直接拿去搜，长中文检索式
+    // 在 ScrapeBadger 上必 502，实测 9 字 200、21 字 502。这一步把它压成几个关键词。
+    if (source || clueText) {
+      const analysis = await run(
+        { stage: 'analyzing', name: 'analyze', budgetMs: budgets.analyzing },
+        () => adapters.analyze({ clue: clueText, material: source }),
+      );
+      // 分析这一步只影响「拿什么去搜」。它挂了就退回那句话的前 12 个字，整轮照跑。
+      if (analysis?.query?.trim()) query = analysis.query.trim();
+      // 原标题只在真抓到正文时才作数：没有正文就没有「文章自己的标题」这回事，
+      // 拿模型顺着那句话编的一个当标题，等于把 owner 的线索改写一遍再当成事实。
+      if (source && analysis?.headline?.trim()) headline = analysis.headline.trim();
+    }
+    query = manualLeadSearchQuery(query || manualLeadFallbackQuery(clueText));
 
     if (query) {
       const found = await run(

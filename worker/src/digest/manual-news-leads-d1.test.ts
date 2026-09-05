@@ -6543,12 +6543,13 @@ describe('一步录入端到端：真链接 → 真加工 → 真入池', () => 
     expect(second.changed).toBe(false);
   });
 
-  // 规格第 9 节第 3 条：只给一句话，不给链接。
-  test('只给一句话：不抓链接、不分析，直接拿那句话去搜', async () => {
+  // 规格第 9 节第 3 条 + 第 10.3 节：只给一句话时也先把它压成关键词再搜 —— 整句中文
+  // 直接拿去搜，ScrapeBadger 必 502。
+  test('只给一句话：不抓链接，先压成检索词再搜', async () => {
     const gatewayBodies: Record<string, unknown>[] = [];
     const { state, leadId } = await submitOnce({ text: ASSERTED_STATEMENT }, { gatewayBodies });
 
-    expect(gatewayBodies).toEqual([{ query: ASSERTED_STATEMENT, date: '2026-08-28' }]);
+    expect(gatewayBodies).toEqual([{ query: 'OpenAI Astra 企业模型', date: '2026-08-28' }]);
     expect(state.db.sqlite.prepare('SELECT title, author FROM items WHERE id = ?')
       .get(`blog:manual:${leadId}`)).toMatchObject({
       title: DRAFT_TITLE, author: 'reuters.com',

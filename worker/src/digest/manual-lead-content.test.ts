@@ -1,9 +1,13 @@
 import { describe, expect, test, vi } from 'vitest';
 
 import {
+  MANUAL_LEAD_CONTENT_CJK_QUERY_MAX_CHARS,
   MANUAL_LEAD_CONTENT_EXCERPT_MAX_CHARS,
+  MANUAL_LEAD_CONTENT_FALLBACK_QUERY_MAX_CHARS,
   classifyManualLeadMaterial,
   createDirectStepRunner,
+  manualLeadFallbackQuery,
+  manualLeadSearchQuery,
   manualLeadContentExcerpt,
   manualLeadMaterialPrefix,
   orderManualLeadMaterials,
@@ -83,6 +87,33 @@ describe('素材排序：有 A/B 档就绝不拿 C 档当主料', () => {
     const second = classifyManualLeadMaterial(material({ url: 'https://b.example/2' }));
     expect(orderManualLeadMaterials([first, second]).map((item) => item.url))
       .toEqual(['https://a.example/1', 'https://b.example/2']);
+  });
+});
+
+describe('检索词（规格第 10.3 节：长中文检索式在 ScrapeBadger 上必 502）', () => {
+  test('退路取那句话的前 12 个字符', () => {
+    expect(MANUAL_LEAD_CONTENT_FALLBACK_QUERY_MAX_CHARS).toBe(12);
+    expect(manualLeadFallbackQuery('英伟达确认以 129 亿美元收购 Hugging Face'))
+      .toBe('英伟达确认以 129 亿');
+    expect(manualLeadFallbackQuery('  多余   空白  会被收掉  ')).toBe('多余 空白 会被收掉');
+    expect(manualLeadFallbackQuery('')).toBe('');
+  });
+
+  test('中文检索式截到关键词长度，英文放宽 —— 英文长查询实测是好的', () => {
+    expect(MANUAL_LEAD_CONTENT_CJK_QUERY_MAX_CHARS).toBe(20);
+    // 实测 200 / 5 条的那一句，一个字都不该被动。
+    expect(manualLeadSearchQuery('英伟达 收购 Hugging Face')).toBe('英伟达 收购 Hugging Face');
+    // 实测 502 的那一句，截到关键词长度。
+    expect(manualLeadSearchQuery('英伟达确认以 129 亿美元收购 Hugging Face'))
+      .toBe('英伟达确认以 129 亿美元收购');
+    // 实测 200 / 4 条的英文查询，同样一个字都不动。
+    expect(manualLeadSearchQuery('NVIDIA acquires Hugging Face'))
+      .toBe('NVIDIA acquires Hugging Face');
+  });
+
+  test('一个空格都没有的长中文串只能硬截，不能整串发出去', () => {
+    expect(Array.from(manualLeadSearchQuery('英'.repeat(40))).length)
+      .toBe(MANUAL_LEAD_CONTENT_CJK_QUERY_MAX_CHARS);
   });
 });
 
@@ -196,20 +227,49 @@ describe('runManualLeadContentPipeline', () => {
     expect(excerpt).toContain('路透社报道');
   });
 
-  test('没有链接：owner 那句话直接当检索词，不走抓取也不走分析', async () => {
+  // 规格第 10.3 节：owner 那句整话直接拿去搜，长中文检索式在 ScrapeBadger 上必 502
+  // （实测 9 字 200、21 字 502）。两条路统一先走「分析并拟检索词」这一步。
+  test('没有链接：先把那句话压成检索词再搜，不走抓取', async () => {
     const deps = adapters();
     const recorder = stageRecorder();
     const result = await runManualLeadContentPipeline(
       { url: null, text: CLUE.text, date: CLUE.date }, deps, recorder.runStep,
     );
 
-    expect(recorder.stages).toEqual(['searching', 'drafting']);
+    expect(recorder.stages).toEqual(['analyzing', 'searching', 'drafting']);
     expect(deps.fetchSource).not.toHaveBeenCalled();
-    expect(deps.analyze).not.toHaveBeenCalled();
-    expect(deps.search).toHaveBeenCalledWith(CLUE.text, CLUE.date);
-    // 只有搜索素材时，生成用的标题退回 owner 那句话（规格第 3 节的传参约定）。
+    expect(deps.analyze).toHaveBeenCalledWith({ clue: CLUE.text, material: null });
+    expect(deps.search).toHaveBeenCalledWith('OpenAI Astra 企业模型', CLUE.date);
+    // 只有搜索素材时，生成用的标题退回 owner 那句话（规格第 3 节的传参约定）——
+    // 没抓到任何正文就没有「文章自身的标题」这回事，模型顺口给的那个不算。
     expect(vi.mocked(deps.generate).mock.calls[0][0].title).toBe(CLUE.text);
     expect(result.drafted?.source).toBe('reuters.com');
+  });
+
+  test('压不出检索词时退回那句话的前 12 个字符，不把整句话发出去', async () => {
+    const deps = adapters({ analyze: vi.fn(async () => null) });
+    await runManualLeadContentPipeline(
+      { url: null, text: '英伟达确认以 129 亿美元收购 Hugging Face', date: CLUE.date },
+      deps, stageRecorder().runStep,
+    );
+
+    expect(deps.search).toHaveBeenCalledWith('英伟达确认以 129 亿', CLUE.date);
+  });
+
+  test('模型给回一整句长中文时也先截成关键词长度再发出去', async () => {
+    const deps = adapters({
+      analyze: vi.fn(async () => ({
+        headline: '', query: '英伟达确认以 129 亿美元收购 Hugging Face 并保留其品牌',
+      })),
+    });
+    await runManualLeadContentPipeline(
+      { url: null, text: CLUE.text, date: CLUE.date }, deps, stageRecorder().runStep,
+    );
+
+    const [sent] = vi.mocked(deps.search).mock.calls[0];
+    expect(Array.from(sent).length).toBeLessThanOrEqual(MANUAL_LEAD_CONTENT_CJK_QUERY_MAX_CHARS);
+    // 截断落在空格上，不把一个词切成两半。
+    expect(sent).toBe('英伟达确认以 129 亿美元收购');
   });
 
   test('取材抛异常照样走完，候选拿得到一份结果', async () => {
@@ -217,16 +277,17 @@ describe('runManualLeadContentPipeline', () => {
       fetchSource: vi.fn(async () => { throw new Error('gateway down'); }),
     });
     const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
-    // 抓取那一路挂了，搜索仍然按 owner 那句话跑，生成照常。
-    expect(deps.search).toHaveBeenCalledWith(CLUE.text, CLUE.date);
+    // 抓取那一路挂了，分析改成只读 owner 那句话，搜索与生成照常。
+    expect(deps.analyze).toHaveBeenCalledWith({ clue: CLUE.text, material: null });
+    expect(deps.search).toHaveBeenCalledWith('OpenAI Astra 企业模型', CLUE.date);
     expect(result.drafted).not.toBeNull();
     expect(result.materialTier).toBe('report');
   });
 
-  test('分析抛异常时退回用 owner 那句话检索，不让这一步拖垮整轮', async () => {
+  test('分析抛异常时退回那句话的前 12 个字符检索，不让这一步拖垮整轮', async () => {
     const deps = adapters({ analyze: vi.fn(async () => { throw new Error('llm down'); }) });
     const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
-    expect(deps.search).toHaveBeenCalledWith(CLUE.text, CLUE.date);
+    expect(deps.search).toHaveBeenCalledWith(manualLeadFallbackQuery(CLUE.text), CLUE.date);
     expect(result.drafted).not.toBeNull();
   });
 

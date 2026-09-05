@@ -196,9 +196,10 @@ describe('一步录入的内容加工 workflow', () => {
     const deps = adapters();
     await runManualLeadContentEntryWorkflow({} as never, PARAMS, step, { adapters: deps });
 
-    // 抓正文那一步连重试都耗尽了，搜索与生成仍要跑 —— 一步失败不能连坐整轮。
+    // 抓正文那一步连重试都耗尽了，拟检索词、搜索与生成仍要跑 —— 一步失败不能连坐整轮。
     expect(seen).toEqual([
       'manual-lead-content:fetch-source',
+      'manual-lead-content:analyze',
       'manual-lead-content:search',
       'manual-lead-content:generate',
       'manual-lead-content:pool',
