@@ -88,7 +88,7 @@ export const MANUAL_LEAD_CONTENT_EXCERPT_MAX_CHARS = 12_000;
  * 挑一个好看的小数字。2026-09-05 生产实测：抓正文 0.3–2.3s、ScrapeBadger 搜索 8–26s、
  * 生成那一次 DeepSeek 调用本身允许 60s（`classify-translate.ts` 的 `callJson`）。
  */
-export const MANUAL_LEAD_CONTENT_BUDGET_MS = 240_000;
+export const MANUAL_LEAD_CONTENT_BUDGET_MS = 270_000;
 /**
  * 分段预算。
  *
@@ -102,7 +102,7 @@ export const MANUAL_LEAD_CONTENT_STAGE_BUDGET_MS: Readonly<Record<
   fetching_source: 30_000,
   analyzing: 45_000,
   searching: 50_000,
-  drafting: 100_000,
+  drafting: 130_000,
 };
 
 const TIER_ORDER: Readonly<Record<Exclude<ManualLeadMaterialTier, 'none'>, number>> = {

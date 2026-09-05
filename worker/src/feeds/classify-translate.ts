@@ -51,7 +51,8 @@ async function callRaw(
   env: Env,
   system: string,
   user: string,
-  opts: { maxTokens: number; jsonMode: boolean; model?: string },
+  opts: { maxTokens: number; jsonMode: boolean; model?: string;
+    timeoutMs?: number; attempts?: number },
 ): Promise<string | null> {
   if (!env.DEEPSEEK_API_KEY) {
     console.warn("[feeds-llm] DEEPSEEK_API_KEY missing — skip");
@@ -68,7 +69,10 @@ async function callRaw(
   };
   if (opts.jsonMode) body.response_format = { type: "json_object" };
 
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // 默认两次尝试是常规新闻用了很久的口径。补录那条路素材更长、单次更慢，
+  // 两次 60s 都不够用只会白等 2 分钟（2026-09-05 实测），它改用「一次调用、给足时间」。
+  const attempts = opts.attempts ?? 2;
+  for (let attempt = 0; attempt < attempts; attempt++) {
     if (attempt > 0) await new Promise((r) => setTimeout(r, 2000 * attempt));
     try {
       const r = await fetch(DEEPSEEK_URL, {
@@ -78,7 +82,7 @@ async function callRaw(
           Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
+        signal: AbortSignal.timeout(opts.timeoutMs ?? LLM_TIMEOUT_MS),
       });
       if (!r.ok) {
         console.error(`[feeds-llm] HTTP ${r.status}`);
@@ -102,8 +106,11 @@ async function callJson<T>(
   user: string,
   maxTokens: number,
   model: string = DEEPSEEK_FLASH,
+  opts: { timeoutMs?: number; attempts?: number } = {},
 ): Promise<T | null> {
-  const text = await callRaw(env, system, user, { maxTokens, jsonMode: true, model });
+  const text = await callRaw(env, system, user, {
+    maxTokens, jsonMode: true, model, ...opts,
+  });
   if (!text) return null;
   try {
     return JSON.parse(text) as T;
@@ -552,6 +559,10 @@ export async function generateFeedEnrichment(
     lang: FeedLang;
     kind: FeedKind;
     maxTokens?: number;
+    /** 单次调用超时。默认沿用常规新闻的 60s。 */
+    timeoutMs?: number;
+    /** 尝试次数。默认沿用常规新闻的 2 次。 */
+    attempts?: number;
   },
 ): Promise<FeedEnrichment | null> {
   const { kind, lang, title, excerpt, sourceCompany } = input;
@@ -563,7 +574,10 @@ export async function generateFeedEnrichment(
     shownotes_zh?: unknown;
     ai_summary_zh?: unknown;
     guests?: unknown;
-  }>(env, enrichSystem(kind), enrichUser(kind, title, excerpt, sourceCompany, lang), maxTokens);
+  }>(env, enrichSystem(kind), enrichUser(kind, title, excerpt, sourceCompany, lang), maxTokens,
+    DEEPSEEK_FLASH,
+    { ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+      ...(input.attempts === undefined ? {} : { attempts: input.attempts }) });
   if (!out) return null;
 
   const cat = String(out.ai_category || "other");
