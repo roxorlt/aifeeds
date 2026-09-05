@@ -1,8 +1,13 @@
 import { describe, expect, test, vi } from 'vitest';
 
 import {
+  MANUAL_LEAD_CONTENT_CJK_QUERY_MAX_CHARS,
   MANUAL_LEAD_CONTENT_EXCERPT_MAX_CHARS,
+  MANUAL_LEAD_CONTENT_FALLBACK_QUERY_MAX_CHARS,
   classifyManualLeadMaterial,
+  createDirectStepRunner,
+  manualLeadFallbackQuery,
+  manualLeadSearchQuery,
   manualLeadContentExcerpt,
   manualLeadMaterialPrefix,
   orderManualLeadMaterials,
@@ -85,6 +90,33 @@ describe('素材排序：有 A/B 档就绝不拿 C 档当主料', () => {
   });
 });
 
+describe('检索词（规格第 10.3 节：长中文检索式在 ScrapeBadger 上必 502）', () => {
+  test('退路取那句话的前 12 个字符', () => {
+    expect(MANUAL_LEAD_CONTENT_FALLBACK_QUERY_MAX_CHARS).toBe(12);
+    expect(manualLeadFallbackQuery('英伟达确认以 129 亿美元收购 Hugging Face'))
+      .toBe('英伟达确认以 129 亿');
+    expect(manualLeadFallbackQuery('  多余   空白  会被收掉  ')).toBe('多余 空白 会被收掉');
+    expect(manualLeadFallbackQuery('')).toBe('');
+  });
+
+  test('中文检索式截到关键词长度，英文放宽 —— 英文长查询实测是好的', () => {
+    expect(MANUAL_LEAD_CONTENT_CJK_QUERY_MAX_CHARS).toBe(20);
+    // 实测 200 / 5 条的那一句，一个字都不该被动。
+    expect(manualLeadSearchQuery('英伟达 收购 Hugging Face')).toBe('英伟达 收购 Hugging Face');
+    // 实测 502 的那一句，截到关键词长度。
+    expect(manualLeadSearchQuery('英伟达确认以 129 亿美元收购 Hugging Face'))
+      .toBe('英伟达确认以 129 亿美元收购');
+    // 实测 200 / 4 条的英文查询，同样一个字都不动。
+    expect(manualLeadSearchQuery('NVIDIA acquires Hugging Face'))
+      .toBe('NVIDIA acquires Hugging Face');
+  });
+
+  test('一个空格都没有的长中文串只能硬截，不能整串发出去', () => {
+    expect(Array.from(manualLeadSearchQuery('英'.repeat(40))).length)
+      .toBe(MANUAL_LEAD_CONTENT_CJK_QUERY_MAX_CHARS);
+  });
+});
+
 describe('交给生成函数的素材正文', () => {
   test('逐份加出处前缀后拼起来，出处信息不进提示词', () => {
     const excerpt = manualLeadContentExcerpt([
@@ -145,16 +177,25 @@ function adapters(over: Partial<ManualLeadContentAdapters> = {}): ManualLeadCont
   };
 }
 
+/**
+ * 测试用的「按顺序直接跑」runner：把报出来的阶段记下来，别的什么都不做。
+ *
+ * 生产上这个位置是 workflow 的 durable step（{@link runManualLeadContentEntryWorkflow}），
+ * 流水线本身对两者一视同仁 —— 它只负责按什么顺序调哪一步。
+ */
 function stageRecorder() {
   const stages: ManualLeadContentStage[] = [];
-  return { stages, onStage: async (stage: ManualLeadContentStage) => { stages.push(stage); } };
+  const runStep = createDirectStepRunner({
+    onStage: async (stage: ManualLeadContentStage) => { stages.push(stage); },
+  });
+  return { stages, runStep };
 }
 
 describe('runManualLeadContentPipeline', () => {
   test('有链接：抓正文 → 读懂并拟检索词 → 搜索 → 生成，阶段依次报出去', async () => {
     const deps = adapters();
     const recorder = stageRecorder();
-    const result = await runManualLeadContentPipeline(CLUE, deps, recorder);
+    const result = await runManualLeadContentPipeline(CLUE, deps, recorder.runStep);
 
     expect(recorder.stages).toEqual(['fetching_source', 'analyzing', 'searching', 'drafting']);
     expect(deps.fetchSource).toHaveBeenCalledWith(CLUE.url, CLUE.date);
@@ -174,7 +215,7 @@ describe('runManualLeadContentPipeline', () => {
 
   test('生成用的标题取抓回正文里的原标题，摘要素材含两份来源', async () => {
     const deps = adapters();
-    await runManualLeadContentPipeline(CLUE, deps, stageRecorder());
+    await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
     expect(deps.generate).toHaveBeenCalledWith(expect.objectContaining({
       title: 'OpenAI 发布 Astra',
       sourceCompany: 'openai.com',
@@ -186,43 +227,73 @@ describe('runManualLeadContentPipeline', () => {
     expect(excerpt).toContain('路透社报道');
   });
 
-  test('没有链接：owner 那句话直接当检索词，不走抓取也不走分析', async () => {
+  // 规格第 10.3 节：owner 那句整话直接拿去搜，长中文检索式在 ScrapeBadger 上必 502
+  // （实测 9 字 200、21 字 502）。两条路统一先走「分析并拟检索词」这一步。
+  test('没有链接：先把那句话压成检索词再搜，不走抓取', async () => {
     const deps = adapters();
     const recorder = stageRecorder();
     const result = await runManualLeadContentPipeline(
-      { url: null, text: CLUE.text, date: CLUE.date }, deps, recorder,
+      { url: null, text: CLUE.text, date: CLUE.date }, deps, recorder.runStep,
     );
 
-    expect(recorder.stages).toEqual(['searching', 'drafting']);
+    expect(recorder.stages).toEqual(['analyzing', 'searching', 'drafting']);
     expect(deps.fetchSource).not.toHaveBeenCalled();
-    expect(deps.analyze).not.toHaveBeenCalled();
-    expect(deps.search).toHaveBeenCalledWith(CLUE.text, CLUE.date);
-    // 只有搜索素材时，生成用的标题退回 owner 那句话（规格第 3 节的传参约定）。
+    expect(deps.analyze).toHaveBeenCalledWith({ clue: CLUE.text, material: null });
+    expect(deps.search).toHaveBeenCalledWith('OpenAI Astra 企业模型', CLUE.date);
+    // 只有搜索素材时，生成用的标题退回 owner 那句话（规格第 3 节的传参约定）——
+    // 没抓到任何正文就没有「文章自身的标题」这回事，模型顺口给的那个不算。
     expect(vi.mocked(deps.generate).mock.calls[0][0].title).toBe(CLUE.text);
     expect(result.drafted?.source).toBe('reuters.com');
+  });
+
+  test('压不出检索词时退回那句话的前 12 个字符，不把整句话发出去', async () => {
+    const deps = adapters({ analyze: vi.fn(async () => null) });
+    await runManualLeadContentPipeline(
+      { url: null, text: '英伟达确认以 129 亿美元收购 Hugging Face', date: CLUE.date },
+      deps, stageRecorder().runStep,
+    );
+
+    expect(deps.search).toHaveBeenCalledWith('英伟达确认以 129 亿', CLUE.date);
+  });
+
+  test('模型给回一整句长中文时也先截成关键词长度再发出去', async () => {
+    const deps = adapters({
+      analyze: vi.fn(async () => ({
+        headline: '', query: '英伟达确认以 129 亿美元收购 Hugging Face 并保留其品牌',
+      })),
+    });
+    await runManualLeadContentPipeline(
+      { url: null, text: CLUE.text, date: CLUE.date }, deps, stageRecorder().runStep,
+    );
+
+    const [sent] = vi.mocked(deps.search).mock.calls[0];
+    expect(Array.from(sent).length).toBeLessThanOrEqual(MANUAL_LEAD_CONTENT_CJK_QUERY_MAX_CHARS);
+    // 截断落在空格上，不把一个词切成两半。
+    expect(sent).toBe('英伟达确认以 129 亿美元收购');
   });
 
   test('取材抛异常照样走完，候选拿得到一份结果', async () => {
     const deps = adapters({
       fetchSource: vi.fn(async () => { throw new Error('gateway down'); }),
     });
-    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder());
-    // 抓取那一路挂了，搜索仍然按 owner 那句话跑，生成照常。
-    expect(deps.search).toHaveBeenCalledWith(CLUE.text, CLUE.date);
+    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
+    // 抓取那一路挂了，分析改成只读 owner 那句话，搜索与生成照常。
+    expect(deps.analyze).toHaveBeenCalledWith({ clue: CLUE.text, material: null });
+    expect(deps.search).toHaveBeenCalledWith('OpenAI Astra 企业模型', CLUE.date);
     expect(result.drafted).not.toBeNull();
     expect(result.materialTier).toBe('report');
   });
 
-  test('分析抛异常时退回用 owner 那句话检索，不让这一步拖垮整轮', async () => {
+  test('分析抛异常时退回那句话的前 12 个字符检索，不让这一步拖垮整轮', async () => {
     const deps = adapters({ analyze: vi.fn(async () => { throw new Error('llm down'); }) });
-    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder());
-    expect(deps.search).toHaveBeenCalledWith(CLUE.text, CLUE.date);
+    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
+    expect(deps.search).toHaveBeenCalledWith(manualLeadFallbackQuery(CLUE.text), CLUE.date);
     expect(result.drafted).not.toBeNull();
   });
 
   test('生成抛异常时不起草，素材与分档照样带出去', async () => {
     const deps = adapters({ generate: vi.fn(async () => { throw new Error('llm down'); }) });
-    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder());
+    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
     expect(result.drafted).toBeNull();
     expect(result.materialTier).toBe('report');
     expect(result.detail).toContain('生成');
@@ -234,7 +305,7 @@ describe('runManualLeadContentPipeline', () => {
       search: vi.fn(async () => null),
       generate: vi.fn(async () => { throw new Error('不该被调用'); }),
     });
-    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder());
+    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
     expect(result.materialTier).toBe('none');
     expect(result.drafted).toBeNull();
     expect(deps.generate).not.toHaveBeenCalled();
@@ -249,7 +320,7 @@ describe('runManualLeadContentPipeline', () => {
       })),
       search: vi.fn(async () => null),
     });
-    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder());
+    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
     expect(result.materialTier).toBe('tweet');
     expect(result.drafted?.url).toBe('https://x.com/blogger/status/7');
     expect(result.materialExcerpt).toContain('以下内容为 X 博主 @blogger 的发文，非媒体报道：');
@@ -262,7 +333,7 @@ describe('runManualLeadContentPipeline', () => {
         publisher: 'X @blogger', kind: 'tweet',
       })),
     });
-    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder());
+    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
     expect(result.materialTier).toBe('report');
     expect(result.drafted?.source).toBe('reuters.com');
     expect(result.materialExcerpt.indexOf('路透社'))
@@ -274,7 +345,7 @@ describe('runManualLeadContentPipeline', () => {
     const deps = adapters({ fetchSource: vi.fn(never) });
     const started = Date.now();
     const result = await runManualLeadContentPipeline(
-      CLUE, deps, stageRecorder(), { budgetMs: 30 },
+      CLUE, deps, stageRecorder().runStep, { budgetMs: 30 },
     );
     expect(Date.now() - started).toBeLessThan(3_000);
     expect(result.drafted).toBeNull();
@@ -287,16 +358,16 @@ describe('runManualLeadContentPipeline', () => {
     const never = () => new Promise<never>(() => {});
     const deps = adapters({ fetchSource: vi.fn(never) });
     const result = await runManualLeadContentPipeline(
-      CLUE, deps, stageRecorder(), { stageBudgetMs: { fetching_source: 20 } },
+      CLUE, deps, stageRecorder().runStep, { stageBudgetMs: { fetching_source: 20 } },
     );
     expect(deps.search).toHaveBeenCalled();
     expect(result.drafted).not.toBeNull();
   });
 
   test('阶段回调自己抛异常也伤不到整轮', async () => {
-    const result = await runManualLeadContentPipeline(CLUE, adapters(), {
+    const result = await runManualLeadContentPipeline(CLUE, adapters(), createDirectStepRunner({
       onStage: async () => { throw new Error('D1 写不进去'); },
-    });
+    }));
     expect(result.drafted).not.toBeNull();
   });
 
@@ -312,7 +383,7 @@ describe('runManualLeadContentPipeline', () => {
         grounding: { suspect: false, reason: '', bodySubjects: [], outputSubjects: [] },
       })),
     });
-    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder());
+    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
     expect(result.drafted).toBeNull();
     expect(result.detail).toContain('起草');
   });

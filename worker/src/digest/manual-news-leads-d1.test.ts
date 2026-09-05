@@ -1,4 +1,12 @@
 import { MANUAL_LEAD_CONTENT_BUDGET_MS } from './manual-lead-content';
+import {
+  runManualLeadContentEntryWorkflow,
+  type ManualLeadContentWorkflowParams,
+} from './manual-lead-content-workflow';
+import {
+  MANUAL_LEAD_CONTENT_RECOVERY_RETRY_MS,
+  recoverManualLeadContentEntry,
+} from './manual-lead-content-entry';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
@@ -6293,6 +6301,42 @@ describe('一步录入拆成「先建行、后加工入池」', () => {
       }]);
   });
 
+  test('兜底把没了下文的线索直接补入池：标题退回那句话，不重跑加工', async () => {
+    const { state, lead } = await entryFixture();
+    const stale = 100 + MANUAL_LEAD_CONTENT_BUDGET_MS + 1_000;
+
+    await expect(recoverManualLeadContentEntry(state.env, {
+      id: lead.id, review_date: '2026-08-28',
+      input_url: 'https://openai.com/index/astra/', input_text: ASSERTED_STATEMENT, note: '',
+      submit_idempotency_key: 'two-phase-entry',
+    }, stale)).resolves.toMatchObject({ pooled: true, stage: 'done' });
+
+    const pooled = await getManualNewsLead(state.env, lead.id);
+    expect(pooled?.confirmed_at).not.toBeNull();
+    expect(itemRowOf(state, `blog:manual:${lead.id}`)).toMatchObject({ title: ASSERTED_STATEMENT });
+    // 入池了就不该再被扫出来兜第二次。
+    await expect(listStaleManualLeadContentEntries(state.env, '2026-08-28', stale + 1_000))
+      .resolves.toEqual([]);
+  });
+
+  test('兜底入不了池时把期限往后推，不让每次轮询都重试一遍', async () => {
+    const { state, lead } = await entryFixture();
+    // 审核窗口已过 —— 这条线索怎么兜都进不了池。
+    const expired = 4_102_444_800_000;
+
+    await expect(recoverManualLeadContentEntry(state.env, {
+      id: lead.id, review_date: '2026-08-28',
+      input_url: 'https://openai.com/index/astra/', input_text: ASSERTED_STATEMENT, note: '',
+      submit_idempotency_key: 'two-phase-entry',
+    }, expired)).resolves.toMatchObject({ pooled: false, stage: 'failed' });
+
+    expect(state.db.sqlite.prepare(
+      'SELECT content_deadline_at FROM manual_news_leads WHERE id = ?',
+    ).get(lead.id)).toEqual({ content_deadline_at: expired + MANUAL_LEAD_CONTENT_RECOVERY_RETRY_MS });
+    await expect(listStaleManualLeadContentEntries(state.env, '2026-08-28', expired + 1_000))
+      .resolves.toEqual([]);
+  });
+
   test('已经入池的线索不会再被扫出来', async () => {
     const { state, frozen } = await entryFixture();
     await assertManualNewsLeadCandidate(state.env, {
@@ -6398,6 +6442,23 @@ describe('一步录入端到端：真链接 → 真加工 → 真入池', () => 
     const pending: Promise<unknown>[] = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = stubbedFetch(opts);
+    const env = {
+      ...state.env,
+      DAILY_NEWS_REVIEW_ENABLED: '1',
+      MANUAL_NEWS_RESEARCH_ORIGIN: 'https://gateway.example',
+      MANUAL_NEWS_RESEARCH_TOKEN: 'gateway-token',
+      DEEPSEEK_API_KEY: 'deepseek-key',
+    } as Env;
+    // 加工跑在 workflow 上。这里的假绑定就地把真 workflow 代码跑完（每一步都过一遍 step
+    // 边界），所以这条端到端链路验的是生产上真正会走的那条路。
+    (env as unknown as { MANUAL_NEWS_LEAD_WORKFLOW: unknown }).MANUAL_NEWS_LEAD_WORKFLOW = {
+      create: async ({ params }: { params: ManualLeadContentWorkflowParams }) => {
+        await runManualLeadContentEntryWorkflow(env, params, {
+          do: async <T>(_name: string, _config: unknown, callback: () => Promise<T>) => callback(),
+        });
+        return { id: 'inline-workflow-instance' };
+      },
+    };
     try {
       const response = await handleManualNewsLeadsApi(new Request(
         'https://api.example.test/api/digest/daily-news-leads',
@@ -6410,13 +6471,7 @@ describe('一步录入端到端：真链接 → 真加工 → 真入池', () => 
           },
           body: JSON.stringify({ date: '2026-08-28', owner_asserted: true, ...body }),
         },
-      ), {
-        ...state.env,
-        DAILY_NEWS_REVIEW_ENABLED: '1',
-        MANUAL_NEWS_RESEARCH_ORIGIN: 'https://gateway.example',
-        MANUAL_NEWS_RESEARCH_TOKEN: 'gateway-token',
-        DEEPSEEK_API_KEY: 'deepseek-key',
-      } as Env, { waitUntil(work: Promise<unknown>) { pending.push(work); } } as never, 100);
+      ), env, { waitUntil(work: Promise<unknown>) { pending.push(work); } } as never, 100);
       const payload = await response.json() as { ok: boolean; lead: { id: string } };
       await Promise.all(pending);
       return { state, response, payload, leadId: payload.lead.id };
@@ -6488,12 +6543,13 @@ describe('一步录入端到端：真链接 → 真加工 → 真入池', () => 
     expect(second.changed).toBe(false);
   });
 
-  // 规格第 9 节第 3 条：只给一句话，不给链接。
-  test('只给一句话：不抓链接、不分析，直接拿那句话去搜', async () => {
+  // 规格第 9 节第 3 条 + 第 10.3 节：只给一句话时也先把它压成关键词再搜 —— 整句中文
+  // 直接拿去搜，ScrapeBadger 必 502。
+  test('只给一句话：不抓链接，先压成检索词再搜', async () => {
     const gatewayBodies: Record<string, unknown>[] = [];
     const { state, leadId } = await submitOnce({ text: ASSERTED_STATEMENT }, { gatewayBodies });
 
-    expect(gatewayBodies).toEqual([{ query: ASSERTED_STATEMENT, date: '2026-08-28' }]);
+    expect(gatewayBodies).toEqual([{ query: 'OpenAI Astra 企业模型', date: '2026-08-28' }]);
     expect(state.db.sqlite.prepare('SELECT title, author FROM items WHERE id = ?')
       .get(`blog:manual:${leadId}`)).toMatchObject({
       title: DRAFT_TITLE, author: 'reuters.com',

@@ -27,10 +27,14 @@ import {
 } from './manual-lead-enrichment';
 import { createManualLeadEnrichmentAdapters } from './manual-lead-enrichment-runtime';
 import {
-  runManualLeadContentEntry,
+  recoverManualLeadContentEntry,
   type ManualLeadContentEntryInput,
 } from './manual-lead-content-entry';
-import { createManualLeadContentAdapters } from './manual-lead-content-runtime';
+import {
+  MANUAL_LEAD_CONTENT_WORKFLOW_KIND,
+  manualLeadContentWorkflowId,
+  type ManualLeadContentWorkflowParams,
+} from './manual-lead-content-workflow';
 import { newsReviewSecret } from './news-review';
 import {
   MANUAL_NEWS_SOURCE_SUPPORT_POLICY,
@@ -234,18 +238,17 @@ function scheduleLeadEnrichment(
 }
 
 /**
- * 一步录入的后台那一半：跑内容加工，然后签名入池。
+ * 一步录入的后台那一半：派一条 workflow 去跑内容加工，跑完由它签名入池。
  *
- * **用 `ctx.waitUntil` 而不是派发 Workflow**：Workflow 那条路要先占 `processing_owner`
- * 租约、失败要回写 `error_code`，那整套是为「取证决定线索能不能入池」设计的状态机；这里
- * 是「先入池，内容尽力而为」，套上去只会让一条注定要入池的线索显示成失败。
+ * **派发用 `ctx.waitUntil`，加工本身不用**：派发是一次亚秒级的 RPC，正是 `waitUntil`
+ * 该干的活；加工要一两分钟，挂在 `waitUntil` 上会被运行时回收 —— 2026-09-05 首轮验收
+ * 四条线索里有三条就是这么卡在 `drafting` 再没进候选池的（规格第 10.1 节）。
  *
- * `waitUntil` 的代价是 isolate 被回收就没有第二次机会。兜底在 GET 那一侧：面板轮询当天
- * 线索时会把 `content_deadline_at` 过期还没入池的捡回来补跑
- * （{@link scheduleStaleContentEntries}）。
+ * 复用取证那条 workflow 的绑定，靠 payload 的 `kind` 与实例 id 前缀分流；这条路一个
+ * `processing_owner` 租约都不占，与取证互不干扰。
  *
- * 三道保险挡住它伤到刚建好的那一行：这里的 try / catch 挡同步异常，`.catch` 挡异步异常，
- * {@link runManualLeadContentEntry} 自己也从不往外抛。
+ * 派发失败（绑定缺失、创建被拒）不影响已经建好的那一行：`content_deadline_at` 过期后由
+ * {@link scheduleStaleContentEntries} 直接兜底入池。
  */
 function scheduleContentEntry(
   env: Env,
@@ -255,12 +258,23 @@ function scheduleContentEntry(
 ): void {
   try {
     console.log(`[manual-lead-content] schedule lead=${lead.id} url=${lead.input_url ? 'yes' : 'no'}`);
+    const workflow = env.MANUAL_NEWS_LEAD_WORKFLOW;
+    if (!workflow) {
+      console.warn(`[manual-lead-content] workflow binding missing lead=${lead.id},`
+        + ' falling back to deadline recovery');
+      return;
+    }
     // `now` 取的是 owner 按下提交那一刻，不是加工跑完那一刻：审核窗口该按提交时间算，
     // 让一条卡在窗口边上的线索因为多花了一分钟加工就被判过期是说不通的。
-    ctx.waitUntil(
-      runManualLeadContentEntry(env, lead, createManualLeadContentAdapters(env), { now })
-        .then(() => undefined, () => undefined),
-    );
+    const params: ManualLeadContentWorkflowParams = {
+      kind: MANUAL_LEAD_CONTENT_WORKFLOW_KIND, ...lead, submitted_at: now,
+    };
+    ctx.waitUntil(Promise.resolve()
+      .then(() => workflow.create({ id: manualLeadContentWorkflowId(lead.id), params }))
+      .then(() => undefined, (error: unknown) => {
+        console.warn('[manual-lead-content] workflow dispatch failed:',
+          String((error as Error)?.message || error).slice(0, 200));
+      }));
   } catch (error) {
     console.warn('[manual-lead-content] schedule failed:',
       String((error as Error)?.message || error).slice(0, 200));
@@ -268,10 +282,11 @@ function scheduleContentEntry(
 }
 
 /**
- * 把「加工跑到一半没了下文」的线索捡回来补入池。
+ * 把「加工没了下文」的线索捡回来直接补入池。
  *
- * 挂在列表 GET 上：owner 盯着卡片看进度时页面本来就在轮询，捡回来的时机正好。入池永不
- * 失败这条约束靠它兜住 `waitUntil` 丢任务那一种情况。
+ * 挂在列表 GET 上：owner 盯着卡片看进度时页面本来就在轮询，捡回来的时机正好。**只补
+ * 入池，不重跑加工** —— 加工在 workflow 上自己会续跑，这里重跑一遍只会跟它抢
+ * （规格第 10.1 节）。
  */
 async function scheduleStaleContentEntries(
   env: Env,
@@ -282,7 +297,12 @@ async function scheduleStaleContentEntries(
   const stale = await listStaleManualLeadContentEntries(env, date, now);
   for (const row of stale) {
     console.warn(`[manual-lead-content] recovering stale entry lead=${row.id}`);
-    scheduleContentEntry(env, ctx, row, now);
+    try {
+      ctx.waitUntil(recoverManualLeadContentEntry(env, row, now).then(() => undefined, () => undefined));
+    } catch (error) {
+      console.warn('[manual-lead-content] recovery schedule failed:',
+        String((error as Error)?.message || error).slice(0, 200));
+    }
   }
 }
 
@@ -424,7 +444,7 @@ async function handleManualNewsLeadsApiInternal(
         ? await recoverStaleManualNewsLeads(env, date, now)
         : [];
       for (const lead of recovered) scheduleLeadProcessing(env, ctx, lead);
-      // 一步录入那条路的兜底：加工挂在 waitUntil 上，isolate 被回收就再没人去入池。
+      // 一步录入那条路的兜底：整条 workflow 都没了时，这里直接把线索补进候选池。
       if (signingKeysAvailable(env)) await scheduleStaleContentEntries(env, ctx, date, now);
       const [leads, candidateBatch, authorizations] = await Promise.all([
         listManualNewsLeads(env, date),

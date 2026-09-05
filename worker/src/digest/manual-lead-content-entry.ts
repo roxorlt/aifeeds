@@ -1,15 +1,14 @@
 /**
- * 一步录入的后台那一半：跑完内容加工，然后把线索送进候选池。
+ * 一步录入的后台那一半：把加工产物送进候选池。
  *
- * 提交那一步（{@link beginOwnerAssertedEntry}）只建行就返回了，这里接着做三件事：
+ * 提交那一步（`beginOwnerAssertedEntry`）只建行就返回了，加工在 workflow 上跑
+ * （{@link runManualLeadContentEntryWorkflow}），跑完由这里接手：
  *
- * 1. 跑 {@link runManualLeadContentPipeline}，一路把阶段回写进库供卡片显示；
- * 2. 拿起草结果去 {@link assertManualNewsLeadCandidate} 签名入池；
- * 3. 入池成功后，把取材与生成的产物写进 `items.extra` 的几个非门禁键。
+ * 1. 拿起草结果去 {@link assertManualNewsLeadCandidate} 签名入池；
+ * 2. 入池成功后，把取材与生成的产物写进 `items.extra` 的几个非门禁键。
  *
  * **入池永不失败**是这个模块唯一的硬要求（规格第 8 节第一条）：加工那一轮拿不拿得到东西
- * 都要走到第 2 步，起草不出来就退回 owner 那句话当标题。所以这里一个异常都不往外抛，
- * 第 1 步的失败绝不阻断第 2 步。
+ * 都要走到第 1 步，起草不出来就退回 owner 那句话当标题。
  */
 import type { Env } from '../index';
 import {
@@ -17,15 +16,14 @@ import {
   type ManualEvidenceMaterialSource,
 } from './manual-lead-enrichment';
 import {
-  runManualLeadContentPipeline,
-  type ManualLeadContentAdapters,
+  emptyManualLeadContentResult,
   type ManualLeadContentResult,
   type ManualLeadContentStage,
-  type ManualLeadContentStageBudget,
 } from './manual-lead-content';
 import {
   assertManualNewsLeadCandidate,
   setManualLeadContentStage,
+  touchManualLeadContentDeadline,
 } from './manual-news-leads-store';
 
 export interface ManualLeadContentEntryInput {
@@ -37,12 +35,19 @@ export interface ManualLeadContentEntryInput {
   submit_idempotency_key: string;
 }
 
-export interface ManualLeadContentEntryOutcome {
+export interface ManualLeadContentPoolOutcome {
   pooled: boolean;
-  stage: ManualLeadContentStage;
+  stage: Extract<ManualLeadContentStage, 'done' | 'failed'>;
   detail: string;
-  content: ManualLeadContentResult;
 }
+
+/**
+ * 兜底入池之后，多久才允许再兜底一次。
+ *
+ * 兜底挂在列表 GET 上，owner 盯着卡片时页面一直在轮询；一条怎么都入不了池的线索
+ * （比如审核窗口已经过了）不该每次轮询都被重试一遍，所以每兜底一次就把期限往后推一段。
+ */
+export const MANUAL_LEAD_CONTENT_RECOVERY_RETRY_MS = 120_000;
 
 /**
  * 把加工产物写进候选对应的 items 行。
@@ -103,32 +108,22 @@ export async function writeManualLeadContentExtras(
 }
 
 /**
- * 跑完一条一步录入线索的后台加工并把它送进候选池。**永不抛异常。**
+ * 把一条一步录入线索送进候选池。
  *
  * `expected_batch_revision` 刻意不传：提交那一刻面板读到的批次版本，等加工跑完早就可能
  * 被别的确认推走了，拿它做乐观并发校验会让这条候选卡在
  * `candidate_batch_revision_conflict` 而进不了池 —— 那正是这里最不能出的事。缺省时
  * {@link assertManualNewsLeadCandidate} 会读当前活跃批次的版本，这才是入池该用的口径。
+ *
+ * **被拒与出故障分开处理**：入池被拒（审核窗口过了、已经确认过）是一个决定，写进卡片就
+ * 完了；写库真的出故障则往外抛，让 durable step 重试一次 —— 它是唯一一件必须做成的事。
  */
-export async function runManualLeadContentEntry(
+export async function poolManualLeadContentEntry(
   env: Env,
   lead: ManualLeadContentEntryInput,
-  adapters: ManualLeadContentAdapters,
-  opts: { now?: number; budgetMs?: number; stageBudgetMs?: ManualLeadContentStageBudget } = {},
-): Promise<ManualLeadContentEntryOutcome> {
-  const now = opts.now ?? Date.now();
-  const content = await runManualLeadContentPipeline(
-    { url: lead.input_url || null, text: lead.input_text || '', date: lead.review_date },
-    adapters,
-    {
-      onStage: (stage) => setManualLeadContentStage(env, lead.id, { stage }, Date.now()),
-    },
-    {
-      ...(opts.budgetMs === undefined ? {} : { budgetMs: opts.budgetMs }),
-      ...(opts.stageBudgetMs === undefined ? {} : { stageBudgetMs: opts.stageBudgetMs }),
-    },
-  );
-
+  content: ManualLeadContentResult,
+  now: number,
+): Promise<ManualLeadContentPoolOutcome> {
   let pooled = false;
   let detail = content.detail;
   try {
@@ -145,18 +140,51 @@ export async function runManualLeadContentEntry(
       console.warn(`[manual-lead-content] lead=${lead.id} pooling refused: ${result.error}`);
     }
   } catch (error) {
-    detail = '没能加入候选池，请重试一次';
     console.warn(`[manual-lead-content] lead=${lead.id} pooling failed:`,
       String((error as Error)?.message || error).slice(0, 200));
+    await setManualLeadContentStage(env, lead.id, {
+      stage: 'failed', detail: '没能加入候选池，正在重试',
+    }, Date.now());
+    throw error;
   }
 
   if (pooled) await writeManualLeadContentExtras(env, `blog:manual:${lead.id}`, content);
 
-  const stage: ManualLeadContentStage = pooled ? 'done' : 'failed';
+  const stage: ManualLeadContentPoolOutcome['stage'] = pooled ? 'done' : 'failed';
   await setManualLeadContentStage(env, lead.id, {
     stage,
     detail,
-    materialTier: content.materialTier,
+    // 取到素材才写档位。兜底那条路手上没有素材，不能拿它把 workflow 已经写下的档位抹成
+    // 「什么都没取到」；建行时这一列本来就是 'none'。
+    ...(content.materials.length ? { materialTier: content.materialTier } : {}),
   }, Date.now());
-  return { pooled, stage, detail, content };
+  return { pooled, stage, detail };
+}
+
+/**
+ * 把「加工没了下文」的线索直接送进候选池。**永不抛异常。**
+ *
+ * **不再从头重跑整轮**（规格第 10.1 节）：那一轮本来就是被运行时回收掉的，重跑只会再被
+ * 回收一次 —— 2026-09-05 生产上观测到的 `fetching_source → drafting → fetching_source`
+ * 反复就是这么来的。加工现在跑在 workflow 上，自己会续跑；这条兜底只负责最后那件必须做成
+ * 的事：用 owner 那句话把线索送进池子。
+ */
+export async function recoverManualLeadContentEntry(
+  env: Env,
+  lead: ManualLeadContentEntryInput,
+  now: number,
+): Promise<ManualLeadContentPoolOutcome> {
+  // 先把期限往后推：这一轮兜底还没跑完，下一次轮询不该又来一遍。
+  await touchManualLeadContentDeadline(
+    env, lead.id, now + MANUAL_LEAD_CONTENT_RECOVERY_RETRY_MS, now,
+  );
+  try {
+    return await poolManualLeadContentEntry(env, lead, emptyManualLeadContentResult(
+      '后台加工没跑完，已按你写的那句话加入候选池',
+    ), now);
+  } catch (error) {
+    console.warn(`[manual-lead-content] lead=${lead.id} recovery failed:`,
+      String((error as Error)?.message || error).slice(0, 200));
+    return { pooled: false, stage: 'failed', detail: '没能加入候选池，请重试一次' };
+  }
 }

@@ -16,9 +16,10 @@ import {
   type ManualEnrichmentMaterial,
 } from './manual-lead-enrichment';
 import { createManualLeadEnrichmentAdapters } from './manual-lead-enrichment-runtime';
-import type {
-  ManualLeadContentAdapters,
-  ManualLeadContentAnalysis,
+import {
+  MANUAL_LEAD_CONTENT_CJK_QUERY_MAX_CHARS,
+  type ManualLeadContentAdapters,
+  type ManualLeadContentAnalysis,
 } from './manual-lead-content';
 
 /** 喂给分析那一步的正文上限：读懂是什么新闻不需要整篇，再多只是烧 token。 */
@@ -42,21 +43,43 @@ function clampQuery(value: unknown): string {
 }
 
 /**
- * 读懂正文是什么新闻，并给出去搜同一件事其他报道用的检索词。
+ * 读懂这是什么新闻，并给出去搜同一件事其他报道用的检索词。
+ *
+ * 两种情况分开写提示词：
+ *
+ * - **有正文**：读原文，给出原文标题与检索词。
+ * - **只有一句线索**（没链接，或链接没抓到）：把那句话压成 3 到 6 个关键词。owner 那句
+ *   整话直接拿去搜会 502 —— 2026-09-05 同一个 ScrapeBadger 接口实测，`英伟达 收购
+ *   Hugging Face` 回 200 / 5 条，`英伟达确认以 129 亿美元收购 Hugging Face` 回 502 / 41s
+ *   （规格第 10.3 节）。这一路不要标题：没有原文就没有「原文标题」，编一个出来等于把
+ *   owner 的线索改写一遍再当成事实。
  *
  * 这条提示词只服务「拟检索词」这一步，与写标题摘要那一套（`enrichSystem` /
  * `enrichUser`）完全无关，动它不影响常规新闻。
  */
 export function manualLeadContentAnalysisPrompt(input: {
   clue: string;
-  material: ManualEnrichmentMaterial;
+  material: ManualEnrichmentMaterial | null;
 }): { system: string; user: string } {
+  const queryRule = 'query 是最能召回这条新闻的关键词组合，含公司名、产品名与动作，'
+    + '不要写成完整句子、不要加引号、不要加 site: 之类的搜索语法，'
+    + `含中文时不超过 ${MANUAL_LEAD_CONTENT_CJK_QUERY_MAX_CHARS} 个字符，纯英文时不超过 60 个字符。`;
+  if (!input.material) {
+    return {
+      system: '你是中文新闻编辑。读一句人写的新闻线索，把它压成一组用来搜这条新闻的关键词。'
+        + '只保留公司名、产品名、人名与关键动作，3 到 6 个词，词之间用空格分开；'
+        + '去掉具体金额、日期这类会把搜索限死的细节。'
+        + queryRule
+        + 'headline 一律给空串 —— 这一路没有原文，不要自己编标题。'
+        + '只输出 JSON：{"headline": "", "query": "……"}。压不出来时输出 {"headline": "", "query": ""}。',
+      user: JSON.stringify({ clue: compact(input.clue, 400) }),
+    };
+  }
   return {
     system: '你是中文新闻编辑。读一段原文，再读一句人写的线索描述，判断这条新闻讲的是什么，'
       + '然后给出两样东西：这条新闻在原文里的标题，以及去搜同一件事其他报道用的检索词。'
       + 'headline 用原文自己的说法，不翻译、不改写、不加书名号；原文里找不到明确标题时给空串。'
-      + 'query 是最能召回这条新闻的关键词组合，含公司名、产品名与动作，'
-      + '不要加引号、不要加 site: 之类的搜索语法、不超过 60 个字。'
+      + queryRule
       + '只输出 JSON：{"headline": "……", "query": "……"}。判断不出来时输出 {"headline": "", "query": ""}。',
     user: JSON.stringify({
       clue: compact(input.clue, 400),
@@ -98,7 +121,10 @@ export function createManualLeadContentAdapters(
     async search(query, date) {
       const text = clampQuery(query);
       if (!text) return null;
-      // date 必须带上：网关拿它算 after: / before: 检索区间，缺了就抛 Invalid time value。
+      // date 仍然带上，但它已经不再开时间窗口：取材要找的是同一件事的背景报道，加了窗口
+      // 就什么都搜不到，网关那边 2026-09-05 已经把取材这一路的日期限定关掉（面板仓
+      // `createResearchSearchAdapter` 的 `dateWindow: false`，规格第 10.2 节）。留着它是
+      // 为了网关日志里能看出这条检索属于哪一天的审核批次。
       return gateway.fetchPlainText({ query: text, ...(date ? { date } : {}) });
     },
 

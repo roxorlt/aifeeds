@@ -26,9 +26,7 @@ vi.mock('./manual-lead-enrichment', async (importOriginal) => ({
   runManualLeadEnrichment: vi.fn(async () => 'written' as const),
 }));
 vi.mock('./manual-lead-content-entry', () => ({
-  runManualLeadContentEntry: vi.fn(async () => ({
-    pooled: true, stage: 'done', detail: '', content: null,
-  })),
+  recoverManualLeadContentEntry: vi.fn(async () => ({ pooled: true, stage: 'done', detail: '' })),
 }));
 
 import { handleManualNewsLeadsApi } from './manual-news-leads-api';
@@ -50,7 +48,7 @@ import {
 } from './manual-news-leads-store';
 import { processManualNewsLeadWithEnv } from './manual-news-leads-runtime';
 import { runManualLeadEnrichment } from './manual-lead-enrichment';
-import { runManualLeadContentEntry } from './manual-lead-content-entry';
+import { recoverManualLeadContentEntry } from './manual-lead-content-entry';
 
 const record = {
   id: 'ml-20260811-abc123def456', review_date: '2026-08-11', input_type: 'text',
@@ -902,12 +900,12 @@ describe('manual daily news leads API · owner asserted direct entry', () => {
     vi.mocked(beginOwnerAssertedEntry).mockResolvedValue({
       ok: true, created: true, lead: entryLead,
     } as never);
-    vi.mocked(runManualLeadContentEntry).mockResolvedValue({
-      pooled: true, stage: 'done', detail: '', content: null,
+    vi.mocked(recoverManualLeadContentEntry).mockResolvedValue({
+      pooled: true, stage: 'done', detail: '',
     } as never);
   });
 
-  test('提交只建线索行并立刻返回 202，加工挂在 waitUntil 上', async () => {
+  test('提交只建线索行并立刻返回 202，整轮加工派给 workflow', async () => {
     const { queued, ctx } = collectingCtx();
     const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
       method: 'POST',
@@ -925,24 +923,27 @@ describe('manual daily news leads API · owner asserted direct entry', () => {
       date: '2026-08-11', text: 'OpenAI发布Astra', url: 'https://openai.com/astra/', note: '早报',
       statement: 'OpenAI发布Astra',
     }, 'asserted-1', expect.any(Number));
-    // 入池那一步这时候还没发生 —— API 这一层根本不再引用它，它在后台那一半里。
+    // 入池那一步这时候还没发生 —— API 这一层根本不再引用它，它在 workflow 的最后一步。
     expect(assertManualNewsLeadCandidate).not.toHaveBeenCalled();
     expect(submitManualNewsLead).not.toHaveBeenCalled();
-    expect(workflowCreate).not.toHaveBeenCalled();
     expect(queued).toHaveLength(1);
     await expect(queued[0]).resolves.toBeUndefined();
-    expect(runManualLeadContentEntry).toHaveBeenCalledWith(expect.anything(), {
-      id: entryLead.id,
-      review_date: '2026-08-11',
-      input_url: 'https://openai.com/astra/',
-      input_text: 'OpenAI发布Astra',
-      note: '早报',
-      // 后台那一半靠这个键找回同一行续做，两侧必须是同一个值。
-      submit_idempotency_key: 'asserted-1',
-    }, expect.objectContaining({
-      fetchSource: expect.any(Function), analyze: expect.any(Function),
-      search: expect.any(Function), generate: expect.any(Function),
-    }), { now: expect.any(Number) });
+    // 派发是一次亚秒级 RPC，可以挂 waitUntil；加工本身一两分钟，挂上去必被回收。
+    expect(workflowCreate).toHaveBeenCalledWith({
+      // 实例 id 与取证那条路（manual-news-…）分开，两条路共用一个绑定也不撞车。
+      id: 'content-ml-20260811-abc123def456',
+      params: {
+        kind: 'manual_lead_content_entry',
+        id: entryLead.id,
+        review_date: '2026-08-11',
+        input_url: 'https://openai.com/astra/',
+        input_text: 'OpenAI发布Astra',
+        note: '早报',
+        // 后台那一半靠这个键找回同一行续做，两侧必须是同一个值。
+        submit_idempotency_key: 'asserted-1',
+        submitted_at: expect.any(Number),
+      },
+    });
   });
 
   test('卡片要读的加工进度出现在详情里', async () => {
@@ -988,7 +989,7 @@ describe('manual daily news leads API · owner asserted direct entry', () => {
 
     expect(response.status).toBe(200);
     expect(queued).toHaveLength(0);
-    expect(runManualLeadContentEntry).not.toHaveBeenCalled();
+    expect(workflowCreate).not.toHaveBeenCalled();
   });
 
   test('建行本身被拒时按 store 给的状态码回，也不派发加工', async () => {
@@ -1003,11 +1004,11 @@ describe('manual daily news leads API · owner asserted direct entry', () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ ok: false, status: 400, error: 'invalid_vouch_statement' });
-    expect(runManualLeadContentEntry).not.toHaveBeenCalled();
+    expect(workflowCreate).not.toHaveBeenCalled();
   });
 
-  test('加工那一半抛异常伤不到已经返回的 202', async () => {
-    vi.mocked(runManualLeadContentEntry).mockRejectedValueOnce(new Error('boom') as never);
+  test('派发 workflow 失败伤不到已经返回的 202', async () => {
+    workflowCreate.mockRejectedValueOnce(new Error('boom') as never);
     const { queued, ctx } = collectingCtx();
     const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
       method: 'POST',
@@ -1021,8 +1022,8 @@ describe('manual daily news leads API · owner asserted direct entry', () => {
   });
 
   test('派发那一刻同步抛异常时同样只影响加工，不影响 202', async () => {
-    vi.mocked(runManualLeadContentEntry).mockImplementationOnce(() => {
-      throw new Error('adapters blew up synchronously');
+    workflowCreate.mockImplementationOnce(() => {
+      throw new Error('workflow binding blew up synchronously');
     });
     const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
       method: 'POST',
@@ -1067,6 +1068,7 @@ describe('manual daily news leads API · owner asserted direct entry', () => {
     expect(beginOwnerAssertedEntry).not.toHaveBeenCalled();
   });
 
+  // workflow 绑定缺失时提交仍然要成功：线索先落进库，随后由过期兜底补入池。
   test('取证链路整个挂掉时照样能提交 —— 这条通道存在的理由就是这个', async () => {
     const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
       method: 'POST',
@@ -1093,9 +1095,9 @@ describe('manual daily news leads API · owner asserted direct entry', () => {
     expect(beginOwnerAssertedEntry).not.toHaveBeenCalled();
   });
 
-  // 加工挂在 waitUntil 上，isolate 被回收就再没人去入池。面板轮询列表时把过期还没入池的
-  // 捡回来补跑 —— 入池永不失败这条硬约束靠它兜住最后那一种情况。
-  test('列表 GET 顺手把加工没跑完的线索捡回来补入池', async () => {
+  // 整条 workflow 都没了时才轮到这条兜底。它**直接补入池**，不再从头重跑整轮 ——
+  // 重跑只会跟仍在跑的 workflow 抢，还可能把卡片的阶段来回拨（规格第 10.1 节）。
+  test('列表 GET 顺手把加工没了下文的线索直接补入池，不重跑加工', async () => {
     vi.mocked(listStaleManualLeadContentEntries).mockResolvedValueOnce([{
       id: 'ml-20260811-stale0000000', input_url: '', input_text: '一句线索', note: '',
       submit_idempotency_key: 'stale-key', review_date: '2026-08-11',
@@ -1110,14 +1112,15 @@ describe('manual daily news leads API · owner asserted direct entry', () => {
     );
 
     expect(response.status).toBe(200);
-    expect(runManualLeadContentEntry).toHaveBeenCalledWith(
+    expect(recoverManualLeadContentEntry).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
         id: 'ml-20260811-stale0000000', submit_idempotency_key: 'stale-key',
       }),
-      expect.anything(),
-      { now: expect.any(Number) },
+      expect.any(Number),
     );
+    // 兜底不再派 workflow，也不再重跑加工。
+    expect(workflowCreate).not.toHaveBeenCalled();
     await expect(Promise.all(queued)).resolves.toBeDefined();
   });
 });

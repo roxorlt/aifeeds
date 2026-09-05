@@ -7,6 +7,7 @@ import {
   parseManualLeadContentAnalysis,
 } from './manual-lead-content-runtime';
 import { MANUAL_LEAD_ENRICHMENT_QUERY_MAX_LENGTH } from './manual-lead-enrichment';
+import { MANUAL_LEAD_CONTENT_CJK_QUERY_MAX_CHARS } from './manual-lead-content';
 
 const ENV = {
   MANUAL_NEWS_RESEARCH_ORIGIN: 'https://gateway.example/',
@@ -59,6 +60,20 @@ describe('分析提示词', () => {
     expect(user.publisher).toBe('openai.com');
     expect(user.body.length).toBeLessThanOrEqual(8_000);
     expect(prompt.system).toContain('检索词');
+  });
+
+  // 规格第 10.3 节：没有链接时这一步的活儿是「把那句话压成几个关键词」，不是读正文。
+  test('没有正文时只把那句话交给模型，并要求压成 3 到 6 个关键词', () => {
+    const prompt = manualLeadContentAnalysisPrompt({
+      clue: '英伟达确认以 129 亿美元收购 Hugging Face', material: null,
+    });
+    const user = JSON.parse(prompt.user) as Record<string, string>;
+    expect(user).toEqual({ clue: '英伟达确认以 129 亿美元收购 Hugging Face' });
+    expect(prompt.system).toContain('关键词');
+    // 中文检索式的长度上限要写进提示词 —— 长中文检索式在 ScrapeBadger 上必 502。
+    expect(prompt.system).toContain(String(MANUAL_LEAD_CONTENT_CJK_QUERY_MAX_CHARS));
+    // 没有正文就没有「原文标题」这回事，别让模型顺着那句话编一个。
+    expect(prompt.system).toContain('headline');
   });
 });
 
@@ -127,5 +142,6 @@ describe('createManualLeadContentAdapters', () => {
       { fetcher: vi.fn(async () => jsonResponse(MATERIAL)) },
     );
     await expect(adapters.analyze({ clue: '线索', material: MATERIAL })).resolves.toBeNull();
+    await expect(adapters.analyze({ clue: '线索', material: null })).resolves.toBeNull();
   });
 });
