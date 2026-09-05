@@ -3,6 +3,7 @@ import { describe, expect, test, vi } from 'vitest';
 import {
   MANUAL_LEAD_CONTENT_EXCERPT_MAX_CHARS,
   classifyManualLeadMaterial,
+  createDirectStepRunner,
   manualLeadContentExcerpt,
   manualLeadMaterialPrefix,
   orderManualLeadMaterials,
@@ -145,16 +146,25 @@ function adapters(over: Partial<ManualLeadContentAdapters> = {}): ManualLeadCont
   };
 }
 
+/**
+ * 测试用的「按顺序直接跑」runner：把报出来的阶段记下来，别的什么都不做。
+ *
+ * 生产上这个位置是 workflow 的 durable step（{@link runManualLeadContentEntryWorkflow}），
+ * 流水线本身对两者一视同仁 —— 它只负责按什么顺序调哪一步。
+ */
 function stageRecorder() {
   const stages: ManualLeadContentStage[] = [];
-  return { stages, onStage: async (stage: ManualLeadContentStage) => { stages.push(stage); } };
+  const runStep = createDirectStepRunner({
+    onStage: async (stage: ManualLeadContentStage) => { stages.push(stage); },
+  });
+  return { stages, runStep };
 }
 
 describe('runManualLeadContentPipeline', () => {
   test('有链接：抓正文 → 读懂并拟检索词 → 搜索 → 生成，阶段依次报出去', async () => {
     const deps = adapters();
     const recorder = stageRecorder();
-    const result = await runManualLeadContentPipeline(CLUE, deps, recorder);
+    const result = await runManualLeadContentPipeline(CLUE, deps, recorder.runStep);
 
     expect(recorder.stages).toEqual(['fetching_source', 'analyzing', 'searching', 'drafting']);
     expect(deps.fetchSource).toHaveBeenCalledWith(CLUE.url, CLUE.date);
@@ -174,7 +184,7 @@ describe('runManualLeadContentPipeline', () => {
 
   test('生成用的标题取抓回正文里的原标题，摘要素材含两份来源', async () => {
     const deps = adapters();
-    await runManualLeadContentPipeline(CLUE, deps, stageRecorder());
+    await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
     expect(deps.generate).toHaveBeenCalledWith(expect.objectContaining({
       title: 'OpenAI 发布 Astra',
       sourceCompany: 'openai.com',
@@ -190,7 +200,7 @@ describe('runManualLeadContentPipeline', () => {
     const deps = adapters();
     const recorder = stageRecorder();
     const result = await runManualLeadContentPipeline(
-      { url: null, text: CLUE.text, date: CLUE.date }, deps, recorder,
+      { url: null, text: CLUE.text, date: CLUE.date }, deps, recorder.runStep,
     );
 
     expect(recorder.stages).toEqual(['searching', 'drafting']);
@@ -206,7 +216,7 @@ describe('runManualLeadContentPipeline', () => {
     const deps = adapters({
       fetchSource: vi.fn(async () => { throw new Error('gateway down'); }),
     });
-    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder());
+    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
     // 抓取那一路挂了，搜索仍然按 owner 那句话跑，生成照常。
     expect(deps.search).toHaveBeenCalledWith(CLUE.text, CLUE.date);
     expect(result.drafted).not.toBeNull();
@@ -215,14 +225,14 @@ describe('runManualLeadContentPipeline', () => {
 
   test('分析抛异常时退回用 owner 那句话检索，不让这一步拖垮整轮', async () => {
     const deps = adapters({ analyze: vi.fn(async () => { throw new Error('llm down'); }) });
-    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder());
+    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
     expect(deps.search).toHaveBeenCalledWith(CLUE.text, CLUE.date);
     expect(result.drafted).not.toBeNull();
   });
 
   test('生成抛异常时不起草，素材与分档照样带出去', async () => {
     const deps = adapters({ generate: vi.fn(async () => { throw new Error('llm down'); }) });
-    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder());
+    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
     expect(result.drafted).toBeNull();
     expect(result.materialTier).toBe('report');
     expect(result.detail).toContain('生成');
@@ -234,7 +244,7 @@ describe('runManualLeadContentPipeline', () => {
       search: vi.fn(async () => null),
       generate: vi.fn(async () => { throw new Error('不该被调用'); }),
     });
-    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder());
+    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
     expect(result.materialTier).toBe('none');
     expect(result.drafted).toBeNull();
     expect(deps.generate).not.toHaveBeenCalled();
@@ -249,7 +259,7 @@ describe('runManualLeadContentPipeline', () => {
       })),
       search: vi.fn(async () => null),
     });
-    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder());
+    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
     expect(result.materialTier).toBe('tweet');
     expect(result.drafted?.url).toBe('https://x.com/blogger/status/7');
     expect(result.materialExcerpt).toContain('以下内容为 X 博主 @blogger 的发文，非媒体报道：');
@@ -262,7 +272,7 @@ describe('runManualLeadContentPipeline', () => {
         publisher: 'X @blogger', kind: 'tweet',
       })),
     });
-    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder());
+    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
     expect(result.materialTier).toBe('report');
     expect(result.drafted?.source).toBe('reuters.com');
     expect(result.materialExcerpt.indexOf('路透社'))
@@ -274,7 +284,7 @@ describe('runManualLeadContentPipeline', () => {
     const deps = adapters({ fetchSource: vi.fn(never) });
     const started = Date.now();
     const result = await runManualLeadContentPipeline(
-      CLUE, deps, stageRecorder(), { budgetMs: 30 },
+      CLUE, deps, stageRecorder().runStep, { budgetMs: 30 },
     );
     expect(Date.now() - started).toBeLessThan(3_000);
     expect(result.drafted).toBeNull();
@@ -287,16 +297,16 @@ describe('runManualLeadContentPipeline', () => {
     const never = () => new Promise<never>(() => {});
     const deps = adapters({ fetchSource: vi.fn(never) });
     const result = await runManualLeadContentPipeline(
-      CLUE, deps, stageRecorder(), { stageBudgetMs: { fetching_source: 20 } },
+      CLUE, deps, stageRecorder().runStep, { stageBudgetMs: { fetching_source: 20 } },
     );
     expect(deps.search).toHaveBeenCalled();
     expect(result.drafted).not.toBeNull();
   });
 
   test('阶段回调自己抛异常也伤不到整轮', async () => {
-    const result = await runManualLeadContentPipeline(CLUE, adapters(), {
+    const result = await runManualLeadContentPipeline(CLUE, adapters(), createDirectStepRunner({
       onStage: async () => { throw new Error('D1 写不进去'); },
-    });
+    }));
     expect(result.drafted).not.toBeNull();
   });
 
@@ -312,7 +322,7 @@ describe('runManualLeadContentPipeline', () => {
         grounding: { suspect: false, reason: '', bodySubjects: [], outputSubjects: [] },
       })),
     });
-    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder());
+    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
     expect(result.drafted).toBeNull();
     expect(result.detail).toContain('起草');
   });

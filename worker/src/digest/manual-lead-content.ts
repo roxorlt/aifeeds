@@ -206,6 +206,54 @@ export interface ManualLeadContentHooks {
   onStage(stage: ManualLeadContentStage): Promise<void> | void;
 }
 
+/** 流水线里的一步：报哪个阶段、叫什么名字、给它多少时间。 */
+export interface ManualLeadContentStepDescriptor {
+  stage: ManualLeadContentStage;
+  name: 'fetch-source' | 'analyze' | 'search' | 'generate';
+  budgetMs: number;
+}
+
+/**
+ * 谁来真正执行一步。
+ *
+ * 流水线只决定**按什么顺序调哪一步**，一步怎么跑交给调用方注入：
+ *
+ * - 生产上注入的是 workflow 的 durable step（`manual-lead-content-workflow.ts`）。整轮
+ *   加工要一两分钟，Workers 的 isolate 不保证活那么久 —— 2026-09-05 首轮验收就是被回收
+ *   掉的（规格第 10.1 节）。durable step 的产物落在 workflow 自己的存储里，被回收之后
+ *   从上一个完成的 step 续跑，不从头重来。
+ * - 测试注入 {@link createDirectStepRunner}，按顺序直接跑，不做任何持久化。
+ *
+ * 两种 runner 的共同契约：**永不抛异常**，一步失败就返回 `null`。
+ */
+export type ManualLeadContentStepRunner = <T>(
+  descriptor: ManualLeadContentStepDescriptor,
+  work: () => Promise<T | null>,
+) => Promise<T | null>;
+
+/** 报一次阶段。写不进去只记日志：进度是给卡片看的，写不了不该让加工作废。 */
+export async function reportManualLeadContentStage(
+  hooks: ManualLeadContentHooks,
+  stage: ManualLeadContentStage,
+): Promise<void> {
+  try {
+    await hooks.onStage(stage);
+  } catch (error) {
+    console.warn('[manual-lead-content] stage callback failed:',
+      String((error as Error)?.message || error).slice(0, 200));
+  }
+}
+
+/** 按顺序直接跑一步：报阶段、套上这一步的时限，异常与超时都收敛成 `null`。 */
+export function createDirectStepRunner(
+  hooks: ManualLeadContentHooks,
+): ManualLeadContentStepRunner {
+  return async (descriptor, work) => {
+    await reportManualLeadContentStage(hooks, descriptor.stage);
+    return runManualLeadContentStep(descriptor.name, work, descriptor.budgetMs);
+  };
+}
+
 export interface ManualLeadContentResult {
   /** 起草结果，已按签名快照的口径验过；验不过或没生成时是 `null`。 */
   drafted: ManualNewsOwnerAssertedDraft | null;
@@ -233,8 +281,8 @@ function withBudget<T>(work: Promise<T>, budgetMs: number): Promise<T | null> {
   });
 }
 
-/** 一步的统一收口：异常与超时都收敛成 `null`，绝不往外抛。 */
-async function step<T>(
+/** 一步的统一收口：异常与超时都收敛成 `null`，绝不往外抛。两种 runner 共用。 */
+export async function runManualLeadContentStep<T>(
   label: string,
   work: () => Promise<T | null>,
   budgetMs: number,
@@ -256,13 +304,16 @@ async function step<T>(
 /**
  * 跑完一条线索的内容生成。**永不抛异常，永远返回一份结果。**
  *
- * 总预算到点时立刻返回当时手上的东西（规格第 4 节：超总预算立即走兜底入池，不得挂住）。
+ * 一步怎么跑由 `runStep` 决定（见 {@link ManualLeadContentStepRunner}）：生产上是
+ * workflow 的 durable step，测试里是按顺序直接跑。这个函数本身只管顺序与素材合并，
+ * 而且**两次跑同样的输入要得到同样的结果** —— workflow 被回收后会从头重放这段代码，
+ * 已完成的 step 直接返回上次的产物，步与步之间的计算必须是纯的。
  */
 export async function runManualLeadContentPipeline(
   clue: { url: string | null; text: string; date: string },
   adapters: ManualLeadContentAdapters,
-  hooks: ManualLeadContentHooks,
-  opts: { budgetMs?: number; stageBudgetMs?: ManualLeadContentStageBudget } = {},
+  runStep: ManualLeadContentStepRunner,
+  opts: { budgetMs?: number | null; stageBudgetMs?: ManualLeadContentStageBudget } = {},
 ): Promise<ManualLeadContentResult> {
   const budgets = { ...MANUAL_LEAD_CONTENT_STAGE_BUDGET_MS, ...(opts.stageBudgetMs || {}) };
   const collected: ManualLeadContentMaterial[] = [];
@@ -277,15 +328,10 @@ export async function runManualLeadContentPipeline(
   // 写给卡片看的一句说明，两件事共用一个变量迟早串味。
   let headline = '';
 
-  const enter = async (stage: ManualLeadContentStage): Promise<void> => {
-    state.stage = stage;
-    try {
-      await hooks.onStage(stage);
-    } catch (error) {
-      // 阶段回写只是给卡片看的进度，写不进去不该让这一轮加工作废。
-      console.warn('[manual-lead-content] stage callback failed:',
-        String((error as Error)?.message || error).slice(0, 200));
-    }
+  // 停在哪一步要说得出来（规格第 4 节），所以派活之前先记下当前是哪一阶段。
+  const run: ManualLeadContentStepRunner = (descriptor, work) => {
+    state.stage = descriptor.stage;
+    return runStep(descriptor, work);
   };
 
   const work = (async (): Promise<void> => {
@@ -294,14 +340,16 @@ export async function runManualLeadContentPipeline(
     let query = clueText;
 
     if (url) {
-      await enter('fetching_source');
-      const source = await step('fetch-source',
-        () => adapters.fetchSource(url, clue.date), budgets.fetching_source);
+      const source = await run(
+        { stage: 'fetching_source', name: 'fetch-source', budgetMs: budgets.fetching_source },
+        () => adapters.fetchSource(url, clue.date),
+      );
       if (source && String(source.text || '').trim()) {
         collected.push(classifyManualLeadMaterial(source));
-        await enter('analyzing');
-        const analysis = await step('analyze',
-          () => adapters.analyze({ clue: clueText, material: source }), budgets.analyzing);
+        const analysis = await run(
+          { stage: 'analyzing', name: 'analyze', budgetMs: budgets.analyzing },
+          () => adapters.analyze({ clue: clueText, material: source }),
+        );
         // 分析这一步只影响「拿什么去搜」。它挂了就退回 owner 那句话，整轮照跑。
         if (analysis?.query?.trim()) query = analysis.query.trim();
         if (analysis?.headline?.trim()) headline = analysis.headline.trim();
@@ -309,9 +357,10 @@ export async function runManualLeadContentPipeline(
     }
 
     if (query) {
-      await enter('searching');
-      const found = await step('search',
-        () => adapters.search(query, clue.date), budgets.searching);
+      const found = await run(
+        { stage: 'searching', name: 'search', budgetMs: budgets.searching },
+        () => adapters.search(query, clue.date),
+      );
       if (found && String(found.text || '').trim()) collected.push(classifyManualLeadMaterial(found));
     }
 
@@ -325,15 +374,17 @@ export async function runManualLeadContentPipeline(
       return;
     }
 
-    await enter('drafting');
     // 抓到文章时用文章自身的标题；只有搜索素材时退回 owner 那句话（规格第 3 节传参约定）。
-    const enrichment = await step('generate', () => adapters.generate({
-      title: headline || clueText,
-      excerpt: materialExcerpt,
-      sourceCompany: primary.publisher,
-      lang: 'zh',
-      kind: 'blog',
-    }), budgets.drafting);
+    const enrichment = await run(
+      { stage: 'drafting', name: 'generate', budgetMs: budgets.drafting },
+      () => adapters.generate({
+        title: headline || clueText,
+        excerpt: materialExcerpt,
+        sourceCompany: primary.publisher,
+        lang: 'zh',
+        kind: 'blog',
+      }),
+    );
     if (!enrichment) {
       state.detail = '素材已取到，但这一轮生成没写出标题与摘要，先按你写的那句话入池';
       return;
@@ -352,14 +403,16 @@ export async function runManualLeadContentPipeline(
       : '这一轮起草出来的标题或摘要不合规，先按你写的那句话入池';
   })();
 
-  const finished = await withBudget(
-    work.then(() => true).catch((error) => {
-      console.warn('[manual-lead-content] pipeline failed:',
-        String((error as Error)?.message || error).slice(0, 200));
-      return true;
-    }),
-    opts.budgetMs ?? MANUAL_LEAD_CONTENT_BUDGET_MS,
-  );
+  const guarded = work.then(() => true).catch((error) => {
+    console.warn('[manual-lead-content] pipeline failed:',
+      String((error as Error)?.message || error).slice(0, 200));
+    return true;
+  });
+  // 总预算只对「按顺序直接跑」那种 runner 有意义。workflow 那条路传 `null` 关掉它：每个
+  // durable step 各自有超时，而这段代码会在回收后重放，用一个墙上时钟去 race 只会把
+  // 一轮已经跑完的加工判成超时。
+  const totalBudgetMs = opts.budgetMs === undefined ? MANUAL_LEAD_CONTENT_BUDGET_MS : opts.budgetMs;
+  const finished = totalBudgetMs === null ? await guarded : await withBudget(guarded, totalBudgetMs);
 
   const ordered = orderManualLeadMaterials(collected);
   return {

@@ -17,6 +17,7 @@ import {
   type ManualEvidenceMaterialSource,
 } from './manual-lead-enrichment';
 import {
+  createDirectStepRunner,
   runManualLeadContentPipeline,
   type ManualLeadContentAdapters,
   type ManualLeadContentResult,
@@ -120,9 +121,9 @@ export async function runManualLeadContentEntry(
   const content = await runManualLeadContentPipeline(
     { url: lead.input_url || null, text: lead.input_text || '', date: lead.review_date },
     adapters,
-    {
+    createDirectStepRunner({
       onStage: (stage) => setManualLeadContentStage(env, lead.id, { stage }, Date.now()),
-    },
+    }),
     {
       ...(opts.budgetMs === undefined ? {} : { budgetMs: opts.budgetMs }),
       ...(opts.stageBudgetMs === undefined ? {} : { stageBudgetMs: opts.stageBudgetMs }),
