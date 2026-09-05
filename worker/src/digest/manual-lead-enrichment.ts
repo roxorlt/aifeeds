@@ -145,9 +145,18 @@ export async function collectManualLeadEnrichment(
 
   const work = (async (): Promise<ManualLeadEnrichmentResult | null> => {
     const material = await adapters.fetchPlainText(request);
-    if (!material || !String(material.text || '').trim()) return null;
+    // 「这次没补上」有好几种成因，成因不同要找的人也不同：取不到正文是网关/网络的事，
+    // 压不出背景是模型的事。都静默返回 null 的话，prod 上只能看到素材是空的，看不出该查谁。
+    if (!material || !String(material.text || '').trim()) {
+      console.warn('[manual-lead-enrichment] no material fetched'
+        + ` url=${request.url ? 'yes' : 'no'} query=${request.query ? 'yes' : 'no'}`);
+      return null;
+    }
     const compressed = clampEnrichmentText(await adapters.compress(material));
-    if (!compressed) return null;
+    if (!compressed) {
+      console.warn(`[manual-lead-enrichment] compress produced nothing, source_chars=${material.text.length}`);
+      return null;
+    }
     // 只有真的合并了不止一份素材才记 sources：一份素材时留着这个键，只会让「来源」看起来
     // 比实际丰富，也让老行与新行的形状白白分叉。
     const materialSources = Array.isArray(material.sources) ? material.sources : [];
@@ -192,7 +201,10 @@ export async function runManualLeadEnrichment(
     const row = await env.DB.prepare(
       `/* manual_lead:enrichment_existing */ SELECT extra FROM items WHERE id = ?`,
     ).bind(input.itemId).first<{ extra: string | null }>();
-    if (!row) return 'skipped';
+    if (!row) {
+      console.warn(`[manual-lead-enrichment] lead=${input.leadId} item row not found yet, skipped`);
+      return 'skipped';
+    }
     if (existingEnrichmentText(row.extra)) return 'skipped';
 
     const collected = await collectManualLeadEnrichment(input, adapters, opts);

@@ -135,7 +135,10 @@ export function createManualLeadEnrichmentAdapters(
     },
 
     async compress(material) {
-      if (!env.DEEPSEEK_API_KEY) return null;
+      if (!env.DEEPSEEK_API_KEY) {
+        console.warn('[manual-lead-enrichment] no deepseek key, cannot compress');
+        return null;
+      }
       const prompt = manualLeadEnrichmentBackgroundPrompt(material);
       // 压缩改写是简单转写任务,按 CLAUDE.md 的模型选型用 flash:要的是时效,不是推理深度。
       const result = await callDeepSeekJson<{ background?: unknown }>(
