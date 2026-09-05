@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 vi.mock('./manual-news-leads-store', () => ({
   setManualLeadContentStage: vi.fn(async () => undefined),
+  touchManualLeadContentDeadline: vi.fn(async () => undefined),
 }));
 vi.mock('./manual-lead-content-entry', () => ({
   poolManualLeadContentEntry: vi.fn(async () => ({ pooled: true, stage: 'done', detail: '' })),
@@ -15,9 +16,10 @@ vi.mock('./manual-lead-content-runtime', () => ({
   })),
 }));
 
-import { setManualLeadContentStage } from './manual-news-leads-store';
+import { setManualLeadContentStage, touchManualLeadContentDeadline } from './manual-news-leads-store';
 import { poolManualLeadContentEntry } from './manual-lead-content-entry';
 import {
+  MANUAL_LEAD_CONTENT_POOL_BUDGET_MS,
   MANUAL_LEAD_CONTENT_WORKFLOW_KIND,
   isManualLeadContentWorkflowParams,
   manualLeadContentWorkflowId,
@@ -216,6 +218,17 @@ describe('一步录入的内容加工 workflow', () => {
       expect.anything(), expect.anything(),
       expect.objectContaining({ drafted: null }), PARAMS.submitted_at,
     );
+  });
+
+  test('入池那一步也续一次期限：它自己重试的那两分钟里，兜底不该插进来抢', async () => {
+    const { step } = recordingStep();
+    await runManualLeadContentEntryWorkflow({} as never, PARAMS, step, { adapters: adapters() });
+
+    expect(touchManualLeadContentDeadline).toHaveBeenCalledWith(
+      expect.anything(), PARAMS.id, expect.any(Number), expect.any(Number),
+    );
+    const [, , deadlineAt] = vi.mocked(touchManualLeadContentDeadline).mock.calls[0];
+    expect(Number(deadlineAt)).toBeGreaterThan(Date.now() + MANUAL_LEAD_CONTENT_POOL_BUDGET_MS);
   });
 
   test('入池那一步自己抛异常时往外抛，让 workflow 重试而不是当作已完成', async () => {

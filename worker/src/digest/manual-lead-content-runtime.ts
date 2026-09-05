@@ -121,7 +121,10 @@ export function createManualLeadContentAdapters(
     async search(query, date) {
       const text = clampQuery(query);
       if (!text) return null;
-      // date 必须带上：网关拿它算 after: / before: 检索区间，缺了就抛 Invalid time value。
+      // date 仍然带上，但它已经不再开时间窗口：取材要找的是同一件事的背景报道，加了窗口
+      // 就什么都搜不到，网关那边 2026-09-05 已经把取材这一路的日期限定关掉（面板仓
+      // `createResearchSearchAdapter` 的 `dateWindow: false`，规格第 10.2 节）。留着它是
+      // 为了网关日志里能看出这条检索属于哪一天的审核批次。
       return gateway.fetchPlainText({ query: text, ...(date ? { date } : {}) });
     },
 

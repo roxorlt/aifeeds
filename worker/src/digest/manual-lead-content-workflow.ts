@@ -38,7 +38,10 @@ import {
   type ManualLeadContentEntryInput,
   type ManualLeadContentPoolOutcome,
 } from './manual-lead-content-entry';
-import { setManualLeadContentStage } from './manual-news-leads-store';
+import {
+  setManualLeadContentStage,
+  touchManualLeadContentDeadline,
+} from './manual-news-leads-store';
 
 /** payload 上的分流标记：取证那条路的 payload 没有这个键。 */
 export const MANUAL_LEAD_CONTENT_WORKFLOW_KIND = 'manual_lead_content_entry';
@@ -204,6 +207,13 @@ export async function runManualLeadContentEntryWorkflow(
   return step.do<ManualLeadContentPoolOutcome>(
     'manual-lead-content:pool',
     poolStepConfig(),
-    () => poolManualLeadContentEntry(env, lead, content, params.submitted_at),
+    async () => {
+      // 这一步自己会重试，重试期间也得让兜底知道「还有人在管这条线索」：不然兜底会抢先
+      // 用 owner 那句话入池，把这一轮已经写出来的标题与摘要白白丢掉。
+      const now = Date.now();
+      await touchManualLeadContentDeadline(env, lead.id, now
+        + MANUAL_LEAD_CONTENT_POOL_BUDGET_MS + MANUAL_LEAD_CONTENT_STEP_LEASE_GRACE_MS, now);
+      return poolManualLeadContentEntry(env, lead, content, params.submitted_at);
+    },
   );
 }
