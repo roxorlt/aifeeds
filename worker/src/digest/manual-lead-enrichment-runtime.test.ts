@@ -146,6 +146,14 @@ describe('createManualLeadEnrichmentAdapters.fetchPlainText', () => {
     ]);
   });
 
+  // 2026-09-05 实测：ScrapeBadger 搜索一轮 8–26s，抓正文 0.3–2.3s（境外站经香港代理）。
+  // 旧的 25s / 40s 是照着「网关自己有 15s 搜索预算」估的，网关那个预算本身就要放宽到
+  // 总 60s，云端这边跟着按规格第 4 节的分段预算来：抓正文 30s、搜索 45s。
+  test('两条路的时限按规格第 4 节的分段预算,不再是估出来的数', () => {
+    expect(MANUAL_LEAD_ENRICHMENT_FETCH_TIMEOUT_MS).toBe(30_000);
+    expect(MANUAL_LEAD_ENRICHMENT_SEARCH_TIMEOUT_MS).toBe(45_000);
+  });
+
   test('没有链接时把文字线索当查询发过去', async () => {
     const fetcher = vi.fn(async () => jsonResponse({
       text: '正文', url: 'https://a.example/x', publisher: 'A', kind: 'search+document',

@@ -1060,6 +1060,9 @@ describe('manual daily news leads API · lead enrichment', () => {
         itemId: `blog:manual:${assertedZeroEvidence.id}`,
         url: 'https://openai.com/astra/',
         text: 'OpenAI发布Astra',
+        // 审核日期一路传到网关：搜索那一路少了它，网关算检索区间时直接抛
+        // Invalid time value，keyed 搜索每次都挂（2026-09-05 规格第 7 节）。
+        date: '2026-08-11',
       },
       expect.objectContaining({ fetchPlainText: expect.any(Function), compress: expect.any(Function) }),
     );

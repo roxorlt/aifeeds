@@ -252,6 +252,38 @@ describe('manualLeadEnrichmentRequest', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// 2026-09-05：keyed 搜索在 prod 上每次都挂，网关日志是一句 `Invalid time value`。
+// 成因在这条请求上：网关按 `date` 去算 `after:` / `before:` 检索区间，云端从来没发过
+// 这个键，空值构造时间对象就抛。规格第 7 节把它列成必修缺陷之一。
+// ---------------------------------------------------------------------------
+describe('取材请求带上审核日期', () => {
+  test('给了审核日期就发出去,网关据此算检索区间', () => {
+    expect(manualLeadEnrichmentRequest({
+      url: null, text: 'OpenAI 发布 Astra', date: '2026-09-05',
+    })).toEqual({ query: 'OpenAI 发布 Astra', date: '2026-09-05' });
+  });
+
+  test('有链接时同样带上,两路请求走的是同一个日期口径', () => {
+    expect(manualLeadEnrichmentRequest({
+      url: 'https://a.example/x', text: 'OpenAI 发布 Astra', date: '2026-09-05',
+    })).toEqual({ url: 'https://a.example/x', query: 'OpenAI 发布 Astra', date: '2026-09-05' });
+  });
+
+  test.each([
+    ['没给', undefined],
+    ['空串', ''],
+    ['形状不对', '2026/09/05'],
+    ['不是字符串', 20260905],
+  ])('日期%s时干脆不发这个键:网关对 date 是严格校验,发个坏值整条请求被 400 掉', (_label, date) => {
+    const request = manualLeadEnrichmentRequest({
+      url: null, text: 'OpenAI 发布 Astra', date: date as never,
+    });
+    expect(request).toEqual({ query: 'OpenAI 发布 Astra' });
+    expect('date' in (request as object)).toBe(false);
+  });
+});
+
 describe('合并素材的来源记录', () => {
   const merged = {
     text: '链接正文。\n\n搜索素材。',

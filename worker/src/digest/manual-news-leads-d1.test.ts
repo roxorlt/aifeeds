@@ -5384,10 +5384,12 @@ describe('manual lead enrichment', () => {
 
       expect(evidenceTextOf(state, itemIds[0])).toBe('OpenAI发布Astra 的背景。');
       expect(evidenceTextOf(state, itemIds[1])).toBe('Anthropic发布Claude 的背景。');
+      // 审核日期跟着一起发：网关拿它算 after: / before: 检索区间，缺了就抛
+      // Invalid time value（2026-09-05 规格第 7 节的必修缺陷）。
       expect(requests).toContainEqual({
-        url: 'https://openai.com/index/astra/', query: 'OpenAI发布Astra',
+        url: 'https://openai.com/index/astra/', query: 'OpenAI发布Astra', date: '2026-08-28',
       });
-      expect(requests).toContainEqual({ query: 'Anthropic发布Claude' });
+      expect(requests).toContainEqual({ query: 'Anthropic发布Claude', date: '2026-08-28' });
     });
 
     test('已经有素材的候选跳过,不再打扰网关', async () => {

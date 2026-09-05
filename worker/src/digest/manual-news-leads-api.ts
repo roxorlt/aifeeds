@@ -217,6 +217,8 @@ function scheduleLeadEnrichment(
       itemId: `blog:manual:${lead.id}`,
       url: lead.input_url || null,
       text: lead.input_text || '',
+      // 审核日期要一路带到网关：搜索那一路少了它就抛 Invalid time value。
+      date: lead.review_date,
     }, createManualLeadEnrichmentAdapters(env)).then(() => undefined, () => undefined));
   } catch (error) {
     console.warn('[manual-lead-enrichment] schedule failed:', String((error as Error)?.message || error).slice(0, 200));

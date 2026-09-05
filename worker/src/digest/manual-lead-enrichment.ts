@@ -45,6 +45,15 @@ export interface ManualEnrichmentMaterial {
 export interface ManualEnrichmentRequest {
   url?: string;
   query?: string;
+  /**
+   * 这条线索所属的审核日期（`YYYY-MM-DD`）。
+   *
+   * 搜索那一路必须带它：网关拿它算 `after:` / `before:` 检索区间，2026-09-05 之前云端
+   * 从来没发过这个键，网关那边空值构造时间对象直接抛 `Invalid time value`，keyed 搜索
+   * 因此每一次都挂。形状不对的值一律不发 —— 网关对这个键是严格校验，发个坏值会把整条
+   * 请求 400 掉，连抓链接那一路也一起没了。
+   */
+  date?: string;
 }
 
 /** 一份素材的出处。网关合并了「链接正文 + 搜索素材」时会逐份列出来。 */
@@ -96,9 +105,11 @@ export function clampEnrichmentText(value: unknown): string {
  * 就一份素材都拿不到，截断至少还能搜到东西。
  */
 export function manualLeadEnrichmentRequest(
-  clue: { url?: string | null; text?: string | null },
+  clue: { url?: string | null; text?: string | null; date?: string | null },
 ): ManualEnrichmentRequest | null {
   const url = String(clue.url || '').trim();
+  const date = typeof clue.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(clue.date)
+    ? clue.date : '';
   const collapsed = String(clue.text || '').replace(/\s+/g, ' ').trim();
   let query = '';
   for (const char of collapsed) {
@@ -106,7 +117,7 @@ export function manualLeadEnrichmentRequest(
     query += char;
   }
   if (!url && !query) return null;
-  return { ...(url ? { url } : {}), ...(query ? { query } : {}) };
+  return { ...(url ? { url } : {}), ...(query ? { query } : {}), ...(date ? { date } : {}) };
 }
 
 /**
@@ -132,7 +143,7 @@ function withBudget<T>(work: Promise<T>, budgetMs: number): Promise<T | null> {
  * 取一段背景素材。**任何失败都回 `null`** —— 调用方据此什么都不写。
  */
 export async function collectManualLeadEnrichment(
-  clue: { url: string | null; text: string },
+  clue: { url: string | null; text: string; date?: string | null },
   adapters: ManualLeadEnrichmentAdapters,
   opts: { now?: number; budgetMs?: number } = {},
 ): Promise<ManualLeadEnrichmentResult | null> {
@@ -193,7 +204,7 @@ export type ManualLeadEnrichmentOutcome = 'skipped' | 'written' | 'empty' | 'fai
  */
 export async function runManualLeadEnrichment(
   env: Env,
-  input: { leadId: string; itemId: string; url: string | null; text: string },
+  input: { leadId: string; itemId: string; url: string | null; text: string; date?: string | null },
   adapters: ManualLeadEnrichmentAdapters,
   opts: { now?: number; budgetMs?: number } = {},
 ): Promise<ManualLeadEnrichmentOutcome> {
@@ -327,6 +338,7 @@ export async function backfillManualLeadEnrichment(
         itemId: `blog:manual:${row.lead_id}`,
         url: row.input_url || null,
         text: row.input_text || '',
+        date,
       }, adapters, { now: now(), budgetMs: leadBudgetMs });
       stats[outcome] += 1;
     }
