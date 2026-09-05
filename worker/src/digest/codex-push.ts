@@ -18,6 +18,8 @@ import {
   type VerifiedNewsReviewSelectionSnapshot,
 } from './news-review';
 import { authorizeFormalNewsSet } from './news-source-policy';
+import { backfillManualLeadEnrichment } from './manual-lead-enrichment';
+import { createManualLeadEnrichmentAdapters } from './manual-lead-enrichment-runtime';
 import { safeDailyDeliveryError } from './daily-delivery-error';
 
 const DEFAULT_DAILY_ENDPOINT = 'https://ai-feeds.cc/aifeeds/api/daily/ingest';
@@ -656,6 +658,26 @@ async function resolveDailyPushOrigin(
   return (await hasHumanReviewedNewsSelection(env, date)) ? 'review' : 'auto';
 }
 
+/**
+ * 组装 editorial 那份 payload 之前，把当天还空着的手工候选再取一遍背景素材。
+ *
+ * **落点为什么在这里**：news 板块只在 editorial 这一段真正读行、渲染成条目；finalize 用
+ * 的是 editorial 已锁定的那份快照，到那时再补也进不了 payload。所以「写口播词之前素材
+ * 备齐」这件事，只有在这一次读行之前做才算数。
+ *
+ * **补取失败绝不阻塞出片**：这里把任何异常都吞掉，只记一行日志。少一段背景是内容单薄，
+ * 少一期日报是事故，两者不能混为一谈。
+ */
+async function backfillManualEvidenceBeforeEditorial(env: Env, date: string): Promise<void> {
+  try {
+    const stats = await backfillManualLeadEnrichment(env, date, createManualLeadEnrichmentAdapters(env));
+    if (stats.scanned) console.log('[manual-lead-enrichment] backfill', JSON.stringify(stats));
+  } catch (error) {
+    console.warn('[manual-lead-enrichment] backfill before editorial build failed:',
+      String((error as Error)?.message || error).slice(0, 200));
+  }
+}
+
 export async function buildStagedDailyCodexPayload(
   env: Env,
   stage: DailyCodexStage,
@@ -663,6 +685,7 @@ export async function buildStagedDailyCodexPayload(
 ): Promise<StagedDailyCodexPayload> {
   const date = opts.date || bjtDateStr();
   const sources = sourcesForStage(stage);
+  if (stage === 'editorial') await backfillManualEvidenceBeforeEditorial(env, date);
   const maxAttempts = opts.persistRevision ? STAGE_STATE_CAS_MAX_ATTEMPTS : 1;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const newsReviewSnapshot = stage === 'editorial'
