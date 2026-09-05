@@ -283,7 +283,12 @@ export async function reportManualLeadContentStage(
   }
 }
 
-/** 按顺序直接跑一步：报阶段、套上这一步的时限，异常与超时都收敛成 `null`。 */
+/**
+ * 按顺序直接跑一步：报阶段、套上这一步的时限，异常与超时都收敛成 `null`。
+ *
+ * 生产上没有调用方 —— 那条路走的是 workflow 的 durable step。留着它是为了让流水线本身
+ * （谁先谁后、素材怎么合并、失败怎么退）能脱开 workflow 单独验证。
+ */
 export function createDirectStepRunner(
   hooks: ManualLeadContentHooks,
 ): ManualLeadContentStepRunner {
