@@ -108,6 +108,12 @@ export async function writeManualLeadContentExtras(
 }
 
 /**
+ * 批次版本冲突的重试次数。同一批里几条线索前后脚入池时会互相插队，重试一次通常就过；
+ * 给到 4 次是留出「四条同时提交」这种实际发生过的场景的余量，再多就说明不是并发问题。
+ */
+const POOL_REVISION_CONFLICT_RETRIES = 4;
+
+/**
  * 把一条一步录入线索送进候选池。
  *
  * `expected_batch_revision` 刻意不传：提交那一刻面板读到的批次版本，等加工跑完早就可能
@@ -127,13 +133,29 @@ export async function poolManualLeadContentEntry(
   let pooled = false;
   let detail = content.detail;
   try {
-    const result = await assertManualNewsLeadCandidate(env, {
+    let result = await assertManualNewsLeadCandidate(env, {
       date: lead.review_date,
       text: lead.input_text,
       url: lead.input_url,
       note: lead.note,
       ...(content.drafted ? { drafted: content.drafted } : {}),
     }, lead.submit_idempotency_key, now);
+    // 批次版本冲突是**抢锁没抢到**，不是一个决定：每一次入池都会新建一个批次修订，几条
+    // 线索前后脚跑完时，后到的那条读版本与写入之间必然被人插队。2026-09-05 验收里四条
+    // 同时提交，两条就是这么被判「没能加入候选池」的。所以这一种错误要重来，重来时
+    // assertManualNewsLeadCandidate 会重新读当前活跃批次的版本。
+    for (let attempt = 0; !result.ok
+      && result.error === 'candidate_batch_revision_conflict'
+      && attempt < POOL_REVISION_CONFLICT_RETRIES; attempt += 1) {
+      console.warn(`[manual-lead-content] lead=${lead.id} batch revision conflict, retrying`);
+      result = await assertManualNewsLeadCandidate(env, {
+        date: lead.review_date,
+        text: lead.input_text,
+        url: lead.input_url,
+        note: lead.note,
+        ...(content.drafted ? { drafted: content.drafted } : {}),
+      }, lead.submit_idempotency_key, Date.now());
+    }
     pooled = result.ok;
     if (!result.ok) {
       detail = `没能加入候选池：${result.error}`;
