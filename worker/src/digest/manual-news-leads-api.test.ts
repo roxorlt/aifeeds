@@ -925,7 +925,7 @@ describe('manual daily news leads API · owner asserted direct entry', () => {
       date: '2026-08-11', text: 'OpenAI发布Astra', url: 'https://openai.com/astra/', note: '早报',
       statement: 'OpenAI发布Astra',
     }, 'asserted-1', expect.any(Number));
-    // 入池那一步这时候还没发生 —— 它在后台那一半。
+    // 入池那一步这时候还没发生 —— API 这一层根本不再引用它，它在后台那一半里。
     expect(assertManualNewsLeadCandidate).not.toHaveBeenCalled();
     expect(submitManualNewsLead).not.toHaveBeenCalled();
     expect(workflowCreate).not.toHaveBeenCalled();

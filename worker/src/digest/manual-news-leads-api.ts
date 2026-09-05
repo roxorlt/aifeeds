@@ -4,7 +4,6 @@ import {
   manualNewsVerificationKeyring,
 } from '../security/manual-news-keyring';
 import {
-  assertManualNewsLeadCandidate,
   beginOwnerAssertedEntry,
   confirmManualNewsLeadCandidate,
   getManualNewsCandidateAuthorization,
