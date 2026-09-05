@@ -17,6 +17,7 @@ import {
   MANUAL_EVIDENCE_TEXT_MAX_CODE_POINTS,
   type ManualEnrichmentMaterial,
   type ManualEvidenceKind,
+  type ManualEvidenceMaterialSource,
   type ManualLeadEnrichmentAdapters,
 } from './manual-lead-enrichment';
 
@@ -68,11 +69,27 @@ export function parseManualLeadEnrichmentMaterial(payload: unknown): ManualEnric
   const text = typeof row.text === 'string' ? row.text.trim() : '';
   const kind = row.kind as ManualEvidenceKind;
   if (!text || !EVIDENCE_KINDS.has(kind)) return null;
+  // 网关合并了「链接正文 + 搜索素材」时逐份列出出处。形状不对的那几项直接丢掉，一项都
+  // 没剩就连字段都不写：这个键最后要落进 items.extra，不能带任何没验过的东西进库。
+  const sources = (Array.isArray(row.sources) ? row.sources : [])
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+      const source = entry as Record<string, unknown>;
+      const sourceKind = source.kind as ManualEvidenceKind;
+      if (!EVIDENCE_KINDS.has(sourceKind)) return null;
+      return {
+        url: typeof source.url === 'string' ? source.url : '',
+        publisher: typeof source.publisher === 'string' ? source.publisher : '',
+        kind: sourceKind,
+      };
+    })
+    .filter((entry): entry is ManualEvidenceMaterialSource => entry !== null);
   return {
     text,
     url: typeof row.url === 'string' ? row.url : '',
     publisher: typeof row.publisher === 'string' ? row.publisher : '',
     kind,
+    ...(sources.length ? { sources } : {}),
   };
 }
 
@@ -90,9 +107,11 @@ export function createManualLeadEnrichmentAdapters(
         console.warn('[manual-lead-enrichment] research gateway not configured, skipping enrichment');
         return null;
       }
-      const timeoutMs = 'url' in input
-        ? MANUAL_LEAD_ENRICHMENT_FETCH_TIMEOUT_MS
-        : MANUAL_LEAD_ENRICHMENT_SEARCH_TIMEOUT_MS;
+      // 带 query 的请求按搜索预算给时限：网关那边要先翻搜索结果再逐条试抓，比单抓一条链接
+      // 慢得多，用抓取的时限掐它等于把搜索那一路白白掐死。
+      const timeoutMs = input.query
+        ? MANUAL_LEAD_ENRICHMENT_SEARCH_TIMEOUT_MS
+        : MANUAL_LEAD_ENRICHMENT_FETCH_TIMEOUT_MS;
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
