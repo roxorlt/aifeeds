@@ -166,6 +166,23 @@ function normalizedOwnerAssertedDraft(raw: unknown): ManualNewsOwnerAssertedDraf
 }
 
 /**
+ * 起草结果的**安全**规范化：不合规回 `null` 而不是抛。
+ *
+ * 取材那条路要在写签名快照**之前**自己先判一遍。理由是入池永不失败这条硬约束：模型偶尔
+ * 会吐出一个 5 个字的标题或一段 400 字的摘要，那种东西进不了签名快照 —— 但它只该让这条
+ * 候选退回「用 owner 那句话当标题」，绝不能变成「这条线索没能入池」。
+ */
+export function safeManualNewsOwnerAssertedDraft(
+  raw: unknown,
+): ManualNewsOwnerAssertedDraft | null {
+  try {
+    return normalizedOwnerAssertedDraft(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 投影里的 url 兜底：线索自带的 https 网址。http / 空值一律退成空串。
  *
  * ⚠️ **空串不是 null**：候选写进 items 时走 `candidate.url || ''`，正式新闻门再用
