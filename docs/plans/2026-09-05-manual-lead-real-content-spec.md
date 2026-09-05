@@ -136,3 +136,39 @@ export async function generateFeedEnrichment(env, input: {
 6. 断网/搜索全挂的模拟 → 仍入池，卡片标明只能依据那句话。
 7. 生成后连续两次 sanitize `changed:false`，正式新闻门 `ALLOW_VERIFIED_MANUAL`。
 8. 全量测试与 tsc 全绿；常规新闻既有测试一行不改。
+
+---
+
+## 10. 首轮生产验收暴露的三个问题（2026-09-05 下午，均有实测证据）
+
+### 10.1 后台加工被运行时回收，线索卡在 drafting 永不入池
+
+四条验收线索里，只有走推文接口那条（全程约 3s）完成；另外三条在 `drafting` 停留超过 5 分钟、远超 180s 总预算且 `confirmed_at` 仍为空。推文那条快、其余慢，差别正是耗时。
+
+**根因**：整轮加工挂在 `ctx.waitUntil` 上。Workers 的 isolate 不保证活到 3 分钟，长任务被回收后没有任何人接手，`content_stage` 永远停在最后写下的那一格。列表轮询的过期兜底能捡回一部分，但它是**从头重跑**，同样会再次被回收，且观测到过 `fetching_source → drafting → fetching_source` 的反复。
+
+**修法**：整轮加工改用 **Workflow**（`MANUAL_NEWS_LEAD_WORKFLOW` 同款机制，本仓已有基础设施），各阶段作为 durable step。`waitUntil` 只适合「响应发出后顺手做完、做不成就算了」的短任务，不适合决定候选内容的 3 分钟主流程。
+
+### 10.2 检索式被日期限定掐成零结果
+
+网关 `createResearchSearchAdapter`（`manual-news-research-gateway.mjs:402-404`）给每个检索式追加 `after:<date-8d> before:<date+1d>`。ScrapeBadger 直连对拍：
+
+| 检索式 | 结果 |
+|---|---|
+| `NVIDIA acquires Hugging Face` | 200 / 3.6s / **4 条** |
+| `NVIDIA acquires Hugging Face after:2026-08-28 before:2026-09-06` | 200 / 13.0s / **0 条** |
+
+日期限定是为**证据取证**的时效性设计的；补录取材要找的是同一件事的背景报道，被这个窗口一卡就什么都搜不到。网关日志里成片的 `outcome=ok results=0` 就是它。
+
+**修法**：取材这条路（`/v1/plain-text` 走的搜索）不加日期限定；证据取证那条路保持不变。
+
+### 10.3 长中文检索式在 ScrapeBadger 上 502
+
+同一接口，短中文查询可用、长中文查询必挂：
+
+| 检索式 | 结果 |
+|---|---|
+| `英伟达 收购 Hugging Face`（9 字） | 200 / 9.5s / 5 条 |
+| `英伟达确认以 129 亿美元收购 Hugging Face`（21 字） | **502 / 41s** |
+
+**修法**：无链接时不要把 owner 的整句话原样当检索式。先用一次 DeepSeek 把它压成 3–6 个关键词（有链接时那一步「分析这是什么新闻并拟检索词」已经在做同样的事，两条路统一走它），再去搜。压不出来时退回取前 12 个字符。
