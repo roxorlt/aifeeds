@@ -104,6 +104,9 @@ export function parseManualLeadContentAnalysis(payload: unknown): ManualLeadCont
   };
 }
 
+/** 补录生成的 token 上限：素材是两份合起来的，比常规新闻的 800 需要更多余量。 */
+export const MANUAL_LEAD_GENERATE_MAX_TOKENS = 2_500;
+
 export function createManualLeadContentAdapters(
   env: Env,
   deps: { fetcher?: GatewayFetcher } = {},
@@ -139,14 +142,19 @@ export function createManualLeadContentAdapters(
         env.DEEPSEEK_API_KEY,
         DEEPSEEK_FLASH,
         prompt.user,
-        { systemPrompt: prompt.system, maxTokens: 500, timeoutMs: 25_000, retries: 0 },
+        // 输出被 token 上限截断时,callDeepSeekJson 会把整份结果作废(宁可没有也不要半成品)。
+      // 500 太紧:2026-09-05 生产上分析这一步对干净的文章正文也一直返回空,连微信公众号那种
+      // 标题清清楚楚的文章都判不出来。抬到 2000 并允许重试一次。
+      { systemPrompt: prompt.system, maxTokens: 2_000, timeoutMs: 25_000, retries: 1 },
       );
       return parseManualLeadContentAnalysis(result.data);
     },
 
     generate(input) {
       // 与常规新闻同一次调用、同一套提示词 —— 口播词、字幕、小红书文案全从它的产物派生。
-      return generateFeedEnrichment(env, input);
+      // 只有 token 上限抬高:补录喂进去的是「链接正文 + 搜索召回」两份素材，输出比单篇文章长，
+      // 800 会让它撞上限进而整份作废(2026-09-05 验收实证)。提示词一个字没动。
+      return generateFeedEnrichment(env, { ...input, maxTokens: MANUAL_LEAD_GENERATE_MAX_TOKENS });
     },
   };
 }

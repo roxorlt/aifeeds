@@ -533,6 +533,16 @@ export interface FeedEnrichment {
  * 提示词与调用参数一个字都不能改：`__fixtures__/enrich-request-*.json` 存着抽函数之前的
  * 请求原文，`generate-feed-enrichment.test.ts` 逐字节比对。
  */
+/**
+ * `maxTokens` 的默认值 800 是常规新闻用了很久的口径，不要动它。
+ *
+ * 补录那条路要把「owner 给的链接正文 + 搜索召回的报道」合起来喂进来，输出比单篇文章长；
+ * 而 `callJson` 遇到 `finish_reason === 'length'` 会把整份结果作废（宁可没有，也不要截断的
+ * 半成品）。2026-09-05 生产验收里文章链接那几条就是这么全部退回 owner 原句的 —— 素材短的
+ * 推文能成、素材长的文章不能成。所以这条路要能自己抬上限。
+ */
+export const FEED_ENRICHMENT_DEFAULT_MAX_TOKENS = 800;
+
 export async function generateFeedEnrichment(
   env: Env,
   input: {
@@ -541,9 +551,11 @@ export async function generateFeedEnrichment(
     sourceCompany: string;
     lang: FeedLang;
     kind: FeedKind;
+    maxTokens?: number;
   },
 ): Promise<FeedEnrichment | null> {
   const { kind, lang, title, excerpt, sourceCompany } = input;
+  const maxTokens = input.maxTokens ?? FEED_ENRICHMENT_DEFAULT_MAX_TOKENS;
   const out = await callJson<{
     ai_category?: unknown;
     title_zh?: unknown;
@@ -551,7 +563,7 @@ export async function generateFeedEnrichment(
     shownotes_zh?: unknown;
     ai_summary_zh?: unknown;
     guests?: unknown;
-  }>(env, enrichSystem(kind), enrichUser(kind, title, excerpt, sourceCompany, lang), 800);
+  }>(env, enrichSystem(kind), enrichUser(kind, title, excerpt, sourceCompany, lang), maxTokens);
   if (!out) return null;
 
   const cat = String(out.ai_category || "other");
