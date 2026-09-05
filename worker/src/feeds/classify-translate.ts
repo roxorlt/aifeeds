@@ -500,6 +500,79 @@ function normalizeGroundingText(text: string): string {
   return stripMarkupForGrounding(text).replace(/\s+/g, "").toLowerCase();
 }
 
+/**
+ * 一条内容走完 enrich 之后、落库之前的那份结果。
+ *
+ * 字段是照着 {@link classifyAndTranslateForFeeds} 的落库补丁一一对应收口的：
+ * `titleZh` 已经剥过标签前缀，`bodyZh` 按 kind 取 `excerpt_zh` 或 `shownotes_zh`。
+ * `rawGuests` 保持模型原样 —— 过滤固定主持人要读 item 的 `extra.hosts`，那是读库那一半
+ * 的事，留给调用方做。
+ */
+export interface FeedEnrichment {
+  aiCategory: FeedAiCategory;
+  /** 已 `stripLabelPrefix` 的中文标题。 */
+  titleZh: string;
+  /** 模型原样吐出来的标题；接地校验按原文判，与落库前的清洗口径分开。 */
+  rawTitleZh: string;
+  /** 博客是 `excerpt_zh`，播客是 `shownotes_zh`。 */
+  bodyZh: string;
+  aiSummaryZh: string;
+  rawGuests: unknown;
+  grounding: ReturnType<typeof validateFeedEnrichGrounding>;
+}
+
+/**
+ * 一条内容的 enrich 生成：一次 `deepseek-v4-flash` 调用同时产出分类、中文标题、正文中译
+ * 与一句话解读。**只生成，不读库也不写库。**
+ *
+ * 抽出来是为了让手工补录的线索用上同一套提示词 —— 口播词、字幕、小红书文案、公众号标题
+ * 全部从 `title_zh` 与 `ai_summary_zh` 派生，这两个字段同源，其余各处的文字质量才谈得上
+ * 一致。补录那条路直接调这个函数，不经过 {@link classifyAndTranslateForFeeds} 的读写库
+ * 逻辑，因此不会覆盖补录条目里已经签过名的字段。
+ *
+ * 提示词与调用参数一个字都不能改：`__fixtures__/enrich-request-*.json` 存着抽函数之前的
+ * 请求原文，`generate-feed-enrichment.test.ts` 逐字节比对。
+ */
+export async function generateFeedEnrichment(
+  env: Env,
+  input: {
+    title: string;
+    excerpt: string;
+    sourceCompany: string;
+    lang: FeedLang;
+    kind: FeedKind;
+  },
+): Promise<FeedEnrichment | null> {
+  const { kind, lang, title, excerpt, sourceCompany } = input;
+  const out = await callJson<{
+    ai_category?: unknown;
+    title_zh?: unknown;
+    excerpt_zh?: unknown;
+    shownotes_zh?: unknown;
+    ai_summary_zh?: unknown;
+    guests?: unknown;
+  }>(env, enrichSystem(kind), enrichUser(kind, title, excerpt, sourceCompany, lang), 800);
+  if (!out) return null;
+
+  const cat = String(out.ai_category || "other");
+  const rawTitleZh = String(out.title_zh || "");
+  const aiSummaryZh = String(out.ai_summary_zh || "");
+  return {
+    aiCategory: (AI_CATEGORIES.has(cat) ? cat : "other") as FeedAiCategory,
+    titleZh: stripLabelPrefix(rawTitleZh),
+    rawTitleZh,
+    bodyZh: String((kind === "podcast" ? out.shownotes_zh : out.excerpt_zh) || ""),
+    aiSummaryZh,
+    rawGuests: out.guests,
+    grounding: validateFeedEnrichGrounding({
+      sourceTitle: title,
+      sourceText: excerpt,
+      titleZh: rawTitleZh,
+      summaryZh: aiSummaryZh,
+    }),
+  };
+}
+
 export async function classifyAndTranslateForFeeds(
   env: Env,
   itemId: string,
@@ -511,14 +584,9 @@ export async function classifyAndTranslateForFeeds(
   const sourceCompany = String(it.extra.source_company || "");
   const zhField = kind === "podcast" ? "shownotes_zh" : "excerpt_zh";
 
-  const out = await callJson<{
-    ai_category?: unknown;
-    title_zh?: unknown;
-    excerpt_zh?: unknown;
-    shownotes_zh?: unknown;
-    ai_summary_zh?: unknown;
-    guests?: unknown;
-  }>(env, enrichSystem(kind), enrichUser(kind, it.title, excerpt, sourceCompany, lang), 800);
+  const out = await generateFeedEnrichment(env, {
+    title: it.title, excerpt, sourceCompany, lang, kind,
+  });
 
   if (!out) {
     await jsonSetExtra(env, itemId, [
@@ -527,28 +595,18 @@ export async function classifyAndTranslateForFeeds(
     return { enrichFailed: true };
   }
 
-  const cat = String(out.ai_category || "other");
-  const aiCategory: FeedAiCategory = (
-    AI_CATEGORIES.has(cat) ? cat : "other"
-  ) as FeedAiCategory;
-  const zhVal = String(
-    (kind === "podcast" ? out.shownotes_zh : out.excerpt_zh) || "",
-  );
+  const aiCategory = out.aiCategory;
+  const zhVal = out.bodyZh;
 
   const patches: Array<{ path: string; value: unknown; json?: boolean }> = [
     { path: "$.ai_category", value: aiCategory },
-    { path: "$.title_zh", value: stripLabelPrefix(String(out.title_zh || "")) },
+    { path: "$.title_zh", value: out.titleZh },
     { path: `$.${zhField}`, value: zhVal },
-    { path: "$.ai_summary_zh", value: String(out.ai_summary_zh || "") },
+    { path: "$.ai_summary_zh", value: out.aiSummaryZh },
     { path: "$.llm_model", value: DEEPSEEK_FLASH },
     { path: "$.llm_called_at", value: Math.floor(Date.now() / 1000) },
   ];
-  const grounding = validateFeedEnrichGrounding({
-    sourceTitle: it.title,
-    sourceText: excerpt,
-    titleZh: String(out.title_zh || ""),
-    summaryZh: String(out.ai_summary_zh || ""),
-  });
+  const grounding = out.grounding;
   if (grounding.suspect) {
     patches.push(
       { path: "$.suspect_enrich", value: 1 },
@@ -574,8 +632,8 @@ export async function classifyAndTranslateForFeeds(
       (Array.isArray(it.extra.hosts) ? (it.extra.hosts as unknown[]) : [])
         .map((h) => (typeof h === "string" ? h.trim().toLowerCase() : "")),
     );
-    const names = Array.isArray(out.guests)
-      ? (out.guests as unknown[])
+    const names = Array.isArray(out.rawGuests)
+      ? (out.rawGuests as unknown[])
           .map((g) => (typeof g === "string" ? g.trim() : ""))
           .filter((g, i, a) => g && g.length <= 60 && a.indexOf(g) === i && !hostSet.has(g.toLowerCase()))
           .slice(0, 4)
