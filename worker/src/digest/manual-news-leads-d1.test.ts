@@ -1,3 +1,4 @@
+import { MANUAL_LEAD_CONTENT_BUDGET_MS } from './manual-lead-content';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
@@ -6172,7 +6173,7 @@ describe('一步录入拆成「先建行、后加工入池」', () => {
       status: 'needs_review', version: 1, confirmed_at: null,
       content_progress: { stage: 'submitted', detail: '', material_tier: 'none' },
     });
-    expect(lead.content_progress?.deadline_at).toBe(100 + 120_000);
+    expect(lead.content_progress?.deadline_at).toBe(100 + MANUAL_LEAD_CONTENT_BUDGET_MS);
     // 还没进候选池：没有签名快照，items 里也还没有这一行。
     expect(state.db.sqlite.prepare(
       'SELECT COUNT(*) AS n FROM manual_news_assessment_verifications WHERE lead_id = ?',
@@ -6279,9 +6280,9 @@ describe('一步录入拆成「先建行、后加工入池」', () => {
   test('总预算过了还没入池的线索被扫出来，供轮询时补入池', async () => {
     const { state, lead } = await entryFixture();
 
-    await expect(listStaleManualLeadContentEntries(state.env, '2026-08-28', 100 + 119_000))
+    await expect(listStaleManualLeadContentEntries(state.env, '2026-08-28', 100 + MANUAL_LEAD_CONTENT_BUDGET_MS - 1_000))
       .resolves.toEqual([]);
-    await expect(listStaleManualLeadContentEntries(state.env, '2026-08-28', 100 + 121_000))
+    await expect(listStaleManualLeadContentEntries(state.env, '2026-08-28', 100 + MANUAL_LEAD_CONTENT_BUDGET_MS + 1_000))
       .resolves.toEqual([{
         id: lead.id,
         input_url: 'https://openai.com/index/astra/',
