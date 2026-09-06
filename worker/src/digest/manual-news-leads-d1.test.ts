@@ -5868,6 +5868,73 @@ describe('formal news authorization manual fast path', () => {
     expect(fast.result.allowed_ids).toEqual([ids[1]]);
     expect(JSON.stringify(fast.result.decisions)).toBe(JSON.stringify(full.result.decisions));
   });
+
+  // ── 9/6 事故现场的形状：候选池里 4 条补录，owner 点确认 ────────────────────────
+  // 那一轮 review_submit_write_guard 对 4 条补录逐条完整验签（每条 1 次线索行查询 +
+  // 约 8 条 proof 语句，preflight 之后再重载一遍），同步段被拖到 10s 以上，撞面板 20s
+  // 代理超时。下面两个用例按 SQL 注释标签数语句，把「一次批量查询」钉死。
+  async function fourAuthorizedManualItems() {
+    const state = await stuckZeroEvidenceFixture();
+    const frozen = await frozenAssertedBatch(state);
+    const statements = [
+      ASSERTED_STATEMENT, 'Anthropic发布Claude5', 'Google发布Gemini4', 'Meta发布Llama5',
+    ];
+    const ids: string[] = [];
+    for (const [index, text] of statements.entries()) {
+      const entry = await assertManualNewsLeadCandidate(state.env, {
+        date: '2026-08-28', text,
+        expected_batch_revision: frozen.batch.batch_revision + index,
+      }, `confirm-fast-${index}`, 100 + index);
+      expect(entry).toMatchObject({ ok: true });
+      ids.push(`blog:manual:${entry.ok ? entry.lead.id : ''}`);
+    }
+    return { state, ids };
+  }
+
+  test('4 条补录 + 提交写守卫：批量查询恰 1 次，逐条完整验签 0 次', async () => {
+    const { state, ids } = await fourAuthorizedManualItems();
+
+    const write = await authorizeWith(state, ids, 'review_submit_write_guard');
+
+    expect(write.bulkReads).toBe(1);
+    expect(write.fullVerifications).toBe(0);
+    // 逐条完整验签会牵出的另外几类语句，一条都不许有。
+    expect(countPrepared(state, 'manual_evidence:list')).toBe(0);
+    expect(countPrepared(state, 'manual_verification:key_lineage')).toBe(0);
+    expect(write.result.allowed_ids).toEqual(ids);
+
+    // 与只读投影对拍：同一批数据，判定逐字相同。
+    const readOnly = await authorizeWith(state, ids, 'review_api_final_projection');
+    expect(readOnly.bulkReads).toBe(1);
+    expect(readOnly.fullVerifications).toBe(0);
+    expect(JSON.stringify(write.result.decisions))
+      .toBe(JSON.stringify(readOnly.result.decisions));
+  });
+
+  test('4 条里 1 条预载缺失时，只有那 1 条回退逐条完整验签', async () => {
+    const { state, ids } = await fourAuthorizedManualItems();
+    // 第 3 条的签名被改坏 -> 批量复核验不过 -> 不进预载 map。
+    const tamperedLeadId = ids[2].slice('blog:manual:'.length);
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications SET hmac_sha256 = ?
+      WHERE lead_id = ? AND status = 'active'`).run('0'.repeat(64), tamperedLeadId);
+
+    const write = await authorizeWith(state, ids, 'review_submit_write_guard');
+
+    expect(write.bulkReads).toBe(1);
+    expect(write.fullVerifications).toBe(1);
+    expect(write.result.allowed_ids).toEqual([ids[0], ids[1], ids[3]]);
+    expect(write.result.decisions.map((decision) => [decision.item_id, decision.code])).toEqual([
+      [ids[0], 'ALLOW_VERIFIED_MANUAL'],
+      [ids[1], 'ALLOW_VERIFIED_MANUAL'],
+      [ids[2], 'DENY_UNVERIFIED_MANUAL'],
+      [ids[3], 'ALLOW_VERIFIED_MANUAL'],
+    ]);
+    // 回退的那一条照旧被完整重算隔离掉。
+    expect(state.db.sqlite.prepare(`SELECT status, reason FROM
+      manual_news_assessment_verifications WHERE lead_id = ?`).get(tamperedLeadId)).toEqual({
+      status: 'invalidated', reason: 'verification_integrity_invalid',
+    });
+  });
 });
 
 // prod 实测：单轮 authorizeFormalNewsSet 约 1.9s，而三条 SQL 服务端执行合计只有约 13ms
