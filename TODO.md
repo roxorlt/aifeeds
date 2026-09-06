@@ -43,9 +43,11 @@
 
 **9/4 审核区加载卡顿修复（PR #246/#247）与补录补正文（PR #248）后续项**：
 - [ ] **D1 往返延迟约 230–490ms/次**是审核区剩余 3.4s 的全部成本（SQL 服务端仅 13–25ms 且全程走索引）。可选解法是 D1 读副本（Sessions API），但会改变读一致性语义，与「人审顺序必须被尊重」这条不变量相关，需 owner 拍板后再评估
-- [ ] `published_selection` 一轮仍在完整验签侧（规格 3.3 C3）：owner 选中的 5 条里含手工候选时，这一轮仍为每条付约 17 次往返。可把「读取已发布选择」与「据此决定改写」拆两步
+- [x] ~~`published_selection` 一轮仍在完整验签侧（规格 3.3 C3）~~ → 9/6 事故实测：写路径逐条完整验签在池含 4 条补录时让确认 >20s 撞面板代理超时、选择根本没写入（规格 `2026-09-06-review-confirm-fast-authorize-spec.md`）。已改为**所有 purpose 统一批量预载**，写库 UPDATE 守卫不变
+- [ ] 一次审核确认仍要跑 7 轮授权（sanitize 2 + 选中集 + 默认选择 + 全池写守卫 + prePublish sanitize 2 + staged build 1），改批量后每轮约 1s、合计 8–9s。合并轮次（例如 submit 内复用一次 sanitize 结果）可再压到 3–4s，需要时再做
+- [ ] 面板：审核确认失败改中文提示（dailyVideo 分支 `cc/20260902-review-ux-and-baton-race` @ 78c3c3b）随下一次 render release 生效；代理超时 85s 已于 9/6 装进面板树（`news-review-proxy.mjs`），需重启 `aifeeds-x-card` 生效
 - [ ] 补录补正文的取材当前不覆盖：主动拦爬虫的站（openai.com/news 直连与经代理都是 403）、JS 渲染的 SPA 空壳页（静态 HTML 提取拿不到）。DuckDuckGo 兜底依赖其结果页 class 名，改版即失效（失效表现为「这次不补」，不影响入池）
-- [ ] `docs/operations.md` 需补：网关新端点 `/v1/plain-text`（不产生签名审计、默认走出站代理，与 `/v1/document` 的证据取证是两条路）、`items.extra.manual_evidence_text` / `manual_evidence_source` 两个新键、payload 新字段 `evidence_note`
+- [x] ~~`docs/operations.md` 需补~~ 9/6 已补：`/v1/plain-text`、migration 043 四列、一步录入返回 202 + Workflow `manual-lead-content`、`content_progress`、nginx 70s、9/6 确认超时事故与 Workers Logs 取证方法（本地文件，不进 git）
 
 ### A9. Admin 看板渐进加载（2026-07-24，已上线）
 
