@@ -36,6 +36,10 @@ function verifiedAssessment(leadId: string, verificationId = `verification:${lea
 vi.mock('./manual-news-leads-verification', () => ({
   loadVerifiedManualAssessment: loadVerifiedManualAssessmentMock,
   loadVerifiedManualCandidateProof: loadVerifiedManualAssessmentMock,
+  // 2026-09-06 起 authorizeFormalNewsSet 对任何 purpose 都先批量预载。这里固定返回空 map，
+  // 让整批候选都落到「预载缺行 → 逐条完整验签」那一侧：本文件测的正是这条回退路径上的
+  // 逐条判定与最终守卫。批量预载命中时的行为由 manual-news-leads-d1.test.ts 用真库覆盖。
+  loadSignedManualCandidateSnapshots: async () => new Map(),
 }));
 
 import type { Env } from '../index';
