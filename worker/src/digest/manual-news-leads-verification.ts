@@ -777,18 +777,24 @@ async function signedManualCandidateFromRow(
 }
 
 /**
- * 读路径的批量廉价复核：一条 SQL 拿回整批手工候选的 active proof 行，然后**纯计算**
+ * 手工候选的批量廉价复核：一条 SQL 拿回整批手工候选的 active proof 行，然后**纯计算**
  * 地重算 canonical_digest 并验 HMAC，把签名里的候选投影交回给调用方。
  *
- * 为什么读路径可以只做这一步：验签是「确认」（confirm / vouch / assert）那一步的写入
- * 门禁，那时已经把整份 payload（含证据快照）验过并落盘，canonical_digest + hmac_sha256
+ * 为什么可以只做这一步：验签是「确认」（confirm / vouch / assert）那一步的写入门禁，
+ * 那时已经把整份 payload（含证据快照）验过并落盘，canonical_digest + hmac_sha256
  * 把它钉死。每次查列表再逐条重算一遍，等于把写入门禁搬到读路径上 —— 每条候选 9 次
- * D1 往返，prod 实测约 1.8s/条。所以读路径信任的是确认时已验签并落盘的摘要。
+ * D1 往返，prod 实测约 1.8s/条。所以这里信任的是确认时已验签并落盘的摘要。
  *
  * 这里刻意**不读**证据行、授权审计行与密钥世系，因此它只回答「这份签名还是确认时那一份
  * 吗」，不回答「证据行事后有没有被单独改动」。完整重算（loadVerifiedManualCandidateProof，
  * 含证据摘要比对与失效隔离）留给调用方：凡是这里没返回、或返回的投影跟批次快照对不上的
- * 线索，都必须落回完整重算。发布授权（authorizeFormalNewsSet）那条线仍走完整校验。
+ * 线索，都必须落回完整重算。
+ *
+ * 谁在用（2026-09-06 更新）：读路径与发布授权（authorizeFormalNewsSet）都用。9/4 只让
+ * 登记过的只读 purpose 走这条，9/6 那次确认因为候选池里有 4 条补录、写 purpose 逐条完整
+ * 验签跑了 10s 以上被面板 20s 代理超时掐断，于是白名单取消：**所有 purpose 都先批量预载**，
+ * 只有预载缺行 / 同一线索多行 active / 签名对不上的那几条才逐条完整验签。随之而来的是证据行
+ * 完整性不再在授权这一步核对，改由 sanitize 的完整重算（confirmedManualCandidateById）兜底。
  */
 export async function loadSignedManualCandidateSnapshots(
   env: Env,
