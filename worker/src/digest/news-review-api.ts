@@ -3,6 +3,8 @@ import { timedNewsReviewStep } from './news-review-timing';
 import {
   createNewsReviewToken,
   authorizeNewsReviewBatchSnapshot,
+  freezeNewsReviewBatchFromPool,
+  newsReviewPoolShortfallCount,
   getActiveNewsReviewBatch,
   getPublishedNewsReviewSelection,
   getNewsReviewBatch,
@@ -14,12 +16,15 @@ import {
   verifyNewsReviewTokenSignature,
   type NewsReviewBatch,
 } from './news-review';
+import { rebuildDigestPoolSource } from './pool-rebuild';
 import { buildStagedDailyCodexPayload, getDailyStageState, pushDailyStageToCodex } from './codex-push';
 import { safeDailyDeliveryError } from './daily-delivery-error';
 import { generateDailyPage } from './daily-page-run';
 import { bjtDateStr } from './lib';
 
 const MAX_REVIEW_BODY_BYTES = 8 * 1024;
+/** 「随时开审」的节流窗口。Workers KV 的最小 TTL 就是 60 秒。 */
+const ENSURE_LOCK_TTL_SECONDS = 60;
 
 function response(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
@@ -275,6 +280,44 @@ async function projectNewsReviewBatch(
   };
 }
 
+/**
+ * 「随时开审」：当天还没有批次时，当场只重建新闻源并冻结一批。
+ *
+ * 只重建 news 一个源、且关掉编辑校准 —— 全量 rebuildDigestPoolSnapshot 会串行跑 5 个源、
+ * 各调一次 DeepSeek Pro，最坏是分钟级，面板到云端 60 秒就被掐断了。
+ *
+ * 返回 null = 批次已建好，调用方照常往下走；返回 Response = 这一次请求到此为止。
+ */
+async function ensureTodayNewsReviewBatch(env: Env, date: string, now: number): Promise<Response | null> {
+  const lockKey = `lock:news-pool-rebuild:${date}`;
+  // Workers KV 没有 SETNX，这把「锁」只是尽力去重：两个几乎同时到达的请求仍然可能都跑一遍重建。
+  // 最终正确性不靠它，靠 freeze 里的 candidate_generation CAS —— 重复重建产生不了两个 active 批次，
+  // KV 省下的只是一次白跑的重建。所以拿不到锁时回 202 让客户端稍后重试，而不是当失败。
+  const held = await timedNewsReviewStep('ensure.lock', () => env.AUTH_KV.get(lockKey));
+  if (held) return response({ ok: false, error: 'ensure_in_progress' }, 202);
+  await env.AUTH_KV.put(lockKey, String(now), { expirationTtl: ENSURE_LOCK_TTL_SECONDS });
+  try {
+    await timedNewsReviewStep(
+      'ensure.pool_rebuild',
+      () => rebuildDigestPoolSource(env, `${date}-08`, 'news', { editorialReview: false }),
+    );
+    await timedNewsReviewStep('ensure.freeze', () => freezeNewsReviewBatchFromPool(env, date, now));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message === 'news_review_pool_missing' || message === 'news_review_pool_has_fewer_than_five') {
+      // 候选真的不够 5 条：这不是故障，是这个时间点库里就没那么多新内容。
+      // 把实际条数原样带给面板，页面显示「候选不足 N 条，稍后再试」。
+      return response({
+        ok: false,
+        error: 'candidates_insufficient',
+        count: newsReviewPoolShortfallCount(error) ?? 0,
+      }, 409);
+    }
+    throw error;
+  }
+  return null;
+}
+
 export async function handleDailyNewsReviewApi(
   request: Request,
   env: Env,
@@ -293,6 +336,9 @@ export async function handleDailyNewsReviewApi(
     return response({ ok: false, error: 'invalid_review_reference' }, 400);
   }
   if (request.method === 'GET' && !batchId && !token) {
+    // ensure=1：07:50 定时冻结之前打开当天审稿时，当场建一批。只对北京时间当天生效 ——
+    // 过去日期没有批次就是没有，历史不该被现建出来，照旧 404。
+    const ensureRequested = url.searchParams.get('ensure') === '1' && date === bjtDateStr(now);
     // sanitize 自己就要读一遍当前批次，外层不再重复读同一行；没有当前批次时
     // 它抛 news_review_batch_not_found，等价于原来的 404。
     let sanitized;
@@ -302,10 +348,21 @@ export async function handleDailyNewsReviewApi(
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (message === 'news_review_batch_not_found') {
-        return response({ ok: false, error: 'review_batch_not_found' }, 404);
+      if (message !== 'news_review_batch_not_found') throw error;
+      if (!ensureRequested) return response({ ok: false, error: 'review_batch_not_found' }, 404);
+      const blocked = await ensureTodayNewsReviewBatch(env, date, now);
+      if (blocked) return blocked;
+      try {
+        sanitized = await timedNewsReviewStep(
+          'ensure.resolve.sanitize', () => sanitizeCurrentNewsReviewBatch(env, date, now),
+        );
+      } catch (retryError) {
+        const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
+        if (retryMessage === 'news_review_batch_not_found') {
+          return response({ ok: false, error: 'review_batch_not_found' }, 404);
+        }
+        throw retryError;
       }
-      throw error;
     }
     const active = sanitized.batch;
     const activeToken = await createNewsReviewToken(newsReviewSecret(env), date, active.batch_id);

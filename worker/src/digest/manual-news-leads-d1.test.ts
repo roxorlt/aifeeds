@@ -6713,3 +6713,93 @@ describe('一步录入端到端：真链接 → 真加工 → 真入池', () => 
     expect(String(row.content_stage_detail)).toContain('生成');
   });
 });
+
+describe('ensure batch merged by the scheduled 07:50 freeze', () => {
+  /** 07:50 的全量重建会把新的一批候选写进同一个槽。这里只做那一步的数据面。 */
+  function rewriteAutomaticPool(state: { db: SqliteD1 }, poolNumbers: number[]): string[] {
+    const feed = FEED_REGISTRY.find((entry) => entry.id === 'blog:anthropic');
+    if (!feed) throw new Error('Anthropic feed fixture missing');
+    const candidates = poolNumbers.map((poolNumber, rank) => {
+      const sourceId = `${feed.key}:pool-${poolNumber}`;
+      const itemId = `blog:${sourceId}`;
+      const title = `自动候选${poolNumber}`;
+      const summary = `自动摘要${poolNumber}`;
+      const url = `https://www.anthropic.com/news/pool-${poolNumber}`;
+      state.db.sqlite.prepare(`INSERT OR IGNORE INTO items (
+        id, source_type, source_id, source_ref, title, content, content_translated, author,
+        url, published_at, scraped_at, is_relevant, matched_by, lang, extra, deleted_at
+      ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, '2026-08-28T00:00:00.000Z',
+        '2026-08-28T00:00:00.000Z', 1, 'feed', 'zh', ?, NULL)`).run(
+        itemId, feed.kind, sourceId, title, summary, summary, feed.name, url,
+        JSON.stringify({
+          feed_id: feed.id, feed_key: feed.key, editorial_type: feed.editorial_type,
+          title_zh: title, ai_summary_zh: summary, source_company: feed.name,
+        }),
+      );
+      return {
+        item_id: itemId, title, summary, source: feed.name, score: 100 - rank, url,
+        published_at: '2026-08-28T00:00:00.000Z',
+      };
+    });
+    state.db.sqlite.prepare(`UPDATE digest_pool SET item_ids = ?, items_meta = ?, generated_at = 2
+      WHERE slot_key = '2026-08-28-08' AND source = 'news' AND density = 'normal'`).run(
+      JSON.stringify(candidates.slice(0, 5).map((candidate) => candidate.item_id)),
+      JSON.stringify({
+        candidate_ids_after_exact_dedup: candidates.map((candidate) => candidate.item_id),
+        candidates: candidates.map((candidate, index) => ({
+          rank: index + 1, id: candidate.item_id, title: candidate.title,
+          title_zh: candidate.title, source_company: candidate.source,
+          adjusted_score: candidate.score,
+        })),
+      }),
+    );
+    return candidates.map((candidate) => candidate.item_id);
+  }
+
+  test('keeps the human selection and the manual lead while merging the newly rebuilt candidates', async () => {
+    const state = await sourceSupportFixture();
+    installSourceSupportReviewSchema(state);
+    state.db.sqlite.prepare(`DELETE FROM daily_news_review_batches
+      WHERE review_date = '2026-08-28'`).run();
+    installSourceSupportAutomaticPool(state, null);
+
+    // ① 06:xx「随时开审」:ensure 走的就是这一个函数,从池子冻出当天第一批。
+    const early = await freezeNewsReviewBatchFromPool(state.env, '2026-08-28', 100);
+    expect(early.batch.candidates).toHaveLength(10);
+
+    // ② owner 选 5 条 —— 刻意不是默认前 5,好验证人审顺序被原样继承。
+    const humanSelection = [1, 3, 5, 7, 9].map((index) => `blog:anthropic:pool-${index}`);
+    state.db.sqlite.prepare(`UPDATE daily_news_review_batches
+      SET applied_selected_ids = ?, selection_hash = ?, edit_revision = 2,
+        publish_status = 'published', human_reviewed = 1
+      WHERE review_date = '2026-08-28' AND is_current = 1`).run(
+      JSON.stringify(humanSelection), await newsReviewSelectionHash(humanSelection),
+    );
+
+    // ③ 建批之后再录一条补录并确认(今天的做法:产生一个新修订并入,已选不动)。
+    await new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 1)
+      .saveSourceSupportedCandidate(state.leadId, 4, state.payload);
+    const manualItemId = `blog:manual:${state.leadId}`;
+
+    // ④ 07:50 正式重建换了一批候选(pool-11 / pool-12 全新,顺序也变了),再冻结一次。
+    const refreshed = rewriteAutomaticPool(state, [11, 1, 3, 12, 5, 7, 9, 8, 10, 2]);
+    const refrozen = await freezeNewsReviewBatchFromPool(state.env, '2026-08-28', 200);
+
+    // 已选 5 条原样保留(顺序不变、没有被自动排序踢掉)。
+    expect(refrozen.batch.applied_selected_ids).toEqual(humanSelection);
+    expect(refrozen.batch.human_reviewed).toBe(true);
+    expect(refrozen.batch.auto_repaired_invalid_ids).toEqual([]);
+    expect(refrozen.batch.publish_status).toBe('published');
+    // 补录仍在批次里,身份没变。
+    expect(refrozen.batch.candidates.find((candidate) => candidate.item_id === manualItemId))
+      .toMatchObject({ origin: 'manual_lead', lead_id: state.leadId });
+    // 新候选并入:本轮池子的 10 条一条不少,补录仍排在末尾,已选 5 条排在最前且顺序不变。
+    expect(new Set(refrozen.batch.candidate_ids)).toEqual(new Set([...refreshed, manualItemId]));
+    expect(refrozen.batch.candidate_ids.slice(0, humanSelection.length)).toEqual(humanSelection);
+    expect(refrozen.batch.candidate_ids.at(-1)).toBe(manualItemId);
+    expect(refrozen.batch.candidate_ids).toEqual(expect.arrayContaining([
+      'blog:anthropic:pool-11', 'blog:anthropic:pool-12',
+    ]));
+    expect(refrozen.batch.batch_revision).toBeGreaterThan(early.batch.batch_revision);
+  });
+});

@@ -132,6 +132,12 @@ import { checkStagedDailyStages } from './digest/staged-stage-monitor';
 import { handleDailyNewsReviewApi, reconcileDailyNewsReviewPublication } from './digest/news-review-api';
 import { handleManualNewsLeadsApi } from './digest/manual-news-leads-api';
 import { freezeNewsReviewBatchFromPool, markNewsReviewPublished, notifyNewsReviewBatch } from './digest/news-review';
+import {
+  handleHotNewsRequest,
+  hotNewsCorsHeaders,
+  isHotNewsRequestPath,
+  runHotNewsSnapshot,
+} from './digest/hot-news';
 import { isSeoPath, handleSeoRoute } from './seo-routes';
 import { handleItemRoute } from './seo/item-routes';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
@@ -695,6 +701,17 @@ async function runScheduledSourceAction(env: Env, action: SourceCronAction): Pro
       console.log('[cron] hf-pending-drain:', JSON.stringify(result));
       return;
     }
+    case 'hot-news-snapshot': {
+      // 每 30 分钟重算一份对外热榜快照（纯打分层，零大模型调用）。
+      // 失败也要留痕:公开端点读不到快照时只会 503,唯一能看出「为什么没榜」的地方就是 cron_runs。
+      const result = await recordCronRun(
+        env,
+        { name: 'hot-news-snapshot', source: 'common', category: 'system' },
+        () => runHotNewsSnapshot(env),
+      );
+      console.log('[cron] hot-news-snapshot:', JSON.stringify(result));
+      return;
+    }
     case 'source-readiness-snapshot': {
       const result = await getSourceReadiness(env);
       console.log('[cron] source-readiness-snapshot:', JSON.stringify(result));
@@ -831,6 +848,11 @@ export default {
 
     // CORS preflight
     if (request.method === 'OPTIONS') {
+      // 公开热榜是只读、无鉴权、无 credentials 的接口，预检也要放开到 `*`，
+      // 否则第三方页面的跨域 fetch 在预检这一步就被浏览器拒了。
+      if (isHotNewsRequestPath(url.hostname, path)) {
+        return new Response(null, { status: 204, headers: hotNewsCorsHeaders() });
+      }
       return new Response(null, { status: 204, headers: corsHeaders(request, env) });
     }
 
@@ -846,6 +868,9 @@ export default {
       const viaRelay = request.headers.get('X-Origin-Secret') === env.ORIGIN_SECRET;
       const exempt =
         url.hostname === 'admin.ai-feeds.com' ||
+        // hot.ai-feeds.com 是 Custom Domain 直连(同 admin./image-api.),不经香港中转,
+        // 拿不到 X-Origin-Secret;只豁免热榜自己的路径,该 host 上的其它路径照旧 403。
+        isHotNewsRequestPath(url.hostname, path) ||
         path === '/api/webhook/resend' ||
         path === '/api/digest/return' ||
         isHomeRendererRequest(request, env.HOME_RENDERER_TOKEN) ||
@@ -875,7 +900,7 @@ export default {
     //
     // 公开 SEO 路由(/daily/* /robots.txt /sitemap.xml /llms.txt /<indexnow-key>.txt)也豁免:
     // 决策 5 全放,让搜索引擎 / AI 检索 / 训练爬虫全部可达,放行策略统一收口 robots.txt(见 isSeoPath)。
-    if (!isBotGateExempt(path, request.method) && !isSeoPath(path)) {
+    if (!isBotGateExempt(path, request.method, url.hostname) && !isSeoPath(path)) {
       const hasDevBypass =
         !!env.DEV_TOKEN && request.headers.get('X-Dev-Token') === env.DEV_TOKEN;
       if (!hasDevBypass) {
@@ -895,6 +920,15 @@ export default {
     }
 
     try {
+      // ─── 公开要闻热榜(hot.ai-feeds.com)────────────────────────────
+      // 本项目第一处按 host 分发路径:hot host 上的 `/` 与 `/news` 跟
+      // `/api/hot/news` 是同一个 handler(后者在 api. 上也可用,经中转,内部调试)。
+      // 放在所有路由之前,免得 hot host 的 `/` 被 SEO / 首页那套逻辑接走。
+      // handler 只读 KV / D1 快照,任何分支都不现算。
+      if (isHotNewsRequestPath(url.hostname, path)) {
+        return await handleHotNewsRequest(request, env);
+      }
+
       // Mainland static mirror sync. This is the first route handler because
       // its HMAC must run before query parsing and any D1/R2 access.
       const ccSyncResponse = await handleCcSyncRoute(request, env);
@@ -4509,6 +4543,12 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     const result = await runCleanup(env, retentionDays);
     return jsonResponse(result, 200, request, env);
   }
+  // mode='hot-news-snapshot' — 手动重算行业要闻热榜快照(上线预热 / cron 漏跑时补算)。
+  // 与 cron 走同一段代码;公开读路径永远不会触发它。
+  if (mode === 'hot-news-snapshot') {
+    const result = await runHotNewsSnapshot(env);
+    return jsonResponse(result, 200, request, env);
+  }
   // mode='hf-daily-fetch' — HF Daily Papers 抓取(Bearer INGEST_TOKEN 绕 CF Access)
   // 跟 /api/admin/hf-fetch-now 等价,但走 enrich/run 路径方便 OPS 跑批
   // query params:force=1 跳 sentinel / date=YYYY-MM-DD 指定 BJT 日期
@@ -6151,8 +6191,11 @@ function isBlockedBot(ua: string): boolean {
 //   2. Public read-only endpoints used by dashboard + open visitors.
 //      Content is publicly crawlable anyway, so blocking curl/python-requests
 //      here breaks BE/OPS smoke tests without any security benefit.
-function isBotGateExempt(path: string, method: string): boolean {
+function isBotGateExempt(path: string, method: string, hostname = ''): boolean {
   if (path === '/api/ingest' || path === '/api/track') return true;
+  // 公开热榜整个 host 与 /api/hot/news 路径都豁免:这个接口本来就欢迎 curl / 脚本 /
+  // RSS 阅读器这类非浏览器 UA,UA 闸只会挡掉正当调用方,挡不住任何东西。
+  if (isHotNewsRequestPath(hostname, path)) return true;
   if (path === PUBLICATION_CAPACITY_ACTIVATION_PATH) return true;
   // Dedicated server-to-server HMAC is the only gate for this namespace.
   // The exemption is prefix-scoped; handleCcSyncRoute still authenticates

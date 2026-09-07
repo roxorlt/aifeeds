@@ -5,6 +5,7 @@ export type SourceCronAction =
   | 'hdx-auto-drain'
   | 'hf-daily-fetch'
   | 'hf-pending-drain'
+  | 'hot-news-snapshot'
   | 'podcast-fetch'
   | 'podcast-workflow-recovery'
   | 'publication-capacity-warning-drain'
@@ -52,6 +53,10 @@ export function routeSourceCronActions(slot: UtcCronSlot): SourceCronAction[] {
 
   // BJT 08:05, after the digest selection boundary.
   if (hour === 0 && minute === 5) actions.push('hf-daily-fetch');
+
+  // 行业要闻热榜快照:每 30 分钟一档。cron 本身是 */5,只有整点与半点这两个 tick 命中,
+  // 天然每小时两次,不需要额外的 cron_runs 去重。
+  if (minute === 0 || minute === 30) actions.push('hot-news-snapshot');
 
   if (minute === 10 || minute === 40) actions.push('github-pending-drain');
 

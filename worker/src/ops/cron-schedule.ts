@@ -309,6 +309,15 @@ export const CRON_SCHEDULE: CronTaskDef[] = [
     description: '翻译失败率 + X metrics 覆盖率检查 (UTC 23:00,与 warning-digest 同 tick)',
   },
   {
+    name: 'hot-news-snapshot',
+    source: 'common',
+    category: 'system',
+    label: '要闻热榜快照',
+    bjt_times: ['*:00', '*:30'],
+    frequency: 'hourly-2x',
+    description: '滚动 3 天窗口纯打分选 20 条 → 覆盖写 KV + hot_news_snapshots(不调大模型)',
+  },
+  {
     name: 'ops-baseline',
     source: 'common',
     category: 'system',

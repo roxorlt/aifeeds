@@ -45,6 +45,13 @@ custom_domain = true
 pattern = "image-api.ai-feeds.com"
 custom_domain = true
 
+# 公开要闻热榜(2026-09-07)。Custom Domain 直连，不经香港中转 —— 中转会把 Host
+# 改写成 workers.dev，热榜要按 host 分发 `/` 与 `/news`，必须拿到真实 hostname。
+# 直连意味着请求不带 X-Origin-Secret，对应的门禁豁免在 index.ts 的 origin gate 里。
+[[routes]]
+pattern = "hot.ai-feeds.com"
+custom_domain = true
+
 # CF Browser Rendering 试过(2026-05-18)再 verified arxiv 对 headless 也 detect,
 # 改走 PDF parse(figure-pdf.ts,unzlibSync 修复后 92.9% per-paper 命中率)。binding 移除。
 
