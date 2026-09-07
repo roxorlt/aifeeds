@@ -93,9 +93,18 @@ describe('staged daily cron routing', () => {
     }]);
   });
 
-  test('原来的 22:30/23:50 两个时刻不再触发任何节点', () => {
+  test('原来的 22:30 时刻不再触发任何节点', () => {
     expect(routeDigestCronWorkflows(Date.parse('2026-07-20T22:30:00Z'), true)).toEqual([]);
-    expect(routeDigestCronWorkflows(Date.parse('2026-07-20T23:50:00Z'), true)).toEqual([]);
+  });
+
+  test('BJT 07:50 只在 v2 开关开着时触发 refresh-news 节点', () => {
+    // UTC 23:50 同样还在前一天，日期必须按 BJT 算成次日。
+    expect(routeDigestCronWorkflows(Date.parse('2026-07-20T23:50:00Z'), true)).toEqual([{
+      id: 'digest-node-2026-07-21-08-refresh-news',
+      params: { slotHourBjt: 8, date: '2026-07-21', dailyStage: 'refresh-news' },
+    }]);
+    // v1 回滚开关关闭时 07:50 什么都不做：08:00 的 v1 全量节点自己会重建全部源。
+    expect(routeDigestCronWorkflows(Date.parse('2026-07-20T23:50:00Z'), false)).toEqual([]);
   });
 
   test('keeps legacy 08:00/12:00/17:00 nodes and suppresses early stages when staged mode is off', () => {
@@ -457,5 +466,76 @@ describe('staged daily node run', () => {
     // 依然不做 v1 全源重建，也不推 v1 payload。
     expect(rebuildDigestPoolSource).not.toHaveBeenCalled();
     expect(pushDailyToCodex).not.toHaveBeenCalled();
+  });
+
+  // ↓ 2026-09-07 追加：BJT 07:50 单跑一个只刷新行业要闻的节点，给 08:00 的邮件用。
+  //   它跟视频那条线（06:00 已出片）必须完全不相干。
+  test('07:50 的 refresh-news 节点只重建行业要闻这一个源', async () => {
+    vi.mocked(getDailyStageState).mockImplementation(async (_env, _date, stage) => ({
+      stage, revision: 1, content_hash: `sha256:${stage}`, pushed_at: 123,
+    } as never));
+    const deliverCreate = vi.fn();
+    const prepare = vi.fn(() => ({
+      bind: vi.fn().mockReturnThis(),
+      all: vi.fn().mockResolvedValue({ results: [{ id: 7 }] }),
+    }));
+    const env = makeEnv({
+      DAILY_NEWS_REVIEW_ENABLED: '1',
+      DAILY_PAGE_ENABLED: '1',
+      DB: { prepare },
+      DIGEST_DELIVER_WORKFLOW: { create: deliverCreate },
+    });
+
+    const result = await runDigestNodeWorkflow(
+      env,
+      { slotHourBjt: 8, date: '2026-07-21', dailyStage: 'refresh-news' },
+      makeStep() as never,
+    );
+
+    // 与 05:50 editorial 同一条路径，写回当天 -08 池的 news 行。
+    expect(rebuildDigestPoolSource).toHaveBeenCalledTimes(1);
+    expect(rebuildDigestPoolSource).toHaveBeenCalledWith(env, '2026-07-21-08', 'news');
+    // 不碰阶段快照、不推送、不冻结人审批次、不出日报页、不发邮件。
+    expect(rebuildDigestPoolStage).not.toHaveBeenCalled();
+    expect(rebuildDigestPoolSubject).not.toHaveBeenCalled();
+    expect(pushDailyStageToCodex).not.toHaveBeenCalled();
+    expect(pushDailyToCodex).not.toHaveBeenCalled();
+    expect(freezeNewsReviewBatchFromPool).not.toHaveBeenCalled();
+    expect(notifyNewsReviewBatch).not.toHaveBeenCalled();
+    expect(runDailyPagePhase).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
+    expect(deliverCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ slotKey: '2026-07-21-08', subs: 0, dailyStage: 'refresh-news' });
+  });
+
+  test('已入队的 refresh-news 节点在 v2 开关被关掉后 no-op', async () => {
+    const result = await runDigestNodeWorkflow(
+      makeEnv({ DAILY_STAGED_PUSH_ENABLED: '0' }),
+      { slotHourBjt: 8, date: '2026-07-21', dailyStage: 'refresh-news' },
+      makeStep() as never,
+    );
+
+    expect(result.skipped).toBe('staged_disabled');
+    expect(rebuildDigestPoolSource).not.toHaveBeenCalled();
+    expect(pushDailyToCodex).not.toHaveBeenCalled();
+    expect(pushDailyStageToCodex).not.toHaveBeenCalled();
+  });
+
+  test('refresh-news 重建失败照旧抛出，workflow 可重试', async () => {
+    vi.mocked(rebuildDigestPoolSource).mockRejectedValue(new Error('news selector timeout'));
+    const env = makeEnv();
+
+    await expect(runDigestNodeWorkflow(
+      env,
+      { slotHourBjt: 8, date: '2026-07-21', dailyStage: 'refresh-news' },
+      makeStep() as never,
+    )).rejects.toThrow('news selector timeout');
+
+    expect(deliverCriticalAlert).toHaveBeenCalledWith(
+      env,
+      'node-run:workflow',
+      '分批日报 Workflow 失败',
+      expect.stringContaining('2026-07-21 refresh-news'),
+    );
   });
 });
