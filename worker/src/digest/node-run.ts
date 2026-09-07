@@ -1,6 +1,7 @@
 // digest-node-run workflow:12:00/17:00 订阅节点保持 v1 全量；启用 v2 分批后，日报按
 // BJT 04:30 foundation、05:50 editorial、06:00 papers+finalize（并生成 SEO 日报页）分批
-// 固化和推送，08:00 单独跑一个 deliver 节点，只负责发当日的订阅邮件。
+// 固化和推送，07:50 单跑一个 refresh-news 节点只刷新行业要闻，08:00 再单跑一个 deliver
+// 节点，只负责发当日的订阅邮件。
 
 import { WorkflowEntrypoint, WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
 import type { Env } from '../index';
@@ -24,8 +25,11 @@ import { freezeNewsReviewBatchFromPool, notifyNewsReviewBatch } from './news-rev
 export interface NodeRunParams {
   slotHourBjt: number;
   date?: string;
-  /** 'deliver' 不是 codex 阶段，是 BJT 08:00 的「只发邮件」节点。 */
-  dailyStage?: DailyCodexInputStage | 'deliver';
+  /**
+   * 'deliver' 与 'refresh-news' 都不是 codex 阶段：前者是 BJT 08:00 的「只发邮件」节点，
+   * 后者是 BJT 07:50 的「只刷新行业要闻」节点。
+   */
+  dailyStage?: DailyCodexInputStage | 'deliver' | 'refresh-news';
 }
 
 export interface DigestCronWorkflowAction {
@@ -138,6 +142,14 @@ export function routeDigestCronWorkflows(
     return [{
       id: `digest-node-${date}-08-papers`,
       params: { slotHourBjt: 8, date, dailyStage: 'papers' },
+    }];
+  }
+  // BJT 07:50：只把当天 -08 池里的行业要闻换成最新一批，给 08:00 的邮件用。
+  // 排在 06:00 出片之后，但它不推任何 stage，所以改不到已经出片的视频。
+  if (stagedEnabled && hour === 23 && minute === 50) {
+    return [{
+      id: `digest-node-${date}-08-refresh-news`,
+      params: { slotHourBjt: 8, date, dailyStage: 'refresh-news' },
     }];
   }
 
@@ -376,6 +388,27 @@ async function runDigestNodeWorkflowCore(
       await pushStageStep(env, step, date, earlyStage);
     }
     return { slotKey: `${date}-08`, subs: 0, dailyStage: earlyStage };
+  }
+  // BJT 07:50 的 refresh-news 节点：**只重建行业要闻这一个源**。
+  // 走的是 05:50 editorial 那条完全相同的 rebuildDigestPoolSource(…, 'news') 路径
+  // （默认带编辑校准），把 digest_pool 的 news 行换成 07:50 的最新内容，08:00 的 deliver
+  // 节点读同一个 `${date}-08` 池，自然就拿到新的要闻。
+  // 明确不做：不推送任何 stage（06:00 已出片的视频不受影响）、不冻结人审批次、
+  // 不生成 SEO 日报页、不发邮件。失败只影响邮件里要闻的新鲜度：抛出去让 workflow
+  // 按既有重试策略重跑，重试全败则 08:00 的邮件用 05:50 那份要闻。
+  // 与 04:30/05:50 一样只在 v2 开关开着时才成立：开关被关掉后 08:00 的 v1 全量节点
+  // 会自己重建全部源，这一轮就该 no-op，不能误降级成别的任务。
+  if (params.dailyStage === 'refresh-news') {
+    if (!stagedEnabled) {
+      return {
+        slotKey: `${date}-08`, subs: 0, dailyStage: 'refresh-news', skipped: 'staged_disabled',
+      };
+    }
+    await runStagedStepWithAlerts(
+      env, step, date, 'refresh-news', 'pool-refresh-news',
+      async () => rebuildDigestPoolSource(env, `${date}-08`, 'news'),
+    );
+    return { slotKey: `${date}-08`, subs: 0, dailyStage: 'refresh-news' };
   }
   // BJT 08:00 的 deliver 节点。这里**不看** stagedEnabled：它是当天唯一发邮件的节点，
   // 入队后开关被关掉也照发，否则那天就一封邮件都没有（v1 全量节点当天并没有被创建）。
