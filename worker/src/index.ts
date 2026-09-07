@@ -132,6 +132,7 @@ import { checkStagedDailyStages } from './digest/staged-stage-monitor';
 import { handleDailyNewsReviewApi, reconcileDailyNewsReviewPublication } from './digest/news-review-api';
 import { handleManualNewsLeadsApi } from './digest/manual-news-leads-api';
 import { freezeNewsReviewBatchFromPool, markNewsReviewPublished, notifyNewsReviewBatch } from './digest/news-review';
+import { runHotNewsSnapshot } from './digest/hot-news';
 import { isSeoPath, handleSeoRoute } from './seo-routes';
 import { handleItemRoute } from './seo/item-routes';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
@@ -693,6 +694,17 @@ async function runScheduledSourceAction(env: Env, action: SourceCronAction): Pro
         () => drainHfPending(env, { limit: 20 }),
       );
       console.log('[cron] hf-pending-drain:', JSON.stringify(result));
+      return;
+    }
+    case 'hot-news-snapshot': {
+      // 每 30 分钟重算一份对外热榜快照（纯打分层，零大模型调用）。
+      // 失败也要留痕:公开端点读不到快照时只会 503,唯一能看出「为什么没榜」的地方就是 cron_runs。
+      const result = await recordCronRun(
+        env,
+        { name: 'hot-news-snapshot', source: 'common', category: 'system' },
+        () => runHotNewsSnapshot(env),
+      );
+      console.log('[cron] hot-news-snapshot:', JSON.stringify(result));
       return;
     }
     case 'source-readiness-snapshot': {
@@ -4507,6 +4519,12 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
       365,
     );
     const result = await runCleanup(env, retentionDays);
+    return jsonResponse(result, 200, request, env);
+  }
+  // mode='hot-news-snapshot' — 手动重算行业要闻热榜快照(上线预热 / cron 漏跑时补算)。
+  // 与 cron 走同一段代码;公开读路径永远不会触发它。
+  if (mode === 'hot-news-snapshot') {
+    const result = await runHotNewsSnapshot(env);
     return jsonResponse(result, 200, request, env);
   }
   // mode='hf-daily-fetch' — HF Daily Papers 抓取(Bearer INGEST_TOKEN 绕 CF Access)
