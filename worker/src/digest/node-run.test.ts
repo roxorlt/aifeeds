@@ -72,23 +72,36 @@ function makeEnv(overrides: Record<string, unknown> = {}) {
 }
 
 describe('staged daily cron routing', () => {
-  test('routes BJT 06:30, 07:50 and 08:00 to date+stage workflow ids', () => {
-    expect(routeDigestCronWorkflows(Date.parse('2026-07-20T22:30:00Z'), true)).toEqual([{
+  test('routes BJT 04:30/05:50/06:00/08:00 to date+stage workflow ids', () => {
+    // UTC 20:30/21:50/22:00 都还在前一天，日期必须按 BJT 算成次日。
+    expect(routeDigestCronWorkflows(Date.parse('2026-07-20T20:30:00Z'), true)).toEqual([{
       id: 'digest-node-2026-07-21-08-foundation',
       params: { slotHourBjt: 8, date: '2026-07-21', dailyStage: 'foundation' },
     }]);
-    expect(routeDigestCronWorkflows(Date.parse('2026-07-20T23:50:00Z'), true)).toEqual([{
+    expect(routeDigestCronWorkflows(Date.parse('2026-07-20T21:50:00Z'), true)).toEqual([{
       id: 'digest-node-2026-07-21-08-editorial',
       params: { slotHourBjt: 8, date: '2026-07-21', dailyStage: 'editorial' },
     }]);
-    expect(routeDigestCronWorkflows(Date.parse('2026-07-21T00:00:00Z'), true)).toEqual([{
+    expect(routeDigestCronWorkflows(Date.parse('2026-07-20T22:00:00Z'), true)).toEqual([{
       id: 'digest-node-2026-07-21-08-papers',
       params: { slotHourBjt: 8, date: '2026-07-21', dailyStage: 'papers' },
     }]);
+    // BJT 08:00 只剩发邮件的 deliver 节点，workflow id 与 papers 节点不同名。
+    expect(routeDigestCronWorkflows(Date.parse('2026-07-21T00:00:00Z'), true)).toEqual([{
+      id: 'digest-node-2026-07-21-08-deliver',
+      params: { slotHourBjt: 8, date: '2026-07-21', dailyStage: 'deliver' },
+    }]);
+  });
+
+  test('原来的 22:30/23:50 两个时刻不再触发任何节点', () => {
+    expect(routeDigestCronWorkflows(Date.parse('2026-07-20T22:30:00Z'), true)).toEqual([]);
+    expect(routeDigestCronWorkflows(Date.parse('2026-07-20T23:50:00Z'), true)).toEqual([]);
   });
 
   test('keeps legacy 08:00/12:00/17:00 nodes and suppresses early stages when staged mode is off', () => {
-    expect(routeDigestCronWorkflows(Date.parse('2026-07-20T22:30:00Z'), false)).toEqual([]);
+    expect(routeDigestCronWorkflows(Date.parse('2026-07-20T20:30:00Z'), false)).toEqual([]);
+    expect(routeDigestCronWorkflows(Date.parse('2026-07-20T21:50:00Z'), false)).toEqual([]);
+    expect(routeDigestCronWorkflows(Date.parse('2026-07-20T22:00:00Z'), false)).toEqual([]);
     expect(routeDigestCronWorkflows(Date.parse('2026-07-21T00:00:00Z'), false)).toEqual([{
       id: 'digest-node-2026-07-21-08',
       params: { slotHourBjt: 8, date: '2026-07-21' },
@@ -98,7 +111,7 @@ describe('staged daily cron routing', () => {
   });
 });
 
-describe('staged 08:00 node run', () => {
+describe('staged daily node run', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(rebuildDigestPoolStage).mockResolvedValue({
@@ -119,7 +132,7 @@ describe('staged 08:00 node run', () => {
     vi.mocked(notifyNewsReviewBatch).mockResolvedValue({ notified: true, review_url: 'https://example.test/review' });
   });
 
-  test('07:50 freezes and notifies the top ten before pushing the default editorial stage', async () => {
+  test('05:50 freezes and notifies the top ten before pushing the default editorial stage', async () => {
     const env = makeEnv({ DAILY_NEWS_REVIEW_ENABLED: '1' });
 
     await runDigestNodeWorkflow(
@@ -205,7 +218,7 @@ describe('staged 08:00 node run', () => {
     )).resolves.toMatchObject({ slotKey: '2026-07-21-08', subs: 0 });
   });
 
-  test('08:00 scheduled finalize surfaces a stale locked manual editorial snapshot and retries fail closed', async () => {
+  test('06:00 scheduled finalize surfaces a stale locked manual editorial snapshot and retries fail closed', async () => {
     vi.mocked(getDailyStageState).mockImplementation(async (_env, _date, stage) => ({
       stage, revision: 1, content_hash: `sha256:${stage}`, pushed_at: 123,
     } as never));
@@ -270,20 +283,10 @@ describe('staged 08:00 node run', () => {
     expect(pushDailyToCodex).not.toHaveBeenCalled();
   });
 
-  test('finishes email and SEO phases before surfacing an exhausted staged push failure', async () => {
+  test('papers 节点先跑完 SEO 静态页,再抛出耗尽重试的 staged 推送失败', async () => {
     vi.mocked(getDailyStageState).mockResolvedValue(null);
     vi.mocked(pushDailyStageToCodex).mockResolvedValue({ ok: false, error: 'hk unavailable' } as never);
-    const deliverCreate = vi.fn();
-    const env = makeEnv({
-      DAILY_PAGE_ENABLED: '1',
-      DB: {
-        prepare: vi.fn(() => ({
-          bind: vi.fn().mockReturnThis(),
-          all: vi.fn().mockResolvedValue({ results: [{ id: 7 }] }),
-        })),
-      },
-      DIGEST_DELIVER_WORKFLOW: { create: deliverCreate },
-    });
+    const env = makeEnv({ DAILY_PAGE_ENABLED: '1' });
 
     await expect(runDigestNodeWorkflow(
       env,
@@ -291,7 +294,6 @@ describe('staged 08:00 node run', () => {
       makeStep() as never,
     )).rejects.toThrow('daily_stage_push_failed:foundation');
 
-    expect(deliverCreate).toHaveBeenCalled();
     expect(runDailyPagePhase).toHaveBeenCalledWith(env, '2026-07-21');
     expect(deliverCriticalAlert).toHaveBeenCalledWith(
       env,
@@ -337,5 +339,123 @@ describe('staged 08:00 node run', () => {
       makeStep() as never,
     )).resolves.toMatchObject({ slotKey: '2026-07-21-08' });
     expect(runDailyPagePhase).toHaveBeenCalledWith(env, '2026-07-21');
+  });
+
+  // ↓ 2026-09-07 起：视频那条线全部提前到 BJT 06:00 的 papers 节点，
+  //   邮件单独留在 BJT 08:00 的 deliver 节点。两个节点的职责必须互不重叠。
+  test('06:00 的 papers 节点不再列订阅，也不 spawn 邮件投递', async () => {
+    vi.mocked(getDailyStageState).mockImplementation(async (_env, _date, stage) => ({
+      stage, revision: 1, content_hash: `sha256:${stage}`, pushed_at: 123,
+    } as never));
+    const deliverCreate = vi.fn();
+    const prepare = vi.fn(() => ({
+      bind: vi.fn().mockReturnThis(),
+      all: vi.fn().mockResolvedValue({ results: [{ id: 7 }, { id: 9 }] }),
+    }));
+    const env = makeEnv({
+      DAILY_PAGE_ENABLED: '1',
+      DB: { prepare },
+      DIGEST_DELIVER_WORKFLOW: { create: deliverCreate },
+    });
+
+    const result = await runDigestNodeWorkflow(
+      env,
+      { slotHourBjt: 8, date: '2026-07-21', dailyStage: 'papers' },
+      makeStep() as never,
+    );
+
+    expect(deliverCreate).not.toHaveBeenCalled();
+    // 连订阅都不查：BJT 06:00 这一轮跟邮件彻底无关。
+    expect(prepare).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ subs: 0, dailyStage: 'papers' });
+    // 视频与 SEO 仍然归它：三阶段推送 + finalize + 日报页照旧。
+    expect(vi.mocked(pushDailyStageToCodex).mock.calls.map((call) => call[1])).toEqual(['papers', 'finalize']);
+    expect(runDailyPagePhase).toHaveBeenCalledWith(env, '2026-07-21');
+  });
+
+  test('08:00 的 deliver 节点只发邮件：不推 stage、不冻结人审批次、不生成日报页', async () => {
+    vi.mocked(getDailyStageState).mockImplementation(async (_env, _date, stage) => ({
+      stage, revision: 1, content_hash: `sha256:${stage}`, pushed_at: 123,
+    } as never));
+    const deliverCreate = vi.fn();
+    const env = makeEnv({
+      DAILY_NEWS_REVIEW_ENABLED: '1',
+      DAILY_PAGE_ENABLED: '1',
+      DB: {
+        prepare: vi.fn(() => ({
+          bind: vi.fn().mockReturnThis(),
+          all: vi.fn().mockResolvedValue({ results: [{ id: 7 }, { id: 9 }] }),
+        })),
+      },
+      DIGEST_DELIVER_WORKFLOW: { create: deliverCreate },
+    });
+
+    const result = await runDigestNodeWorkflow(
+      env,
+      { slotHourBjt: 8, date: '2026-07-21', dailyStage: 'deliver' },
+      makeStep() as never,
+    );
+
+    expect(result).toMatchObject({ slotKey: '2026-07-21-08', subs: 2, dailyStage: 'deliver' });
+    expect(deliverCreate).toHaveBeenCalledTimes(2);
+    expect(deliverCreate).toHaveBeenCalledWith({
+      id: 'digest-2026-07-21-08-7',
+      params: { subId: 7, slotKey: '2026-07-21-08' },
+    });
+    expect(pushDailyStageToCodex).not.toHaveBeenCalled();
+    expect(pushDailyToCodex).not.toHaveBeenCalled();
+    expect(freezeNewsReviewBatchFromPool).not.toHaveBeenCalled();
+    expect(notifyNewsReviewBatch).not.toHaveBeenCalled();
+    expect(runDailyPagePhase).not.toHaveBeenCalled();
+    expect(rebuildDigestPoolStage).not.toHaveBeenCalled();
+    expect(rebuildDigestPoolSource).not.toHaveBeenCalled();
+  });
+
+  test('deliver 节点在 papers 快照缺失时补建，但仍然不推送', async () => {
+    vi.mocked(getDailyStageState).mockImplementation(async (_env, _date, stage) => (
+      stage === 'papers'
+        ? null
+        : { stage, revision: 1, content_hash: `sha256:${stage}`, pushed_at: 123 } as never
+    ));
+    const env = makeEnv({ DAILY_PAGE_ENABLED: '1' });
+
+    await runDigestNodeWorkflow(
+      env,
+      { slotHourBjt: 8, date: '2026-07-21', dailyStage: 'deliver' },
+      makeStep() as never,
+    );
+
+    expect(vi.mocked(rebuildDigestPoolStage).mock.calls.map((call) => call[1].stage)).toEqual(['papers']);
+    expect(pushDailyStageToCodex).not.toHaveBeenCalled();
+    expect(runDailyPagePhase).not.toHaveBeenCalled();
+  });
+
+  test('deliver 节点在 v2 开关被关掉后仍然照发邮件（当天没有别的节点发）', async () => {
+    vi.mocked(getDailyStageState).mockImplementation(async (_env, _date, stage) => ({
+      stage, revision: 1, content_hash: `sha256:${stage}`, pushed_at: 123,
+    } as never));
+    const deliverCreate = vi.fn();
+    const env = makeEnv({
+      DAILY_STAGED_PUSH_ENABLED: '0',
+      DB: {
+        prepare: vi.fn(() => ({
+          bind: vi.fn().mockReturnThis(),
+          all: vi.fn().mockResolvedValue({ results: [{ id: 7 }] }),
+        })),
+      },
+      DIGEST_DELIVER_WORKFLOW: { create: deliverCreate },
+    });
+
+    const result = await runDigestNodeWorkflow(
+      env,
+      { slotHourBjt: 8, date: '2026-07-21', dailyStage: 'deliver' },
+      makeStep() as never,
+    );
+
+    expect(result.skipped).toBeUndefined();
+    expect(deliverCreate).toHaveBeenCalledTimes(1);
+    // 依然不做 v1 全源重建，也不推 v1 payload。
+    expect(rebuildDigestPoolSource).not.toHaveBeenCalled();
+    expect(pushDailyToCodex).not.toHaveBeenCalled();
   });
 });

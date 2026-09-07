@@ -34,12 +34,13 @@ export interface StagedStageDeadline {
   snapshotOnly?: false;
 }
 
-// 计划时刻见 routeDigestCronWorkflows:BJT 06:30 foundation / 07:50 editorial / 08:00 papers+finalize。
+// 计划时刻见 routeDigestCronWorkflows:BJT 04:30 foundation / 05:50 editorial / 06:00 papers+finalize。
+// BJT 08:00 的 deliver 节点只发邮件、不产生阶段快照,因此不在这张表里。
 export const STAGED_STAGE_DEADLINES: readonly StagedStageDeadline[] = [
-  { stage: 'foundation', dueMinuteBjt: 6 * 60 + 30, graceMinutes: 15, requiresPush: true },
-  { stage: 'editorial', dueMinuteBjt: 7 * 60 + 50, graceMinutes: 10, requiresPush: true },
-  { stage: 'papers', dueMinuteBjt: 8 * 60, graceMinutes: 20, requiresPush: true },
-  { stage: 'finalize', dueMinuteBjt: 8 * 60, graceMinutes: 25, requiresPush: true },
+  { stage: 'foundation', dueMinuteBjt: 4 * 60 + 30, graceMinutes: 15, requiresPush: true },
+  { stage: 'editorial', dueMinuteBjt: 5 * 60 + 50, graceMinutes: 10, requiresPush: true },
+  { stage: 'papers', dueMinuteBjt: 6 * 60, graceMinutes: 20, requiresPush: true },
+  { stage: 'finalize', dueMinuteBjt: 6 * 60, graceMinutes: 25, requiresPush: true },
 ];
 
 export interface StagedStageCheck {

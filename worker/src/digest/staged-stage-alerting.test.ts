@@ -1,6 +1,6 @@
 // 分批日报阶段告警 + 连坐解耦(2026-09-02 事故修复)。
 //
-// 事故形状:07:50 行业要闻批次重建连败 3 次、08:00 回补再败 3 次,六连败**零告警**,
+// 事故形状:行业要闻批次重建连败 3 次、次一阶段回补再败 3 次,六连败**零告警**,
 // 且 editorial 回补失败把 papers 重建/推送、订阅邮件、SEO 静态页一起带停,owner 08:45 自己发现。
 //
 // 本文件钉两件事:
@@ -132,7 +132,7 @@ beforeEach(() => {
 });
 
 describe('① staged 阶段失败告警', () => {
-  test('07:50 editorial 重建第 1 次失败就发告警,不等重试耗尽', async () => {
+  test('05:50 editorial 重建第 1 次失败就发告警,不等重试耗尽', async () => {
     const step = makeRetryingStep();
     let firstAlertAtAttempt = -1;
     vi.mocked(rebuildDigestPoolStage).mockRejectedValue(new Error('D1_ERROR: exceeded CPU limit'));
@@ -271,7 +271,24 @@ describe('② 连坐解耦:papers 独立于 editorial', () => {
     expect(vi.mocked(pushDailyStageToCodex).mock.calls.map((call) => call[1])).toContain('papers');
   });
 
-  test('editorial 失败不再连坐掉订阅邮件与 SEO 静态页', async () => {
+  test('editorial 失败不再连坐掉 SEO 静态页(06:00 的 papers 节点)', async () => {
+    vi.mocked(getDailyStageState).mockResolvedValue(null);
+    vi.mocked(rebuildDigestPoolStage).mockImplementation(async (_env, opts) => {
+      if ((opts as { stage: string }).stage === 'editorial') throw new Error('editorial down');
+      return { slotKey: `${DATE}-08`, date: DATE, slotHourBjt: 8, stage: 'papers', sources: [], subject: 's' } as never;
+    });
+    const env = makeEnv({ DAILY_PAGE_ENABLED: '1' });
+
+    await expect(runDigestNodeWorkflow(
+      env, { slotHourBjt: 8, date: DATE, dailyStage: 'papers' }, makeStep() as never,
+    )).rejects.toThrow('editorial down');
+
+    expect(runDailyPagePhase).toHaveBeenCalledWith(env, DATE);
+  });
+
+  test('editorial 失败也不连坐掉订阅邮件(08:00 的 deliver 节点)', async () => {
+    // 2026-09-07 拆分后邮件搬到了 08:00 的 deliver 节点,9/2 的解耦语义必须在那边同样成立:
+    // 前批快照回补失败只记账,邮件照发,错误等 spawn 完再抛。
     vi.mocked(getDailyStageState).mockResolvedValue(null);
     vi.mocked(rebuildDigestPoolStage).mockImplementation(async (_env, opts) => {
       if ((opts as { stage: string }).stage === 'editorial') throw new Error('editorial down');
@@ -290,11 +307,12 @@ describe('② 连坐解耦:papers 独立于 editorial', () => {
     });
 
     await expect(runDigestNodeWorkflow(
-      env, { slotHourBjt: 8, date: DATE, dailyStage: 'papers' }, makeStep() as never,
+      env, { slotHourBjt: 8, date: DATE, dailyStage: 'deliver' }, makeStep() as never,
     )).rejects.toThrow('editorial down');
 
     expect(deliverCreate).toHaveBeenCalledTimes(2);
-    expect(runDailyPagePhase).toHaveBeenCalledWith(env, DATE);
+    // deliver 节点自己不推 stage、不生成日报页。
+    expect(runDailyPagePhase).not.toHaveBeenCalled();
   });
 
   test('人审批次冻结失败也不连坐 papers', async () => {

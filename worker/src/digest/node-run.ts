@@ -1,5 +1,6 @@
-// digest-node-run workflow:订阅节点继续负责邮件/SEO；日报视频在启用 v2 后额外按
-// BJT 06:30 foundation、07:50 editorial、08:00 papers+finalize 分批固化和推送。
+// digest-node-run workflow:12:00/17:00 订阅节点保持 v1 全量；启用 v2 分批后，日报按
+// BJT 04:30 foundation、05:50 editorial、06:00 papers+finalize（并生成 SEO 日报页）分批
+// 固化和推送，08:00 单独跑一个 deliver 节点，只负责发当日的订阅邮件。
 
 import { WorkflowEntrypoint, WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
 import type { Env } from '../index';
@@ -23,7 +24,8 @@ import { freezeNewsReviewBatchFromPool, notifyNewsReviewBatch } from './news-rev
 export interface NodeRunParams {
   slotHourBjt: number;
   date?: string;
-  dailyStage?: DailyCodexInputStage;
+  /** 'deliver' 不是 codex 阶段，是 BJT 08:00 的「只发邮件」节点。 */
+  dailyStage?: DailyCodexInputStage | 'deliver';
 }
 
 export interface DigestCronWorkflowAction {
@@ -109,7 +111,7 @@ async function runStagedStepWithAlerts<T>(
 }
 
 // 复用现有 */5 cron，不增加 wrangler trigger。scheduledTime 是 UTC；日期必须按
-// BJT 计算，否则 06:30/07:50 会被错误写到前一日。
+// BJT 计算，否则 04:30/05:50/06:00 会被错误写到前一日（UTC 20:30/21:50/22:00 都还在前一天）。
 export function routeDigestCronWorkflows(
   scheduledTime: number,
   stagedEnabled: boolean,
@@ -119,16 +121,23 @@ export function routeDigestCronWorkflows(
   const minute = utc.getUTCMinutes();
   const date = bjtDateStr(scheduledTime);
 
-  if (stagedEnabled && hour === 22 && minute === 30) {
+  if (stagedEnabled && hour === 20 && minute === 30) {
     return [{
       id: `digest-node-${date}-08-foundation`,
       params: { slotHourBjt: 8, date, dailyStage: 'foundation' },
     }];
   }
-  if (stagedEnabled && hour === 23 && minute === 50) {
+  if (stagedEnabled && hour === 21 && minute === 50) {
     return [{
       id: `digest-node-${date}-08-editorial`,
       params: { slotHourBjt: 8, date, dailyStage: 'editorial' },
+    }];
+  }
+  // BJT 06:00：papers + finalize + SEO 日报页，视频到这一步就能出片；邮件不在这里发。
+  if (stagedEnabled && hour === 22 && minute === 0) {
+    return [{
+      id: `digest-node-${date}-08-papers`,
+      params: { slotHourBjt: 8, date, dailyStage: 'papers' },
     }];
   }
 
@@ -136,7 +145,8 @@ export function routeDigestCronWorkflows(
     ? ({ 0: 8, 4: 12, 9: 17 } as Record<number, number>)[hour]
     : undefined;
   if (slotHourBjt === undefined) return [];
-  const dailyStage = stagedEnabled && slotHourBjt === 8 ? 'papers' as const : undefined;
+  // BJT 08:00：v2 分批下只剩发邮件；v1 回滚开关关闭时仍是原来那个全量节点（含邮件）。
+  const dailyStage = stagedEnabled && slotHourBjt === 8 ? 'deliver' as const : undefined;
   return [{
     id: `digest-node-${date}-${String(slotHourBjt).padStart(2, '0')}${dailyStage ? `-${dailyStage}` : ''}`,
     params: { slotHourBjt, date, ...(dailyStage ? { dailyStage } : {}) },
@@ -188,7 +198,7 @@ async function prepareNewsReviewStep(
     });
   } catch (error) {
     // 审核通知失败不能阻断默认 Top5 的海报/音频/视频生产。批次仍保留
-    // notified_at=NULL，08:00 恢复步骤和人工运维可继续补发。
+    // notified_at=NULL，06:00 恢复步骤和人工运维可继续补发。
     await deliverCriticalAlert(
       env,
       'node-run:notify-news-review-batch',
@@ -219,7 +229,7 @@ async function ensurePriorStageSnapshots(
       });
       if (!state) await rebuildStageStep(env, step, date, stage);
     } catch (error) {
-      // 9/2 连坐点①:这里一抛,papers 重建 + 列订阅 + 发邮件 + SEO 静态页全部跟着停。
+      // 9/2 连坐点①:这里一抛,papers 重建 + SEO 静态页(以及 deliver 节点的邮件)全部跟着停。
       // 改成记账继续,阶段错误在本次运行末尾统一抛出,workflow 仍然保持失败可重试。
       const summary = `${stage}-snapshot: ${errorSummary(error)}`;
       outcome[stage] = { ok: false, error: summary };
@@ -254,6 +264,93 @@ async function recoverPriorStagePushes(
   return outcome;
 }
 
+async function listSlotSubscriptions(
+  env: Env,
+  step: WorkflowStep,
+  slotHourBjt: number,
+): Promise<number[]> {
+  return step.do('list-subs', RETRY, async (): Promise<number[]> => {
+    const result = await env.DB.prepare(
+      `SELECT id FROM subscriptions WHERE status = 'active' AND send_slot = ?`,
+    )
+      .bind(slotHourBjt)
+      .all<{ id: number }>();
+    return (result.results || []).map((subscription) => subscription.id);
+  });
+}
+
+async function spawnDeliverWorkflows(
+  env: Env,
+  step: WorkflowStep,
+  sk: string,
+  subIds: number[],
+): Promise<void> {
+  for (const subId of subIds) {
+    await step.do(`spawn-deliver-${subId}`, RETRY, async (): Promise<number> => {
+      await env.DIGEST_DELIVER_WORKFLOW.create({
+        id: `digest-${sk}-${subId}`,
+        params: { subId, slotKey: sk },
+      });
+      return subId;
+    });
+  }
+}
+
+/**
+ * BJT 08:00 的 deliver 节点:**只发订阅邮件**。
+ *
+ * 视频那条线(papers 重建 / 三阶段推送 / finalize / SEO 日报页)已经在 06:00 的 papers
+ * 节点跑完,这里不推任何 stage、不冻结人审批次、不生成日报页 —— 只保证邮件消费的
+ * 同一个 -08 池是全的:缺哪批快照就补建哪批,补建**不做任何外部推送**,
+ * 免得 HK 故障反过来把邮件卡住。
+ *
+ * 错误记账语义与 06:00 节点一致:阶段失败只记账,等订阅邮件都 spawn 完再统一抛出,
+ * workflow 仍然保持失败可重试。
+ */
+async function runDeliverNodeCore(
+  env: Env,
+  params: NodeRunParams,
+  step: WorkflowStep,
+  date: string,
+  sk: string,
+): Promise<NodeRunResult> {
+  const stageFailures: string[] = [];
+  let firstStageError: unknown = null;
+
+  const snapshotOutcome = await ensurePriorStageSnapshots(env, step, date, stageFailures);
+  if (!snapshotOutcome.foundation.ok && !firstStageError) {
+    firstStageError = new Error(snapshotOutcome.foundation.error);
+  }
+  if (!snapshotOutcome.editorial.ok && !firstStageError) {
+    firstStageError = new Error(snapshotOutcome.editorial.error);
+  }
+  // papers 同理:06:00 那一轮若没能把论文快照落盘,这里补建(仍然不推送),
+  // 否则邮件会整块少掉论文栏目。
+  try {
+    const papersState = await step.do('check-codex-papers', RETRY, async () => {
+      return getDailyStageState(env, date, 'papers');
+    });
+    if (!papersState) await rebuildStageStep(env, step, date, 'papers');
+  } catch (error) {
+    const summary = `papers-snapshot: ${errorSummary(error)}`;
+    stageFailures.push(summary);
+    if (!firstStageError) firstStageError = error;
+    console.error(`[node-run] ${date} papers snapshot failed:`, summary);
+  }
+
+  const subIds = await listSlotSubscriptions(env, step, params.slotHourBjt);
+  await spawnDeliverWorkflows(env, step, sk, subIds);
+
+  if (firstStageError) throw firstStageError;
+
+  return {
+    slotKey: sk,
+    subs: subIds.length,
+    dailyStage: 'deliver',
+    ...(stageFailures.length ? { stageFailures } : {}),
+  };
+}
+
 async function runDigestNodeWorkflowCore(
   env: Env,
   params: NodeRunParams,
@@ -267,7 +364,7 @@ async function runDigestNodeWorkflowCore(
     ? params.dailyStage
     : null;
 
-  // 06:30/07:50 是纯预生产批次：不列订阅、不发邮件、不生成 SEO。
+  // 04:30/05:50 是纯预生产批次：不列订阅、不发邮件、不生成 SEO。
   // 若 workflow 已入队后开关被关闭，必须 no-op，不能误降级成 08:00 v1 全量任务。
   if (earlyStage && !stagedEnabled) {
     return { slotKey: `${date}-08`, subs: 0, dailyStage: earlyStage, skipped: 'staged_disabled' };
@@ -280,6 +377,11 @@ async function runDigestNodeWorkflowCore(
     }
     return { slotKey: `${date}-08`, subs: 0, dailyStage: earlyStage };
   }
+  // BJT 08:00 的 deliver 节点。这里**不看** stagedEnabled：它是当天唯一发邮件的节点，
+  // 入队后开关被关掉也照发，否则那天就一封邮件都没有（v1 全量节点当天并没有被创建）。
+  if (params.dailyStage === 'deliver') {
+    return runDeliverNodeCore(env, params, step, date, sk);
+  }
 
   const stagedEight = stagedEnabled && slotHourBjt === 8;
   const stageFailures: string[] = [];
@@ -290,8 +392,8 @@ async function runDigestNodeWorkflowCore(
   };
   let snapshotOutcome = emptyStageOutcome();
   if (stagedEight) {
-    // 邮件也消费同一个 -08 池，因此缺失早批要先补快照；这里不做外部 push，
-    // 保证 HK 故障不会让邮件缺栏目或阻断投递。
+    // finalize 的 manifest 引用三阶段各自的 revision，因此缺失早批要先补快照；
+    // 这里不做外部 push，保证 HK 故障不会连坐掉 papers 与 SEO 日报页。
     // 2026-09-02 起每个前批阶段独立记账:editorial 回补失败不再把后面全部带停。
     snapshotOutcome = await ensurePriorStageSnapshots(env, step, date, stageFailures);
     if (!snapshotOutcome.foundation.ok && !firstStageError) {
@@ -300,7 +402,7 @@ async function runDigestNodeWorkflowCore(
     if (!snapshotOutcome.editorial.ok && !firstStageError) {
       firstStageError = new Error(snapshotOutcome.editorial.error);
     }
-    // 07:50 若因临时故障漏建批次或 PushDeer 未成功，08:00 以同一快照幂等补建/补发。
+    // 05:50 若因临时故障漏建批次或 PushDeer 未成功，06:00 以同一快照幂等补建/补发。
     // 人审批次依赖 editorial 快照;editorial 缺失时它注定失败,失败也只记账不阻断 papers。
     try {
       await prepareNewsReviewStep(env, step, date);
@@ -328,30 +430,18 @@ async function runDigestNodeWorkflowCore(
     });
   }
 
-  const subIds = await step.do('list-subs', RETRY, async (): Promise<number[]> => {
-    const result = await env.DB.prepare(
-      `SELECT id FROM subscriptions WHERE status = 'active' AND send_slot = ?`,
-    )
-      .bind(slotHourBjt)
-      .all<{ id: number }>();
-    return (result.results || []).map((subscription) => subscription.id);
-  });
-
-  for (const subId of subIds) {
-    await step.do(`spawn-deliver-${subId}`, RETRY, async (): Promise<number> => {
-      await env.DIGEST_DELIVER_WORKFLOW.create({
-        id: `digest-${sk}-${subId}`,
-        params: { subId, slotKey: sk },
-      });
-      return subId;
-    });
-  }
+  // BJT 06:00 的 papers 节点只做预生产：订阅邮件由 08:00 的 deliver 节点单独负责。
+  // dailyStage 为空的节点（v1 回滚下的 08:00，以及 12:00/17:00）仍然自己列订阅、自己发。
+  const subIds = params.dailyStage === 'papers'
+    ? []
+    : await listSlotSubscriptions(env, step, slotHourBjt);
+  await spawnDeliverWorkflows(env, step, sk, subIds);
 
   let finalizeSuspended: string | null = null;
   if (slotHourBjt === 8 && env.DAILY_PUSH_ENABLED === '1') {
     if (stagedEight) {
       // 正常路径只读前两批状态。只有状态不存在或没有成功 push 标记时才补建/补推，
-      // 不在 08:00 无条件重跑 PH/GH/news/X 共享池选择器；视频推送会在其
+      // 不在 06:00 无条件重跑 PH/GH/news/X 共享池选择器；视频推送会在其
       // 专用 payload 层从 editorial 共享池中只选择 news。
       const pushOutcome = await recoverPriorStagePushes(env, step, date, stageFailures);
       if (!pushOutcome.foundation.ok && !firstStageError) {
@@ -385,7 +475,7 @@ async function runDigestNodeWorkflowCore(
           'node-run:finalize-suspended',
           '分批日报 finalize 挂起',
           `${date}: finalize 未推送,因为前置阶段缺失 [${finalizeSuspended}]。`
-          + '前置阶段补齐(或人工重跑 08:00 workflow)后 finalize 才会发出。',
+          + '前置阶段补齐(或人工重跑 06:00 workflow)后 finalize 才会发出。',
         );
       } else {
         try {
@@ -414,7 +504,7 @@ async function runDigestNodeWorkflowCore(
     }
   }
 
-  // 阶段错误在邮件与 SEO 都跑完之后统一抛出:workflow 仍然保持失败可重试,
+  // 阶段错误在邮件(v1 节点)与 SEO 都跑完之后统一抛出:workflow 仍然保持失败可重试,
   // 但不再让某一个阶段的失败连坐掉其余互不依赖的产出。
   if (firstStageError) throw firstStageError;
   if (dailyPageError) throw dailyPageError;
