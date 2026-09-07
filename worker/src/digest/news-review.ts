@@ -1013,7 +1013,12 @@ export async function loadAutomaticNewsReviewEventIdentitySidecar(
     .filter((candidate) => !isManualCandidateSnapshot(candidate))
     .map((candidate) => candidate.item_id))];
   if (!ids.length) return {};
-  if (ids.length > AUTOMATIC_NEWS_REVIEW_CANDIDATE_LIMIT) {
+  // 这里收的是「上一版批次 + 本轮候选」两个批次的并集(preserveConfirmedManualCandidates
+  // 就是这么传的),每个批次各自最多 10 条自动候选,并集最多 20 条 —— 上限按并集算,
+  // 不是按单批算。按单批算会在「先 ensure 建批、07:50 再合并新候选」这条路上直接抛错
+  // (2026-09-07 补:新旧两批只要有一条不一样,并集就 >10)。
+  // 每条候选的批次内 ≤10 由 freezeNewsReviewBatchAtGeneration 单独把关,这里只管查询规模。
+  if (ids.length > AUTOMATIC_NEWS_REVIEW_CANDIDATE_LIMIT * 2) {
     throw new Error('automatic_candidate_limit_exceeded');
   }
   const rows = await env.DB.prepare(
