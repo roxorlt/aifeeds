@@ -1478,6 +1478,27 @@ async function preserveConfirmedManualCandidates(
   return { candidates: merged.candidates, default_selected_ids: merged.default_selected_ids };
 }
 
+/**
+ * 候选不够时抛的错误。message 与历史逐字一致（调用方按 message 分支的地方不受影响），
+ * 只多挂一个 candidate_count：工作台「随时开审」要把「候选只有 N 条」原样显示给 owner，
+ * 光靠 message 数不出来。count 取候选池与默认选中集里更小的那个 —— 实际能用的条数。
+ */
+export interface NewsReviewPoolShortfallError extends Error {
+  candidate_count: number;
+}
+
+export function newsReviewPoolShortfall(message: string, candidateCount: number): NewsReviewPoolShortfallError {
+  const error = new Error(message) as NewsReviewPoolShortfallError;
+  error.candidate_count = candidateCount;
+  return error;
+}
+
+/** 从任意 error 上读候选数;不是候选不足这类错误就返回 null。 */
+export function newsReviewPoolShortfallCount(error: unknown): number | null {
+  const count = (error as Partial<NewsReviewPoolShortfallError> | null)?.candidate_count;
+  return typeof count === 'number' && Number.isFinite(count) ? count : null;
+}
+
 export async function freezeNewsReviewBatchFromPool(
   env: Env,
   date: string,
@@ -1491,14 +1512,19 @@ export async function freezeNewsReviewBatchFromPool(
     `SELECT item_ids, items_meta FROM digest_pool
      WHERE slot_key = ? AND source = 'news' AND density = 'normal'`,
   ).bind(`${date}-08`).first<{ item_ids: string; items_meta: string | null }>();
-  if (!pool) throw new Error('news_review_pool_missing');
+  if (!pool) throw newsReviewPoolShortfall('news_review_pool_missing', 0);
   const defaultIds = parseStringArray(pool.item_ids);
   const meta = parseObject(pool.items_meta);
   const candidateIdsRaw = Array.isArray(meta.candidate_ids_after_exact_dedup)
     ? meta.candidate_ids_after_exact_dedup.filter((id): id is string => typeof id === 'string')
     : defaultIds;
   const candidateIds = [...new Set(candidateIdsRaw)].slice(0, 10);
-  if (candidateIds.length < 5 || defaultIds.length < 5) throw new Error('news_review_pool_has_fewer_than_five');
+  if (candidateIds.length < 5 || defaultIds.length < 5) {
+    throw newsReviewPoolShortfall(
+      'news_review_pool_has_fewer_than_five',
+      Math.min(candidateIds.length, defaultIds.length),
+    );
+  }
 
   const auditRows = Array.isArray(meta.candidates)
     ? meta.candidates as NewsReviewPoolMetaCandidate[]

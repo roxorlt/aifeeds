@@ -151,10 +151,20 @@ export interface DigestPoolSourceResult {
   curated: number;
 }
 
+export interface RebuildDigestPoolSourceOptions {
+  /**
+   * news 源是否再过一次 DeepSeek Pro 编辑校准。默认 true = 07:50 正式节点的原行为,
+   * 一个字节都没变。只有工作台「随时开审」(ensure=1) 传 false —— 那条路要在 15 秒内
+   * 出候选,付不起一次 120 秒的 Pro 调用,少的只是校准,打分规则完全一致。
+   */
+  editorialReview?: boolean;
+}
+
 export async function rebuildDigestPoolSource(
   env: Env,
   sk: string,
   source: DigestSource,
+  options: RebuildDigestPoolSourceOptions = {},
 ): Promise<DigestPoolSourceResult> {
   const cfg = SOURCE_DIGEST_CONFIG[source];
   let newsAudit: NewsSelectionAudit | null = null;
@@ -162,7 +172,7 @@ export async function rebuildDigestPoolSource(
     ? await (async () => {
       const result = await selectNewsByScoreWithAudit(env, CURATED_CANDIDATE_POOL, {
         strictCrossDayEventDedup: true,
-        editorialReview: true,
+        editorialReview: options.editorialReview ?? true,
       });
       newsAudit = result.audit;
       return result.ids;
