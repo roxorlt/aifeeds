@@ -46,7 +46,7 @@
 - [x] ~~`published_selection` 一轮仍在完整验签侧（规格 3.3 C3）~~ → 9/6 事故实测：写路径逐条完整验签在池含 4 条补录时让确认 >20s 撞面板代理超时、选择根本没写入（规格 `2026-09-06-review-confirm-fast-authorize-spec.md`）。已改为**所有 purpose 统一批量预载**，写库 UPDATE 守卫不变
 - [ ] 一次审核确认仍要跑 7 轮授权（sanitize 2 + 选中集 + 默认选择 + 全池写守卫 + prePublish sanitize 2 + staged build 1），改批量后每轮约 1s、合计 8–9s。合并轮次（例如 submit 内复用一次 sanitize 结果）可再压到 3–4s，需要时再做
 - [x] 面板：审核确认失败中文提示（78c3c3b）+ 审核页自动跟到最新批次、补录入池后自动刷新候选区（ac7f39f、a7ef2ad）+ 自动刷新时保留未提交选择（e4cce58）已随 render release `ac0d1369…` 上线（9/7 10:51 切换 launcher，下一次出片生效）；代理 85s 已于 10:37 重启 x-card 生效
-- [x] **行业要闻滚动热榜 + 工作台随时开审**（PR #255，9/7 15:00 上 prod）：`hot.ai-feeds.com/news` 每 30 分钟快照、CORS *、公开缓存；`ensure=1` 当天无批次时只重建 news 源建批。面板 B4（代理透传 + 页面 ensure 流程）待随 render release 发布。规格 `~/.gstack/projects/roxorlt-aifeeds/roxor-main-design-20260906-233000.md`
+- [x] **行业要闻滚动热榜 + 工作台随时开审**（PR #255，9/7 15:00 上 prod）：`hot.ai-feeds.com/news` 每 30 分钟快照、CORS *、公开缓存；`ensure=1` 当天无批次时只重建 news 源建批。面板 B4 @ f7e82ec 已装面板树（x-card 15:12 重启）并打 render release 946e1954（15:13），页面下一次出片生效；建批成功路径待次日 07:50 前 owner 实际打开验证。规格 `~/.gstack/projects/roxorlt-aifeeds/roxor-main-design-20260906-233000.md`
 - [ ] 热榜/正式批次的事件聚类：同一事件两家报道（如 9/7 机器之心与 OpenAI 官网的「编码代理加速研究」）未合并、`event_source_count` 各为 1，`sameNewsEvent` 词元匹配偏严，待评估改进
 - [ ] 出片提前到 06:00（05:50 冻结、04:30 foundation、06:40 兜底）：owner 9/7 提出，待拍板两项取舍（美国下午 15–17 点消息推到次日；早间邮件跟随 06:00 还是拆节点保持 08:00）
 - [ ] 面板（dailyVideo）：08:09 同一秒派发两次 autosubmit(redo)，v1 提交后第二次跑成 v2 撞 `assertUncommittedShareWritable` 失败、driver 再重试 v3/v4（9/7 实证，无害但每天留 3 个失败 unit）。修法：派发前查已有 LIVE/排队版本或加同秒去重
