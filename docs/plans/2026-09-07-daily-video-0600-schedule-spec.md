@@ -50,3 +50,12 @@
 
 - 12:00 / 17:00 邮件节点不动；订阅页面文案「早 8 点」不动。
 - 渲染机的 `RuntimeMaxSec` / TTS 预算不动。
+
+## 7. 追加（owner 2026-09-07 17:00）：07:50 刷新行业要闻供 08:00 邮件使用
+
+- 需求原话：「7:50 还能更新一下行业热文吗，用于 8 点邮件使用」。
+- 做法：`routeDigestCronWorkflows` 在 UTC 23:50（BJT 07:50）创建 `digest-node-<date>-08-refresh-news`（`dailyStage: 'refresh-news'`，仅 `stagedEnabled`）。节点只做一件事：`rebuildDigestPoolSource(env, `${date}-08`, 'news')`（与 05:50 同一条路径，含编辑校准），把 `digest_pool` 的 news 行换成 07:50 的最新内容。
+- **不做**：不推送任何 stage（渲染机与 06:00 视频不受影响）、不 `prepareNewsReviewStep`（审核批次不因此产生新修订）、不 `generateDailyPage`、不发邮件。
+- 08:00 `deliver` 节点不改：它读 `${date}-08` 池，自然拿到 07:50 的要闻。若 07:50 节点失败，邮件用 05:50 那份，节点失败按既有 workflow 失败告警。
+- 看门狗不加 deadline（失败只影响邮件新鲜度）。
+- 测试：路由 23:50 → refresh-news（staged）/ 非 staged 返回空；节点只调 `rebuildDigestPoolSource(…, 'news')` 一次，不调 push / prepare / page / deliver。
