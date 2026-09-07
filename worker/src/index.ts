@@ -359,7 +359,7 @@ export interface Env {
   X_CARD_RENDER_ENDPOINT?: string;        // Codex 渲染端点(默认 http://${CN_RENDER_HOST}/aifeeds/api/render/x-card)
   DAILY_PUSH_ENDPOINT?: string;           // Codex 日报 ingest 端点(默认 https://ai-feeds.cc/aifeeds/api/daily/ingest)
   DAILY_PUSH_ENABLED?: string;            // 早8点自动推 Codex 总开关:'1'=开;不设/其他=关(手动 mode 不受此限)
-  DAILY_STAGED_PUSH_ENABLED?: string;     // v2 分批预生产开关:'1'=06:30/07:50/08:00 stages;关闭时保留 v1 早8点全量
+  DAILY_STAGED_PUSH_ENABLED?: string;     // v2 分批预生产开关:'1'=BJT 04:30/05:50/06:00 三阶段 + 08:00 只发邮件;关闭时保留 v1 早8点全量
   DAILY_PUSH_STAGING_ENDPOINT?: string;   // staging 专用测试 ingest；非 prod v2 只能推该端点，禁止回落生产地址
   NEWS_CODEX_PUSH?: string;               // 行业新闻板块是否推进 Codex:'1'=开;不设/其他=关(等下游 Codex 适配好 news 板块再开,翻 flag 即生效)
   DAILY_NEWS_REVIEW_SECRET?: string;       // HK 审核代理与当日审核链接共用 HMAC secret
@@ -2123,8 +2123,8 @@ export default {
       );
     }
 
-    // digest 节点复用 */5 cron。v2 开启后新增 BJT 06:30 foundation、07:50
-    // editorial，08:00 原节点转为 papers+finalize；12/17 邮件节点保持不变。
+    // digest 节点复用 */5 cron。v2 开启后按 BJT 04:30 foundation、05:50 editorial、
+    // 06:00 papers+finalize 出片，08:00 只剩一个 deliver 节点发邮件；12/17 邮件节点保持不变。
     // route 返回 date+stage 唯一 id，避免 UTC 跨日把早批写进前一天。
     const digestActions = routeDigestCronWorkflows(
       event.scheduledTime,

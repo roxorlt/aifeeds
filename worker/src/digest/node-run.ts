@@ -1,5 +1,5 @@
 // digest-node-run workflow:订阅节点继续负责邮件/SEO；日报视频在启用 v2 后额外按
-// BJT 06:30 foundation、07:50 editorial、08:00 papers+finalize 分批固化和推送。
+// BJT 04:30 foundation、05:50 editorial、06:00 papers+finalize 分批固化和推送。
 
 import { WorkflowEntrypoint, WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
 import type { Env } from '../index';
@@ -23,7 +23,8 @@ import { freezeNewsReviewBatchFromPool, notifyNewsReviewBatch } from './news-rev
 export interface NodeRunParams {
   slotHourBjt: number;
   date?: string;
-  dailyStage?: DailyCodexInputStage;
+  /** 'deliver' 不是 codex 阶段，是 BJT 08:00 的「只发邮件」节点。 */
+  dailyStage?: DailyCodexInputStage | 'deliver';
 }
 
 export interface DigestCronWorkflowAction {
@@ -109,7 +110,7 @@ async function runStagedStepWithAlerts<T>(
 }
 
 // 复用现有 */5 cron，不增加 wrangler trigger。scheduledTime 是 UTC；日期必须按
-// BJT 计算，否则 06:30/07:50 会被错误写到前一日。
+// BJT 计算，否则 04:30/05:50/06:00 会被错误写到前一日（UTC 20:30/21:50/22:00 都还在前一天）。
 export function routeDigestCronWorkflows(
   scheduledTime: number,
   stagedEnabled: boolean,
@@ -119,16 +120,23 @@ export function routeDigestCronWorkflows(
   const minute = utc.getUTCMinutes();
   const date = bjtDateStr(scheduledTime);
 
-  if (stagedEnabled && hour === 22 && minute === 30) {
+  if (stagedEnabled && hour === 20 && minute === 30) {
     return [{
       id: `digest-node-${date}-08-foundation`,
       params: { slotHourBjt: 8, date, dailyStage: 'foundation' },
     }];
   }
-  if (stagedEnabled && hour === 23 && minute === 50) {
+  if (stagedEnabled && hour === 21 && minute === 50) {
     return [{
       id: `digest-node-${date}-08-editorial`,
       params: { slotHourBjt: 8, date, dailyStage: 'editorial' },
+    }];
+  }
+  // BJT 06:00：papers + finalize + SEO 日报页，视频到这一步就能出片；邮件不在这里发。
+  if (stagedEnabled && hour === 22 && minute === 0) {
+    return [{
+      id: `digest-node-${date}-08-papers`,
+      params: { slotHourBjt: 8, date, dailyStage: 'papers' },
     }];
   }
 
@@ -136,7 +144,8 @@ export function routeDigestCronWorkflows(
     ? ({ 0: 8, 4: 12, 9: 17 } as Record<number, number>)[hour]
     : undefined;
   if (slotHourBjt === undefined) return [];
-  const dailyStage = stagedEnabled && slotHourBjt === 8 ? 'papers' as const : undefined;
+  // BJT 08:00：v2 分批下只剩发邮件；v1 回滚开关关闭时仍是原来那个全量节点（含邮件）。
+  const dailyStage = stagedEnabled && slotHourBjt === 8 ? 'deliver' as const : undefined;
   return [{
     id: `digest-node-${date}-${String(slotHourBjt).padStart(2, '0')}${dailyStage ? `-${dailyStage}` : ''}`,
     params: { slotHourBjt, date, ...(dailyStage ? { dailyStage } : {}) },
@@ -188,7 +197,7 @@ async function prepareNewsReviewStep(
     });
   } catch (error) {
     // 审核通知失败不能阻断默认 Top5 的海报/音频/视频生产。批次仍保留
-    // notified_at=NULL，08:00 恢复步骤和人工运维可继续补发。
+    // notified_at=NULL，06:00 恢复步骤和人工运维可继续补发。
     await deliverCriticalAlert(
       env,
       'node-run:notify-news-review-batch',
@@ -267,7 +276,7 @@ async function runDigestNodeWorkflowCore(
     ? params.dailyStage
     : null;
 
-  // 06:30/07:50 是纯预生产批次：不列订阅、不发邮件、不生成 SEO。
+  // 04:30/05:50 是纯预生产批次：不列订阅、不发邮件、不生成 SEO。
   // 若 workflow 已入队后开关被关闭，必须 no-op，不能误降级成 08:00 v1 全量任务。
   if (earlyStage && !stagedEnabled) {
     return { slotKey: `${date}-08`, subs: 0, dailyStage: earlyStage, skipped: 'staged_disabled' };
@@ -300,7 +309,7 @@ async function runDigestNodeWorkflowCore(
     if (!snapshotOutcome.editorial.ok && !firstStageError) {
       firstStageError = new Error(snapshotOutcome.editorial.error);
     }
-    // 07:50 若因临时故障漏建批次或 PushDeer 未成功，08:00 以同一快照幂等补建/补发。
+    // 05:50 若因临时故障漏建批次或 PushDeer 未成功，06:00 以同一快照幂等补建/补发。
     // 人审批次依赖 editorial 快照;editorial 缺失时它注定失败,失败也只记账不阻断 papers。
     try {
       await prepareNewsReviewStep(env, step, date);
@@ -351,7 +360,7 @@ async function runDigestNodeWorkflowCore(
   if (slotHourBjt === 8 && env.DAILY_PUSH_ENABLED === '1') {
     if (stagedEight) {
       // 正常路径只读前两批状态。只有状态不存在或没有成功 push 标记时才补建/补推，
-      // 不在 08:00 无条件重跑 PH/GH/news/X 共享池选择器；视频推送会在其
+      // 不在 06:00 无条件重跑 PH/GH/news/X 共享池选择器；视频推送会在其
       // 专用 payload 层从 editorial 共享池中只选择 news。
       const pushOutcome = await recoverPriorStagePushes(env, step, date, stageFailures);
       if (!pushOutcome.foundation.ok && !firstStageError) {
@@ -385,7 +394,7 @@ async function runDigestNodeWorkflowCore(
           'node-run:finalize-suspended',
           '分批日报 finalize 挂起',
           `${date}: finalize 未推送,因为前置阶段缺失 [${finalizeSuspended}]。`
-          + '前置阶段补齐(或人工重跑 08:00 workflow)后 finalize 才会发出。',
+          + '前置阶段补齐(或人工重跑 06:00 workflow)后 finalize 才会发出。',
         );
       } else {
         try {
