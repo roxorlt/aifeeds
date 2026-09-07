@@ -48,7 +48,8 @@
 - [x] 面板：审核确认失败中文提示（78c3c3b）+ 审核页自动跟到最新批次、补录入池后自动刷新候选区（ac7f39f、a7ef2ad）+ 自动刷新时保留未提交选择（e4cce58）已随 render release `ac0d1369…` 上线（9/7 10:51 切换 launcher，下一次出片生效）；代理 85s 已于 10:37 重启 x-card 生效
 - [x] **行业要闻滚动热榜 + 工作台随时开审**（PR #255，9/7 15:00 上 prod）：`hot.ai-feeds.com/news` 每 30 分钟快照、CORS *、公开缓存；`ensure=1` 当天无批次时只重建 news 源建批。面板 B4 @ f7e82ec 已装面板树（x-card 15:12 重启）并打 render release 946e1954（15:13），页面下一次出片生效；建批成功路径待次日 07:50 前 owner 实际打开验证。规格 `~/.gstack/projects/roxorlt-aifeeds/roxor-main-design-20260906-233000.md`
 - [ ] 热榜/正式批次的事件聚类：同一事件两家报道（如 9/7 机器之心与 OpenAI 官网的「编码代理加速研究」）未合并、`event_source_count` 各为 1，`sameNewsEvent` 词元匹配偏严，待评估改进
-- [ ] 出片提前到 06:00（05:50 冻结、04:30 foundation、06:40 兜底）：owner 9/7 提出，待拍板两项取舍（美国下午 15–17 点消息推到次日；早间邮件跟随 06:00 还是拆节点保持 08:00）
+- [x] 出片提前到 06:00（PR #256，9/7 16:39 上 prod；渲染机兜底定时器 06:40；页面 05:50 文案随 release c83fde37）：owner 选「视频 6 点、邮件保持 8 点」，08:00 拆成只发邮件的 `deliver` 节点。9/8 首日核对清单见 operations.md
+- [ ] `codex-push.ts` `stagedGeneratedAtBjt` 名义时间标签仍是 06:30/07:50/08:00，参与 content_hash；改成 04:30/05:50/06:00 会让当天快照 hash 全变一次（选一个已出片后的下午改）
 - [ ] 面板（dailyVideo）：08:09 同一秒派发两次 autosubmit(redo)，v1 提交后第二次跑成 v2 撞 `assertUncommittedShareWritable` 失败、driver 再重试 v3/v4（9/7 实证，无害但每天留 3 个失败 unit）。修法：派发前查已有 LIVE/排队版本或加同秒去重
 - [ ] 补录补正文的取材当前不覆盖：主动拦爬虫的站（openai.com/news 直连与经代理都是 403）、JS 渲染的 SPA 空壳页（静态 HTML 提取拿不到）。DuckDuckGo 兜底依赖其结果页 class 名，改版即失效（失效表现为「这次不补」，不影响入池）
 - [x] ~~`docs/operations.md` 需补~~ 9/6 已补：`/v1/plain-text`、migration 043 四列、一步录入返回 202 + Workflow `manual-lead-content`、`content_progress`、nginx 70s、9/6 确认超时事故与 Workers Logs 取证方法（本地文件，不进 git）
