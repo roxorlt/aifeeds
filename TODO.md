@@ -8,6 +8,24 @@
 
 ## 进行中
 
+### A11. 论文卡片插图 + 补录线索封面图（2026-09-16，已上线并回填）
+
+**症状**：9/14 日报 5 张论文卡片顶图全空；快照回看 8/15 起论文几乎全无插图。补录条目从不带图。
+
+**根因（三层）**：① arXiv 约 8/10 起网页版插图改用原始文件名（`<id>v1/figures/<name>.png`），原先拼 `x{N}.png` 的取图路径对新论文全部 404；② 入库 upsert `media = excluded.media` 无条件覆盖，HF 日榜周末重复列同一批论文时把已迁 R2 的缩略图指针改回外链（PH / RSS 同病）；③ 日报把 HF / arXiv 外链原样交给出片端，出片机在大陆下不来。补录：三种准入都不写图，推文接口返回的图片被丢掉。
+
+**已上线**：
+- [x] PR #258（合并 `617b2f2`）：`hf-paper/figure-arxiv-html.ts` 解析已抓 HTML 的 `ltx_figure` 插图（按 Figure N 排序、PNG/JPEG/GIF 探测、原门控 + 横图优先，xN 只作兜底）；ingest upsert 库里已是 `/r/` 且来的是外链时保留（所有来源）；`render.ts` 论文条目只出站内图；新管理模式 `mode=hf-paper-figure-rerun`（`date`/`days`/`ids`/`limit`/`dry`/`force`，`extra.figure_rerun_at` 标记收敛）。顺手修了 `selection-news-event-history.test.ts` 的日期漂移（冻结 Date）。
+- [x] PR #259（合并 `0a0588f`）：`digest/manual-lead-cover.ts` 推文图 / og / 微信 `msg_cdn_url` + `data-src` / 正文首图 → `migrateFeedCover` → `extra.cover_image`（只 json_set 新键，不碰签名投影）；触发点 = owner 直接加入 workflow 末步 + 担保/确认接口 waitUntil + 出片前自动扫 + `mode=manual-lead-cover-backfill`。
+- [x] prod 回填（9/16）：9/4–9/16 首次入库的 270 篇论文 226 篇拿到真插图（84%）、34 篇只有缩略图（arXiv 无网页版）、10 篇失败；9/8–9/16 每日快照 5/5 论文均有站内图。补录 9/1 起 49 条：23 条拿到封面（og 14 / 正文 9）、4 条无链接、12 条 openai.com 页面 403、6 条推文本身无图、4 条候选图被质量门拒。
+
+**后续**：
+- [ ] openai.com（含 help.openai.com）文章页对程序访问一律 403（云端与香港机都拒），只有面板机网关 `/v1/plain-text` 那路能取到正文：让网关顺带返回 `og_image`，补录取图接一条兜底。占近 45 天补录来源约 10%。
+- [ ] `manual-lead-cover-backfill` 对无链接线索会一直计入 `remaining`（cosmetic）：谓词加 `url != ''`。
+- [ ] `hf-paper-figure-rerun` 10 篇失败项可 `force=1` 重试；`card-image-variant-backfill` 对重跑后的论文按 `figure_image.raw_url` 重生成卡片变体，需跑一轮确认。
+- [ ] 静态日报页 9/15、9/16 重生成经香港中转 60s 超时（worker 可能已跑完），验收看页面即可。
+
+
 ### A10. 工作台手工补录行业新闻线索（2026-08-11，待部署）
 
 - [x] CF 本地实现：持久化线索/证据/评估/审计，安全 URL 取证，DeepSeek Pro 可注入严格 JSON 核验，事件聚类与跨日去重，独立 Workflow，以及不可变候选批次 V1→V2+。
