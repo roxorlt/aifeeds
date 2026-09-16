@@ -9,12 +9,13 @@
 //   完整 stats + gate 阈值见 figure-arxiv-html.ts 注释。
 //
 // - fetch HTML: https://arxiv.org/html/<arxiv_id>(自动 redirect 到最新 v 版本)→ 取段落给 deep_analysis 用
-// - figure 走独立路径:fetchFirstFigureFromArxivHtml(loop x1-x10 + dim/palette/aspect gate)→ R2
+// - figure 走独立路径:fetchFirstFigureFromArxivHtml(把这里抓到的 HTML 传进去解析 ltx_figure
+//   候选;抽不到候选才回落 loop x1-x10)+ dim/palette/aspect gate → R2
 // - 无 figure 兜底:HF thumbnail(API 给的);仍无 → media[0] 缺,FE drawer 隐藏 hero 区
 // - parse paragraphs(<p> 内文本,strip tags + decode entities)→ R2 JSON 给 deep_analysis ar5iv_excerpt 用
 
 import type { Env } from '../index';
-import { fetchFirstFigureFromArxivHtml } from './figure-arxiv-html';
+import { fetchFirstFigureFromArxivHtml, probeImageDimensions } from './figure-arxiv-html';
 
 const ARXIV_HTML_BASE = 'https://arxiv.org/html';
 const R2_KEY_PREFIX_AR5IV = 'hf-paper-ar5iv';
@@ -76,7 +77,7 @@ export async function fetchAr5ivAndExtractFigureForHf(
     source: 'none',
     extracted_at: new Date().toISOString(),
   };
-  const arxivFig = await fetchFirstFigureFromArxivHtml(env, arxivId);
+  const arxivFig = await fetchFirstFigureFromArxivHtml(env, arxivId, { html });
   if (arxivFig) {
     figureInfo = {
       source: 'arxiv-html',
@@ -243,7 +244,7 @@ async function migrateFigureToR2(
     if (buf.byteLength > FIGURE_MAX_BYTES) return null;
 
     // ─── 质量门控:aspect ratio + density + max dim ───
-    const dim = probeImageDimensions(buf);
+    const dim = probeImageDimensions(new Uint8Array(buf));
     if (!dim) {
       console.warn(`[hf-paper:figure-migrate] ${url} 无法 probe dimensions(可能是 webp 或损坏文件)`);
       return null;
@@ -283,55 +284,8 @@ async function migrateFigureToR2(
   }
 }
 
-// ────────────────────────────────────────────────────────────────────
-// 图片 magic bytes 解析(PNG/JPEG/GIF),抄自 worker/src/share/handlers.ts
-// CF Workers 无原生 image decode API,只能自己 parse binary header 读 dimensions
-// ────────────────────────────────────────────────────────────────────
-
-function probeImageDimensions(buf: ArrayBuffer): { width: number; height: number } | undefined {
-  const png = probePngDimensions(buf);
-  if (png) return png;
-  if (buf.byteLength < 4) return undefined;
-  const v = new DataView(buf);
-  // JPEG: walk segments (FF Mn LL LL ...) 找 SOF (C0-CF except C4/C8/CC)
-  if (v.getUint8(0) === 0xFF && v.getUint8(1) === 0xD8) {
-    let i = 2;
-    while (i < buf.byteLength - 1) {
-      if (v.getUint8(i) !== 0xFF) return undefined;
-      const marker = v.getUint8(i + 1);
-      i += 2;
-      if (marker >= 0xC0 && marker <= 0xCF && marker !== 0xC4 && marker !== 0xC8 && marker !== 0xCC) {
-        if (i + 7 > buf.byteLength) return undefined;
-        const height = v.getUint16(i + 3);
-        const width = v.getUint16(i + 5);
-        if (!width || !height) return undefined;
-        return { width, height };
-      }
-      if (i + 2 > buf.byteLength) return undefined;
-      const segLen = v.getUint16(i);
-      i += segLen;
-    }
-    return undefined;
-  }
-  // GIF: 47 49 46 38 ... 6,7=width(LE) 8,9=height(LE)
-  if (v.getUint32(0) === 0x47494638 && buf.byteLength >= 10) {
-    return { width: v.getUint16(6, true), height: v.getUint16(8, true) };
-  }
-  return undefined;
-}
-
-function probePngDimensions(buf: ArrayBuffer): { width: number; height: number } | undefined {
-  // PNG: 89 50 4E 47 0D 0A 1A 0A,IHDR chunk @ offset 16: width (BE) + height (BE)
-  if (buf.byteLength < 24) return undefined;
-  const v = new DataView(buf);
-  if (v.getUint8(0) !== 0x89 || v.getUint8(1) !== 0x50 || v.getUint8(2) !== 0x4E || v.getUint8(3) !== 0x47) {
-    return undefined;
-  }
-  const width = v.getUint32(16);
-  const height = v.getUint32(20);
-  if (!width || !height) return undefined;
-  return { width, height };
-}
+// 图片 magic bytes 解析(PNG/JPEG/GIF)统一到 figure-arxiv-html.ts 的 probeImageDimensions,
+// 本文件原有的两份副本已删除(2026-09-16);CF Workers 无原生 image decode API,只能自己 parse header。
 
 async function sha256Hex(buf: ArrayBuffer): Promise<string> {
   const hash = await crypto.subtle.digest('SHA-256', buf);
