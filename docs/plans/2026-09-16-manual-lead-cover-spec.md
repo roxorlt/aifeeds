@@ -54,3 +54,30 @@
 - 页面取图在 Worker 直抓（境外站可达、微信/国内站公网可达），不经大陆网关；失败只记原因，后续按失败分布再决定是否加香港路线。
 - 只写 `extra.cover_image`，不写 `media`。
 - 推文只用第一张能迁成功的图，不取视频封面（网关契约无视频字段）。
+
+## 实现记录（2026-09-16 实施）
+
+代码落在 `cc/20260916-lead-cover` 分支，四个提交：B1 模块与测试 → B2 触发点 → B2 兜底扫描与管理模式 → B4 剩余测试。`npx tsc --noEmit` 干净，`npm test` 除一条与本次无关的旧红（见文末）外全绿。
+
+### 规格之外做的决定
+
+1. **网页读流前 512KB 就掐断，不按总大小拒页**（主 agent 实测更正：一篇微信公众号文章的 HTML 有 3.4MB，原规格「HTML 上限 2MB」会把最常见的那类线索整片丢掉）。og / twitter 那几个 meta 与 `msg_cdn_url` 都在 head 与正文很靠前的位置，读够就行。常量 `MANUAL_LEAD_COVER_HTML_MAX_BYTES`。
+2. **候选解析复用 `feeds/extract.ts` 的 `metaContent`（改为导出），不用 `extractPageMeta`**：后者把 og:image 与 twitter:image 合并成一个 `cover` 字段，表达不出「og:image → og:image:secure_url → twitter:image」这个顺序，也说不出这张图是哪来的（要写进 `cover_image_source`）。`feeds/media-r2.ts` 的浏览器 UA 常量同样改为导出复用。
+3. **兜底扫描按 `manual_news_leads.review_date` 选行，不按 `items.published_at`**：后者取自证据的发布时间（`confirmedLeadItemStatement` 里 `lead.evidence.map(published_at).find(Boolean) || null`），零证据的 owner 断言线索上恒为 `null`，按它扫会整片漏掉正是最需要补图的那批；`review_date` 恒非空，而且「哪天的日报」本来就是这个扫描该用的口径，与 `backfillManualLeadEnrichment` 的选行方式一致。
+4. **扫描谓词带上失败次数闸门**（非 force 时排除「已试满 3 次且最后一次在 24h 内」的行），否则 `remaining` 永远不收敛，管理模式循环调用会一直空转。与 `ensureManualLeadCover` 里的跳过条件逐字同一口径。
+5. **`ensureManualLeadCover` 的第三个参数合并了 `force` 与 `now`**（`ManualLeadCoverDeps & { force?: boolean; now?: number }`），管理模式的 `force=1` 与测试要的固定时钟都从这里进，不再多一个参数。
+6. **写库成功与否不看 `meta.changes`**：那句 `UPDATE` 自带「已有 `/r/` 就不写」的条件，另一条路抢先写过时本次是空写，仍报 `set`。多报一次成功不产生任何副作用，而依赖 `changes` 会让假 D1 与真 D1 的行为分叉。
+7. **推文取证失败的短码是 `tweet_fetch_failed`**（规格只列了 `tweet_no_images`）；另外补了 `no_url` / `invalid_url` / `not_found` / `exception` 几个短码，都只写进 `extra.cover_last_error` 给运维看。
+8. **取证服务配置（env → `TrustedResearchService`）在本模块内联了一份**，没有从 `manual-news-leads-runtime.ts` 导出复用：那个模块牵进整条取证流水线，而本模块要被 workflow、确认接口、出片前扫描三处引用，留成叶子模块风险最小（代价是 6 行重复，两边都只读同样那 5 个 env 键）。
+9. **确认接口两条路都挂了补封面**（`vouch-candidate` 与 `confirm-candidate`），补素材仍只挂担保那条。确认同样是「候选刚进池」的时刻，`source_support_v1` 也从这里得到第一次机会，不必只等出片前的兜底扫描。
+
+### 触发点落位
+
+- workflow：`worker/src/digest/manual-lead-content-workflow.ts` `runManualLeadCoverStep`，在 `pool` 步返回且 `pooled === true` 之后调用（单步 20s，step 超时 80s，异常只记日志）。
+- 接口：`worker/src/digest/manual-news-leads-api.ts` `scheduleLeadCover`，在 `vouch-candidate` / `confirm-candidate` 的结果返回前 `ctx.waitUntil`。
+- 自动扫描：`worker/src/digest/codex-push.ts` `backfillManualEvidenceBeforeEditorial`，紧接 `backfillManualLeadEnrichment` 之后、组装 editorial payload 之前；两轮各自一个 `try`，谁出故障都不影响另一轮与出片。
+- 管理模式：`worker/src/index.ts` `handleEnrichRun` 的 `mode=manual-lead-cover-backfill`。
+
+### 顺带发现（未改，超出本次范围）
+
+`src/digest/selection-news-event-history.test.ts` 里「9/2 重演」那条从 2026-09-14 起必红：用例把账本行钉在 `2026-08-14`，而 `loadPushedNewsItemIds` 的 30 天回看窗按 `Date.now()` 算，2026-09-16 已经越窗。是用例自己的时钟依赖，与封面这条链路无关。
