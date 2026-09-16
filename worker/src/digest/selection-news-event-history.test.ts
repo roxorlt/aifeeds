@@ -10,7 +10,7 @@
 //
 // 本文件在真 SQLite + 真迁移上逐格钉住三条规则,并对每条做一轮变异验证。
 
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 
 import {
   applyNewsEventHistoryPolicy,
@@ -30,6 +30,14 @@ import {
   SqliteD1,
 } from './selection-news-query.test-fixture';
 import { freezeNewsReviewBatchFromPool } from './news-review';
+
+beforeAll(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-09-03T02:00:00.000Z'));
+});
+afterAll(() => {
+  vi.useRealTimers();
+});
 
 const opened: SqliteD1[] = [];
 afterEach(() => {
