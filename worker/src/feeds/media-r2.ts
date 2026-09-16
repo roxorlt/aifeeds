@@ -57,7 +57,7 @@ const LOGO_MAX_BYTES = 1 * 1024 * 1024; // 1 MB（publisher logo / favicon）
 const MIN_UNPROBEABLE_INLINE_BYTES = 8 * 1024; // 8 KB
 
 // 接近真实浏览器的 UA：部分博客/播客 CDN 对纯 bot UA 防盗链。
-const FEED_R2_USER_AGENT =
+export const FEED_R2_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 const ALLOWED_IMG_TYPES = new Set([
