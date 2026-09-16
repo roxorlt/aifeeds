@@ -38,6 +38,7 @@ import {
   type ManualLeadContentEntryInput,
   type ManualLeadContentPoolOutcome,
 } from './manual-lead-content-entry';
+import { ensureManualLeadCover } from './manual-lead-cover';
 import {
   setManualLeadContentStage,
   touchManualLeadContentDeadline,
@@ -57,6 +58,13 @@ export const MANUAL_LEAD_CONTENT_STEP_LEASE_GRACE_MS = 60_000;
 
 /** 入池那一步的时限：签名 + 确认 + 写 extra，几次 D1 往返，给足一分钟。 */
 export const MANUAL_LEAD_CONTENT_POOL_BUDGET_MS = 60_000;
+
+/**
+ * 补封面那一步的时限：一次外呼原文页 + 最多三次下载图，20 秒够了。
+ *
+ * 它排在入池之后，取不到只是这条候选没有图，跟入池成不成功没有任何关系。
+ */
+export const MANUAL_LEAD_CONTENT_COVER_BUDGET_MS = 20_000;
 
 /**
  * 存进 durable step 的正文上限。
@@ -162,6 +170,37 @@ function createDurableStepRunner(
   };
 }
 
+/** 补封面那一步的名字，与流水线四步出自同一处（{@link ManualLeadContentStepDescriptor}）。 */
+const COVER_STEP_NAME: ManualLeadContentStepDescriptor['name'] = 'cover';
+
+/**
+ * 入池之后给这条候选补一张封面。**永不抛异常，也绝不影响入池的结果。**
+ *
+ * 单独一个 durable step，不走 {@link createDurableStepRunner}：那个 runner 每进一步都要把
+ * `content_stage` 与兜底期限写回库，而入池那一步已经把阶段写成 `done` / `failed` 了，补封面
+ * 不该再把它改回去。
+ */
+async function runManualLeadCoverStep(
+  env: Env,
+  leadId: string,
+  step: ManualLeadContentWorkflowStep,
+): Promise<void> {
+  try {
+    await step.do(
+      `manual-lead-content:${COVER_STEP_NAME}`,
+      contentStepConfig(MANUAL_LEAD_CONTENT_COVER_BUDGET_MS),
+      async () => await runManualLeadContentStep(
+        COVER_STEP_NAME,
+        () => ensureManualLeadCover(env, `blog:manual:${leadId}`),
+        MANUAL_LEAD_CONTENT_COVER_BUDGET_MS,
+      ),
+    );
+  } catch (error) {
+    console.warn(`[manual-lead-content] lead=${leadId} cover step exhausted:`,
+      String((error as Error)?.message || error).slice(0, 200));
+  }
+}
+
 /**
  * 跑完一条一步录入线索：取材、生成、入池。
  *
@@ -204,7 +243,7 @@ export async function runManualLeadContentEntryWorkflow(
   }
 
   // 无论上面发生什么都要走到这里 —— 入池永不失败（规格第 8 节第一条）。
-  return step.do<ManualLeadContentPoolOutcome>(
+  const outcome = await step.do<ManualLeadContentPoolOutcome>(
     'manual-lead-content:pool',
     poolStepConfig(),
     async () => {
@@ -216,4 +255,8 @@ export async function runManualLeadContentEntryWorkflow(
       return poolManualLeadContentEntry(env, lead, content, params.submitted_at);
     },
   );
+
+  // 没进池就没有 items 行可写，补封面自然免谈。
+  if (outcome.pooled) await runManualLeadCoverStep(env, lead.id, step);
+  return outcome;
 }

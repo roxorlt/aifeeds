@@ -7,6 +7,9 @@ vi.mock('./manual-news-leads-store', () => ({
 vi.mock('./manual-lead-content-entry', () => ({
   poolManualLeadContentEntry: vi.fn(async () => ({ pooled: true, stage: 'done', detail: '' })),
 }));
+vi.mock('./manual-lead-cover', () => ({
+  ensureManualLeadCover: vi.fn(async () => ({ status: 'set', cover: '/r/blog/cover.jpg' })),
+}));
 vi.mock('./manual-lead-content-runtime', () => ({
   createManualLeadContentAdapters: vi.fn(() => ({
     fetchSource: vi.fn(async () => null),
@@ -18,6 +21,7 @@ vi.mock('./manual-lead-content-runtime', () => ({
 
 import { setManualLeadContentStage, touchManualLeadContentDeadline } from './manual-news-leads-store';
 import { poolManualLeadContentEntry } from './manual-lead-content-entry';
+import { ensureManualLeadCover } from './manual-lead-cover';
 import {
   MANUAL_LEAD_CONTENT_POOL_BUDGET_MS,
   MANUAL_LEAD_CONTENT_WORKFLOW_KIND,
@@ -128,7 +132,7 @@ describe('一步录入的内容加工 workflow', () => {
     expect(isManualLeadContentWorkflowParams({ kind: MANUAL_LEAD_CONTENT_WORKFLOW_KIND })).toBe(false);
   });
 
-  test('四个加工阶段各是一个 durable step，入池是最后一个', async () => {
+  test('四个加工阶段各是一个 durable step，入池之后还有一步补封面', async () => {
     const { calls, step } = recordingStep();
     await runManualLeadContentEntryWorkflow({} as never, PARAMS, step, { adapters: adapters() });
 
@@ -138,6 +142,7 @@ describe('一步录入的内容加工 workflow', () => {
       'manual-lead-content:search',
       'manual-lead-content:generate',
       'manual-lead-content:pool',
+      'manual-lead-content:cover',
     ]);
     expect(poolManualLeadContentEntry).toHaveBeenCalledWith(
       expect.anything(),
@@ -205,6 +210,7 @@ describe('一步录入的内容加工 workflow', () => {
       'manual-lead-content:search',
       'manual-lead-content:generate',
       'manual-lead-content:pool',
+      'manual-lead-content:cover',
     ]);
     expect(deps.search).toHaveBeenCalled();
     expect(poolManualLeadContentEntry).toHaveBeenCalledTimes(1);
@@ -229,6 +235,47 @@ describe('一步录入的内容加工 workflow', () => {
     );
     const [, , deadlineAt] = vi.mocked(touchManualLeadContentDeadline).mock.calls[0];
     expect(Number(deadlineAt)).toBeGreaterThan(Date.now() + MANUAL_LEAD_CONTENT_POOL_BUDGET_MS);
+  });
+
+  test('入池之后按 items 行去补封面', async () => {
+    const { step } = recordingStep();
+    await runManualLeadContentEntryWorkflow({} as never, PARAMS, step, { adapters: adapters() });
+
+    expect(ensureManualLeadCover).toHaveBeenCalledWith(expect.anything(), `blog:manual:${PARAMS.id}`);
+  });
+
+  test('没进池就不补封面 —— 没有 items 行可写', async () => {
+    vi.mocked(poolManualLeadContentEntry).mockResolvedValueOnce({
+      pooled: false, stage: 'failed', detail: '没能加入候选池：审核窗口已过',
+    } as never);
+    const { calls, step } = recordingStep();
+    const outcome = await runManualLeadContentEntryWorkflow(
+      {} as never, PARAMS, step, { adapters: adapters() },
+    );
+
+    expect(outcome.pooled).toBe(false);
+    expect(ensureManualLeadCover).not.toHaveBeenCalled();
+    expect(calls.map((call) => call.name)).not.toContain('manual-lead-content:cover');
+  });
+
+  test('补封面那一步彻底失败也伤不到入池结果', async () => {
+    const { seen, step } = failingStep('cover');
+    const outcome = await runManualLeadContentEntryWorkflow(
+      {} as never, PARAMS, step, { adapters: adapters() },
+    );
+
+    expect(seen).toContain('manual-lead-content:cover');
+    expect(outcome).toMatchObject({ pooled: true, stage: 'done' });
+  });
+
+  test('补封面那一步自己抛异常同样不影响入池结果', async () => {
+    vi.mocked(ensureManualLeadCover).mockRejectedValueOnce(new Error('d1 down') as never);
+    const { step } = recordingStep();
+    const outcome = await runManualLeadContentEntryWorkflow(
+      {} as never, PARAMS, step, { adapters: adapters() },
+    );
+
+    expect(outcome).toMatchObject({ pooled: true, stage: 'done' });
   });
 
   test('入池那一步自己抛异常时往外抛，让 workflow 重试而不是当作已完成', async () => {

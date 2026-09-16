@@ -26,6 +26,7 @@ import {
   type ManualEvidenceMaterialSource,
 } from './manual-lead-enrichment';
 import { createManualLeadEnrichmentAdapters } from './manual-lead-enrichment-runtime';
+import { ensureManualLeadCover } from './manual-lead-cover';
 import {
   recoverManualLeadContentEntry,
   type ManualLeadContentEntryInput,
@@ -234,6 +235,30 @@ function scheduleLeadEnrichment(
     }, createManualLeadEnrichmentAdapters(env)).then(() => undefined, () => undefined));
   } catch (error) {
     console.warn('[manual-lead-enrichment] schedule failed:', String((error as Error)?.message || error).slice(0, 200));
+  }
+}
+
+/**
+ * 入池成功之后去补一张封面。
+ *
+ * 与 {@link scheduleLeadEnrichment} 同一套理由用 `ctx.waitUntil`：候选已经在池子里了，封面
+ * 取不到只是这条候选没有图，不该有状态机、不该重试、更不该让一次已经完成的确认显示成失败。
+ *
+ * 两道保险：这里的 try / catch 挡住同步异常，`ensureManualLeadCover` 自己把一切失败收敛成
+ * 返回值（它永不抛）。
+ */
+function scheduleLeadCover(
+  env: Env,
+  ctx: Pick<ExecutionContext, 'waitUntil'>,
+  outcome: { ok: boolean; lead?: ManualNewsLeadRecord },
+): void {
+  try {
+    const lead = outcome.ok ? outcome.lead : undefined;
+    if (!lead) return;
+    ctx.waitUntil(ensureManualLeadCover(env, `blog:manual:${lead.id}`)
+      .then(() => undefined, () => undefined));
+  } catch (error) {
+    console.warn('[manual-lead-cover] schedule failed:', String((error as Error)?.message || error).slice(0, 200));
   }
 }
 
@@ -568,6 +593,8 @@ async function handleManualNewsLeadsApiInternal(
     );
   // 只给担保这条路补素材：确认走的是取证跑完的线索，它的摘要本来就是核验过的正文。
   if (action === 'vouch-candidate') scheduleLeadEnrichment(env, ctx, result);
+  // 封面两条路都要补：担保与确认都是「这条候选刚进池」的时刻，此时 items 行已经在了。
+  scheduleLeadCover(env, ctx, result);
   return result.ok
     ? response(await manualNewsMutationResult(env, result))
     : response(await manualNewsMutationResult(env, result), result.status);
