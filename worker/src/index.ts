@@ -2853,7 +2853,16 @@ export async function ingestItems(env: Env, items: ItemInput[]): Promise<IngestR
                 THEN excluded.content_translated
               ELSE items.content_translated
             END,
-            media = excluded.media,
+            -- 2026-09-16 媒体指针保护:库里已经是站内 R2 图(/r/ 开头)、这次来的是外链时,
+            -- 保留库里的。HF 日榜周末重复列同一批论文、PH 榜单重复出现同一产品、RSS 重复抓同
+            -- 一篇文章时,老写法(media = excluded.media 无条件覆盖)会把已迁 R2 的地址改回外链,而
+            -- extra.r2_migrated_at 经 json_patch 保留下来 → 后续永远不再迁,等于永久掉图。
+            -- 对所有 source_type 生效(HF / PH / RSS 同病),不做 per-source 白名单。
+            media = CASE
+              WHEN items.media LIKE '%"url":"/r/%' AND coalesce(excluded.media, '') NOT LIKE '%"url":"/r/%'
+                THEN items.media
+              ELSE excluded.media
+            END,
             metrics = excluded.metrics,
             is_relevant = excluded.is_relevant,
             matched_by = excluded.matched_by,
