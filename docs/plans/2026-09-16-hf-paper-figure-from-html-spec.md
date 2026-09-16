@@ -68,3 +68,14 @@
 - 不解析 PDF、不用第三方论文站接口（5 月已否决 PDF 路线）。
 - media 保护做在 SQL 层且对所有来源生效，不做 per-source 白名单。
 - 日报层对论文条目采取「无站内图就不给图」而不是给外链。
+
+## 实现记录（2026-09-16，规格没写到、实现时定下的几处）
+
+- **日志**：gate 失败的 reason 串保留原来的 `png_parse_fail`（现在也探测 JPEG/GIF，但改字符串会动到现有日志行）。候选标签在 guess 模式仍是 `xN`（与老版逐字节一致），html 模式用 `cN`。
+- **404 语义按模式分开**：guess 模式保持「x1 404 即停」；html 模式里单张候选 404 只跳过这一张，继续看后面的候选（HTML 已经明说图在那儿，一张失效不代表后面都没有）。
+- **`picked_index` 与 `order`**：`order` 记文档顺序（1 起），`picked_index` 记候选排序后的序号（1 起）；guess 模式下 `picked_index` 仍等于 `xN` 的 N。
+- **嵌套子图**：外层块的 `Figure N` 编号覆盖子图的「(a)/(b)」，同一 URL 去重时保留先出现的那条（即外层）。
+- **日期区间换算**：`scraped_at` 是 ISO UTC 串，字典序即时间序，区间边界在 JS 里算成 UTC 字符串比较，不用 SQLite 的 `date(..., '+8 hours')`，免掉时区函数对带 `Z` 后缀取值的解析风险。
+- **`thumbnail_only` / `failed` 判定**：重跑后回读 `extra.figure_image.source`，`arxiv-html` 记 figure_found，其余情况按这一轮是否 `fetched` 分到 thumbnail_only 或 failed。
+- **`ids` 模式的 `remaining`**：按同一谓词只在这批 id 上计数；`force=1` 时谓词不含插图门，`remaining` 不会随重跑递减，需要自行控制调用次数。
+- **A3 的测试口径**：夹具手抄一份 SQL 容易漂移，改成从 `ingestItems` 真实 `prepare` 出来的 SQL 取文本，既断言含该 CASE，又把这条 SQL 灌进内存 SQLite（`node:sqlite`）跑五种组合验证语义。
