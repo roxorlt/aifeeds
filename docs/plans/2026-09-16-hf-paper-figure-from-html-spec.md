@@ -79,3 +79,4 @@
 - **`thumbnail_only` / `failed` 判定**：重跑后回读 `extra.figure_image.source`，`arxiv-html` 记 figure_found，其余情况按这一轮是否 `fetched` 分到 thumbnail_only 或 failed。
 - **`ids` 模式的 `remaining`**：按同一谓词只在这批 id 上计数；`force=1` 时谓词不含插图门，`remaining` 不会随重跑递减，需要自行控制调用次数。
 - **A3 的测试口径**：夹具手抄一份 SQL 容易漂移，改成从 `ingestItems` 真实 `prepare` 出来的 SQL 取文本，既断言含该 CASE，又把这条 SQL 灌进内存 SQLite（`node:sqlite`）跑五种组合验证语义。
+- **A5 补丁（同日）：`remaining` 不收敛的 bug**：确实没有网页版（或网页版没图）的论文重跑后 `figure_image.source` 只能停在 `'none'`，原谓词只看这个字段，导致这类论文每轮都被重新选中、最老的几条反复重跑、`remaining` 永远不降。修法：每条处理完（成功/只拿到缩略图/失败，结果不论）都在 `extra` 顶层写 `figure_rerun_at`（ISO 时间戳，跟会被整体重写的 `figure_image` 分开存，写在同一条 `UPDATE`／或 `json_remove` 那条里）；非 force 谓词追加 `json_extract(extra,'$.figure_rerun_at') IS NULL`，`force=1` 忽略该标记（也仍忽略 `figure_image.source`）。

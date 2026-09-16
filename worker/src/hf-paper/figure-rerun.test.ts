@@ -23,13 +23,14 @@ import { bjtRangeToUtcBounds, runHfPaperFigureRerun } from './figure-rerun';
 
 interface Row { id: string; scraped_at: string; extra: string | null; media: string | null }
 
-/** 最小 fake DB:在内存里实现本模块用到的三条 SQL(选批 / 计数 / json_remove 更新)。 */
+/** 最小 fake DB:在内存里实现本模块用到的三条 SQL(选批 / 计数 / json_set 标记更新)。 */
 function makeEnv(rows: Row[]) {
   const items = new Map(rows.map((r) => [r.id, { ...r }]));
   const figureSource = (r: Row): string | null => {
     const fig = JSON.parse(r.extra || '{}').figure_image;
     return fig && typeof fig === 'object' && fig.source !== undefined ? String(fig.source) : null;
   };
+  const hasRerunMarker = (r: Row): boolean => JSON.parse(r.extra || '{}').figure_rerun_at !== undefined;
   const env: any = {
     __items: items,
     DB: {
@@ -50,12 +51,16 @@ function makeEnv(rows: Row[]) {
             return null;
           },
           async run() {
-            if (/json_remove/i.test(sql)) {
-              const r = items.get(String(binds[0]));
+            if (/json_set/i.test(sql)) {
+              // 两条更新语句的 bind 顺序都是 (rerunAt, id)。
+              const r = items.get(String(binds[binds.length - 1]));
               if (r) {
                 const extra = JSON.parse(r.extra || '{}');
-                delete extra.card_variant_version;
-                delete extra.card_variant_status;
+                if (/json_remove/i.test(sql)) {
+                  delete extra.card_variant_version;
+                  delete extra.card_variant_status;
+                }
+                extra.figure_rerun_at = binds[0];
                 r.extra = JSON.stringify(extra);
               }
             }
@@ -70,6 +75,7 @@ function makeEnv(rows: Row[]) {
   function select(sql: string, binds: any[], counting = false): any[] {
     const byIds = /id IN \(/.test(sql);
     const gated = /figure_image\.source'\) IS NOT 'arxiv-html'/.test(sql);
+    const markerGated = /figure_rerun_at'\) IS NULL/.test(sql);
     let list = [...items.values()];
     if (byIds) {
       const n = binds.length - (counting ? 0 : 1);
@@ -80,6 +86,7 @@ function makeEnv(rows: Row[]) {
       list = list.filter((r) => r.scraped_at >= start && r.scraped_at < end);
     }
     if (gated) list = list.filter((r) => figureSource(r) !== 'arxiv-html');
+    if (markerGated) list = list.filter((r) => !hasRerunMarker(r));
     list.sort((a, b) => a.scraped_at.localeCompare(b.scraped_at));
     if (counting) return list;
     const limit = Number(binds[binds.length - 1]) || list.length;
@@ -162,8 +169,10 @@ describe('runHfPaperFigureRerun', () => {
     expect(res.thumbnail_only).toBe(1);
     expect(res.failed).toBe(1);
     expect(res.figure_found).toBe(0);
-    expect(res.remaining).toBe(2);                       // 都没拿到网页版插图,仍在候选里
+    expect(res.remaining).toBe(0);                       // 都没拿到网页版插图,但已打标记退出候选
     expect(JSON.parse(env.__items.get('hf_paper:t1').extra).card_variant_version).toBe(1);
+    expect(typeof JSON.parse(env.__items.get('hf_paper:t1').extra).figure_rerun_at).toBe('string');
+    expect(typeof JSON.parse(env.__items.get('hf_paper:f1').extra).figure_rerun_at).toBe('string');
   });
 
   test('ids 参数覆盖 date/days', async () => {
@@ -196,7 +205,7 @@ describe('runHfPaperFigureRerun', () => {
     const res = await runHfPaperFigureRerun(env, { date: '2026-09-16', days: 1, limit: 1 });
     expect(rerunCalls).toEqual(['older']);
     expect(res.scanned).toBe(1);
-    expect(res.remaining).toBe(2);
+    expect(res.remaining).toBe(1);                       // 'older' 已打标记退出候选,只剩 'newer'
   });
 
   test('force=1 连已经有插图的也重跑', async () => {
@@ -205,5 +214,32 @@ describe('runHfPaperFigureRerun', () => {
     const res = await runHfPaperFigureRerun(env, { date: '2026-09-16', days: 1, force: true });
     expect(rerunCalls).toEqual(['a2']);
     expect(res.figure_found).toBe(1);
+  });
+
+  test('每条处理后写 figure_rerun_at 标记:没有网页版的论文不再被非 force 反复选中,force 忽略标记', async () => {
+    const env = makeEnv([
+      paper('found', '2026-09-15T20:00:00.000Z'),
+      paper('none', '2026-09-15T21:00:00.000Z'),
+    ]);
+    outcomes.set('found', { fetched: true, source: 'arxiv-html', r2_url: '/r/hf/found.png' });
+    outcomes.set('none', { fetched: true, source: 'none' }); // 模拟「确实没有网页版」的论文
+
+    const res1 = await runHfPaperFigureRerun(env, { date: '2026-09-16', days: 1 });
+    expect(res1.remaining).toBe(0);
+
+    const foundExtra = JSON.parse(env.__items.get('hf_paper:found').extra);
+    const noneExtra = JSON.parse(env.__items.get('hf_paper:none').extra);
+    expect(typeof foundExtra.figure_rerun_at).toBe('string');   // 成功找到插图的也打标记
+    expect(typeof noneExtra.figure_rerun_at).toBe('string');    // 没找到插图(source 仍是 none)也打标记
+
+    rerunCalls.length = 0;
+    const res2 = await runHfPaperFigureRerun(env, { date: '2026-09-16', days: 1 });
+    expect(rerunCalls).toEqual([]);                              // 非 force:两条都已标记,不再入选
+    expect(res2.scanned).toBe(0);
+    expect(res2.remaining).toBe(0);
+
+    const res3 = await runHfPaperFigureRerun(env, { date: '2026-09-16', days: 1, force: true });
+    expect([...rerunCalls].sort()).toEqual(['found', 'none']);   // force=1 忽略标记,两条都重新入选
+    expect(res3.scanned).toBe(2);
   });
 });

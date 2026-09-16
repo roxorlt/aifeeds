@@ -9,6 +9,14 @@
 // 取到插图的那些清掉 card_variant_version / card_variant_status,让现有
 // card-image-variant-backfill 模式按新的 figure_image.raw_url 重新生成卡片变体。
 //
+// 已处理标记(2026-09-16 补,修 remaining 不收敛的 bug):有些论文确实没有网页版
+// (或网页版没图),重跑后 figure_image.source 只能停在 'none'。这类论文原来
+// 每轮都会被非 force 谓词重新选中,remaining 永远不降、最老的那几条被反复重跑。
+// 现在每条处理完(不管成功/只拿到缩略图/失败)都写 extra.figure_rerun_at(ISO 时间戳,
+// 顶层字段,跟 fetchAr5ivAndExtractFigureForHf 会重写的 figure_image 分开存),
+// 非 force 谓词加一条 IS NULL 判断,处理过的就退出候选,remaining 单调递减。
+// force=1 忽略这个标记(也忽略 figure_image.source),按文档行为不变。
+//
 // 串行执行(每条要抓整页 HTML + 若干张图,并发会撞 worker 子请求限额)。
 // 写法抄 feeds/media-r2.ts 的 runCoverQualitySweep:谓词单独抽出来,batch 与 remaining 共用。
 
@@ -94,9 +102,12 @@ export async function runHfPaperFigureRerun(
   const ids = (opts.ids || []).filter(Boolean).slice(0, limit);
   const force = !!opts.force;
 
-  // 谓词(batch 与 remaining 共用)。非 force 时只挑还没拿到网页版插图的,
-  // 重跑成功即退出候选 → remaining 单调递减。
-  const figureGate = force ? '' : ` AND json_extract(extra, '$.figure_image.source') IS NOT 'arxiv-html'`;
+  // 谓词(batch 与 remaining 共用)。非 force 时只挑还没拿到网页版插图、且没被
+  // 这个模式处理过的(figure_rerun_at 为空);不管这轮结果如何都会退出候选,
+  // remaining 单调递减,「确实没有网页版」的论文不会被反复重跑。
+  const figureGate = force
+    ? ''
+    : ` AND json_extract(extra, '$.figure_image.source') IS NOT 'arxiv-html' AND json_extract(extra, '$.figure_rerun_at') IS NULL`;
   let where: string;
   let whereBinds: unknown[];
   if (ids.length > 0) {
@@ -159,17 +170,25 @@ export async function runHfPaperFigureRerun(
       .first<{ extra: string | null; media: string | null }>();
     const state = readFigureState(after || { extra: null, media: null });
 
+    // 不管这轮结果如何,都打上已处理标记,退出非 force 候选池,防止
+    // 没有网页版的论文被下一轮重新选中、remaining 卡住不降。
+    const rerunAt = new Date().toISOString();
     if (state.source === 'arxiv-html') {
       figureFound++;
       // 卡片变体按 figure_image.raw_url 生成,插图换了就要重生成:清游标让
-      // card-image-variant-backfill 重新收这条。
+      // card-image-variant-backfill 重新收这条;同一条 UPDATE 里顺带写标记。
       await env.DB.prepare(
-        `UPDATE items SET extra = json_remove(extra, '$.card_variant_version', '$.card_variant_status') WHERE id = ?`,
-      ).bind(row.id).run();
-    } else if (fetched) {
-      thumbnailOnly++;
+        `UPDATE items SET extra = json_set(json_remove(extra, '$.card_variant_version', '$.card_variant_status'), '$.figure_rerun_at', ?) WHERE id = ?`,
+      ).bind(rerunAt, row.id).run();
     } else {
-      failed++;
+      if (fetched) {
+        thumbnailOnly++;
+      } else {
+        failed++;
+      }
+      await env.DB.prepare(
+        `UPDATE items SET extra = json_set(extra, '$.figure_rerun_at', ?) WHERE id = ?`,
+      ).bind(rerunAt, row.id).run();
     }
     items.push({ id: row.id, source: state.source, r2_url: state.r2_url });
     console.log(`[hf-paper:figure-rerun] ${row.id} source=${state.source} r2=${state.r2_url ?? '-'}`);

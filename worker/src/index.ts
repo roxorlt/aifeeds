@@ -4575,8 +4575,10 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
   //       POST /api/enrich/run?mode=hf-paper-figure-rerun&ids=2609.11412&dry=1
   // 参数:date(BJT YYYY-MM-DD,默认今天)/ days(默认 1,1-14,范围 [date-days+1, date])/
   //       ids(逗号分隔 arxiv id,给了就忽略 date/days)/ limit(默认 10,1-30)/ dry=1 / force=1。
-  // 非 force 时只挑 figure_image.source 还不是 'arxiv-html' 的,成功即退出候选,
-  // 循环调用到 remaining=0;force=1 不看这个门,remaining 不会递减(自行控制调用次数)。
+  // 非 force 时只挑 figure_image.source 还不是 'arxiv-html' 且没打过
+  // extra.figure_rerun_at 标记的(2026-09-16 补,防没有网页版的论文被反复重跑),
+  // 处理完不管结果如何都打标记退出候选,循环调用到 remaining=0;
+  // force=1 不看这两个门,remaining 不会递减(自行控制调用次数)。
   if (mode === 'hf-paper-figure-rerun') {
     const idsParam = url.searchParams.get('ids') || '';
     const ids = idsParam.split(',').map((s) => s.trim()).filter(Boolean);
