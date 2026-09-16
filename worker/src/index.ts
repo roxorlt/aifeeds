@@ -142,6 +142,7 @@ import { isSeoPath, handleSeoRoute } from './seo-routes';
 import { handleItemRoute } from './seo/item-routes';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
 import { runHfDailyFetch, triggerHfPaperWorkflowForItem } from './scrapers/hf-paper';
+import { runHfPaperFigureRerun } from './hf-paper/figure-rerun';
 import { routeSourceCronActions, type SourceCronAction } from './ops/cron-routing';
 import {
   drainWarningOutbox,
@@ -2853,7 +2854,16 @@ export async function ingestItems(env: Env, items: ItemInput[]): Promise<IngestR
                 THEN excluded.content_translated
               ELSE items.content_translated
             END,
-            media = excluded.media,
+            -- 2026-09-16 媒体指针保护:库里已经是站内 R2 图(/r/ 开头)、这次来的是外链时,
+            -- 保留库里的。HF 日榜周末重复列同一批论文、PH 榜单重复出现同一产品、RSS 重复抓同
+            -- 一篇文章时,老写法(media = excluded.media 无条件覆盖)会把已迁 R2 的地址改回外链,而
+            -- extra.r2_migrated_at 经 json_patch 保留下来 → 后续永远不再迁,等于永久掉图。
+            -- 对所有 source_type 生效(HF / PH / RSS 同病),不做 per-source 白名单。
+            media = CASE
+              WHEN items.media LIKE '%"url":"/r/%' AND coalesce(excluded.media, '') NOT LIKE '%"url":"/r/%'
+                THEN items.media
+              ELSE excluded.media
+            END,
             metrics = excluded.metrics,
             is_relevant = excluded.is_relevant,
             matched_by = excluded.matched_by,
@@ -4557,6 +4567,31 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     const date = url.searchParams.get('date') || undefined;
     const result = await runHfDailyFetch(env, { force, date });
     return jsonResponse(result, 200, request, env);
+  }
+  // hf-paper-figure-rerun(2026-09-16):存量论文插图重跑。arxiv 8/10 起换了网页版图片命名,
+  // 拼 x1.png 的老逻辑对之后入库的论文全 404,figure_image.source 基本都是 'none'。
+  // figure-arxiv-html.ts 改成解析网页版 HTML 之后,用这个模式按日期范围把存量补回来。
+  // 用法:POST /api/enrich/run?mode=hf-paper-figure-rerun&date=2026-09-08&days=7&limit=10
+  //       POST /api/enrich/run?mode=hf-paper-figure-rerun&ids=2609.11412&dry=1
+  // 参数:date(BJT YYYY-MM-DD,默认今天)/ days(默认 1,1-14,范围 [date-days+1, date])/
+  //       ids(逗号分隔 arxiv id,给了就忽略 date/days)/ limit(默认 10,1-30)/ dry=1 / force=1。
+  // 非 force 时只挑 figure_image.source 还不是 'arxiv-html' 且没打过
+  // extra.figure_rerun_at 标记的(2026-09-16 补,防没有网页版的论文被反复重跑),
+  // 处理完不管结果如何都打标记退出候选,循环调用到 remaining=0;
+  // force=1 不看这两个门,remaining 不会递减(自行控制调用次数)。
+  if (mode === 'hf-paper-figure-rerun') {
+    const idsParam = url.searchParams.get('ids') || '';
+    const ids = idsParam.split(',').map((s) => s.trim()).filter(Boolean);
+    const date = url.searchParams.get('date') || undefined;
+    if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return jsonResponse({ error: 'bad date, expect YYYY-MM-DD' }, 400, request, env);
+    }
+    const days = Math.min(Math.max(parseInt(url.searchParams.get('days') || '1'), 1), 14);
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '10'), 1), 30);
+    const dry = url.searchParams.get('dry') === '1';
+    const force = url.searchParams.get('force') === '1';
+    const result = await runHfPaperFigureRerun(env, { date, days, ids, limit, dry, force });
+    return jsonResponse({ ok: true, mode: 'hf-paper-figure-rerun', date, days, dry, force, limit, ...result }, 200, request, env);
   }
   // Phase 4+ prompt 调优:单 paper rerun workflow(reset hash + 强制新 instance ID)
   // 用法:POST /api/enrich/run?mode=hf-rerun-paper&arxiv_id=2604.09839
