@@ -131,6 +131,7 @@ import { checkDailyPageFreshness } from './digest/daily-page-monitor';
 import { checkStagedDailyStages } from './digest/staged-stage-monitor';
 import { handleDailyNewsReviewApi, reconcileDailyNewsReviewPublication } from './digest/news-review-api';
 import { handleManualNewsLeadsApi } from './digest/manual-news-leads-api';
+import { backfillManualLeadCover } from './digest/manual-lead-cover';
 import { freezeNewsReviewBatchFromPool, markNewsReviewPublished, notifyNewsReviewBatch } from './digest/news-review';
 import {
   handleHotNewsRequest,
@@ -5366,6 +5367,25 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '15'), 1), 50);
     const result = await runBlogCoverOgBackfill(env, { limit, dry });
     return jsonResponse({ ok: true, dry, limit, ...result }, 200, request, env);
+  }
+  if (mode === 'manual-lead-cover-backfill') {
+    // 补录线索封面兜底扫描（2026-09-16）。扫 review_date 落在区间内、还没有站内 /r/ 封面的
+    // 补录条目 → 按条目的链接取图（推文走取证接口 / 网页取 og / 微信取封面）→ 迁 R2 →
+    // 写 extra.cover_image。绝不写 media，绝不碰签名覆盖的列与键。
+    // ?date 默认今天(BJT)；?days 1–14 默认 1；?limit 默认 20（≤50）；?dry=1 只看命中零外呼；
+    // ?force=1 无视失败次数上限重取。并发 3、总预算 60s，按 remaining 循环调。
+    const date = url.searchParams.get('date') || bjtDateStr();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return jsonResponse({ error: 'bad date, expect YYYY-MM-DD' }, 400, request, env);
+    }
+    const days = Math.min(Math.max(parseInt(url.searchParams.get('days') || '1'), 1), 14);
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '20'), 1), 50);
+    const dry = url.searchParams.get('dry') === '1';
+    const force = url.searchParams.get('force') === '1';
+    const result = await backfillManualLeadCover(env, { date, days, limit, dry, force });
+    return jsonResponse({
+      ok: true, mode: 'manual-lead-cover-backfill', date, days, limit, dry, force, ...result,
+    }, 200, request, env);
   }
   if (mode === 'blog-cover-bodyhero-backfill') {
     // Task 2 层 2（2026-07-06）：被 generic-sweep / 采用护栏清簇（cover_generic_cleared_hash 置位）后
