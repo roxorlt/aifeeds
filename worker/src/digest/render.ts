@@ -384,9 +384,13 @@ function pickCover(
       return resolveReadmeImages(readme, ghOwner(row.id), ghRepoName(row.id), (ex.default_branch as string) || 'main', apiBase)[0] || null;
     }
     case 'hf-paper': {
-      if (imgs.length) return abs(imgs[0].url as string);
+      // 2026-09-16:论文条目只给站内 /r/ 图,拿不到就不给图。出片机在大陆,
+      // cdn-thumbnails.huggingface.co / arxiv.org 要么连不上要么一张图 10s+,给外链等于没图。
+      const internal = imgs.find((m) => isInternalR2(abs(m.url as string), apiBase));
+      if (internal) return abs(internal.url as string);
       const fig = ex.figure_image as Record<string, unknown> | undefined;
-      if (fig && typeof fig === 'object' && fig.r2_url) return abs(fig.r2_url as string);
+      const figUrl = fig && typeof fig === 'object' ? (fig.r2_url as string) : '';
+      if (figUrl && isInternalR2(abs(figUrl), apiBase)) return abs(figUrl);
       return null;
     }
     case 'x': {
@@ -472,11 +476,16 @@ function buildMedia(source: DigestSource, row: RenderRow, ex: Record<string, unk
       break;
     }
     case 'hf-paper': {
-      for (const m of arr) if (m.type === 'image' && m.url) out.push({ type: 'image', url: abs(m.url as string) });
+      // 只输出站内 /r/ 图(同 pickCover 口径);figure_image.raw_url 的外链回退已删除。
+      for (const m of arr) {
+        if (m.type !== 'image' || !m.url) continue;
+        const u = abs(m.url as string);
+        if (isInternalR2(u, apiBase)) out.push({ type: 'image', url: u });
+      }
       const fig = ex.figure_image as Record<string, unknown> | undefined;
-      if (fig && typeof fig === 'object') {
-        const fu = (fig.r2_url as string) || (fig.raw_url as string);
-        if (fu) out.push({ type: 'image', url: abs(fu) });
+      if (fig && typeof fig === 'object' && fig.r2_url) {
+        const fu = abs(fig.r2_url as string);
+        if (isInternalR2(fu, apiBase)) out.push({ type: 'image', url: fu });
       }
       break;
     }
