@@ -126,6 +126,17 @@ describe('pickCover news — 渲染层质量门(newsCoverQualityGate)', () => {
     expect(item.cover).toBe(`${API}/r/blog/cover-r2.jpg`);
   });
 
+  // 补录条目（blog:manual:*）的封面由 digest/manual-lead-cover.ts 写进 extra.cover_image，
+  // 形态与常规 blog 完全一致 —— 渲染层不需要为它开任何特例（规格 B3「不改 render.ts」）。
+  test('补录条目的 R2 形态 cover_image 一样出封面', () => {
+    const row = newsRow(
+      { cover_image: '/r/blog/x.png' },
+      { id: 'blog:manual:ml-20260916-abc123def456' },
+    );
+    const item = renderItem('news', row, 1, API, GATE);
+    expect(item.cover).toBe(`${API}/r/blog/x.png`);
+  });
+
   test('R2 形态 cover_image(api 域绝对形式)直接采用', () => {
     const row = newsRow({ cover_image: `${API}/r/blog/cover-abs.jpg` });
     const item = renderItem('news', row, 1, API, GATE);

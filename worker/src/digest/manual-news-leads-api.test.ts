@@ -28,8 +28,12 @@ vi.mock('./manual-lead-enrichment', async (importOriginal) => ({
 vi.mock('./manual-lead-content-entry', () => ({
   recoverManualLeadContentEntry: vi.fn(async () => ({ pooled: true, stage: 'done', detail: '' })),
 }));
+vi.mock('./manual-lead-cover', () => ({
+  ensureManualLeadCover: vi.fn(async () => ({ status: 'skipped', reason: 'no_url' })),
+}));
 
 import { handleManualNewsLeadsApi } from './manual-news-leads-api';
+import { ensureManualLeadCover } from './manual-lead-cover';
 import {
   assertManualNewsLeadCandidate,
   beginOwnerAssertedEntry,
@@ -1187,9 +1191,9 @@ describe('manual daily news leads API · lead enrichment', () => {
       },
       expect.objectContaining({ fetchPlainText: expect.any(Function), compress: expect.any(Function) }),
     );
-    // 挂在 waitUntil 上,不在响应路径里。
-    expect(queued).toHaveLength(1);
-    await expect(queued[0]).resolves.toBeUndefined();
+    // 挂在 waitUntil 上,不在响应路径里。补素材与补封面各挂一个。
+    expect(queued).toHaveLength(2);
+    await expect(Promise.all(queued)).resolves.toEqual([undefined, undefined]);
   });
 
   test('线索没有链接时 url 传 null,让取材走搜索那条路', async () => {
@@ -1272,6 +1276,43 @@ describe('manual daily news leads API · lead enrichment', () => {
       },
     ), env(), collectingCtx().ctx);
     expect(runManualLeadEnrichment).not.toHaveBeenCalled();
+  });
+
+  test('担保成功后顺手补一张封面', async () => {
+    const { queued, ctx } = collectingCtx();
+    await vouchEntry(ctx, 'cover-vouch-1');
+    expect(ensureManualLeadCover).toHaveBeenCalledWith(
+      expect.anything(), `blog:manual:${assertedZeroEvidence.id}`,
+    );
+    await expect(Promise.all(queued)).resolves.toEqual([undefined, undefined]);
+  });
+
+  test('确认那条路不补素材,但补封面 —— 确认同样是「候选刚进池」的时刻', async () => {
+    vi.mocked(confirmManualNewsLeadCandidate).mockResolvedValue({
+      ok: true, lead: assertedZeroEvidence,
+      batch: { batch_id: 'nr-20260811-abcdef123456', revision: 2, supersedes_revision: 1, current: true },
+      rerender_enqueued: false,
+    } as never);
+    await handleManualNewsLeadsApi(request(
+      `/api/digest/daily-news-leads/${record.id}/confirm-candidate`,
+      {
+        method: 'POST',
+        headers: { 'Idempotency-Key': 'cover-confirm-1' },
+        body: JSON.stringify({ expected_version: 4, expected_batch_revision: 1 }),
+      },
+    ), env(), collectingCtx().ctx);
+    expect(runManualLeadEnrichment).not.toHaveBeenCalled();
+    expect(ensureManualLeadCover).toHaveBeenCalledWith(
+      expect.anything(), `blog:manual:${assertedZeroEvidence.id}`,
+    );
+  });
+
+  test('担保失败时也不补封面', async () => {
+    vi.mocked(vouchManualNewsLeadCandidate).mockResolvedValueOnce({
+      ok: false, status: 409, error: 'candidate_batch_revision_conflict', lead: assertedZeroEvidence,
+    } as never);
+    await vouchEntry(collectingCtx().ctx, 'cover-vouch-conflict');
+    expect(ensureManualLeadCover).not.toHaveBeenCalled();
   });
 
   test('确认（confirm-candidate）那条路不触发', async () => {

@@ -319,8 +319,14 @@ export interface PageMeta {
   published_at?: string;
 }
 
-/** 找 property/name === key 的 <meta> 的 content。 */
-function metaContent(html: string, key: string): string | undefined {
+/**
+ * 找 property/name === key 的 <meta> 的 content。
+ *
+ * 导出给 `digest/manual-lead-cover.ts` 复用：补录封面要按 og:image → og:image:secure_url →
+ * twitter:image 的顺序逐个试，而 extractPageMeta 把 og / twitter 合并成一个 cover 字段，
+ * 表达不出这个顺序，所以直接复用这层解析而不是再写一份。
+ */
+export function metaContent(html: string, key: string): string | undefined {
   const re = /<meta\b[^>]*>/gi;
   let m: RegExpExecArray | null;
   const target = key.toLowerCase();

@@ -19,6 +19,7 @@ import {
 } from './news-review';
 import { authorizeFormalNewsSet } from './news-source-policy';
 import { backfillManualLeadEnrichment } from './manual-lead-enrichment';
+import { backfillManualLeadCover } from './manual-lead-cover';
 import { createManualLeadEnrichmentAdapters } from './manual-lead-enrichment-runtime';
 import { safeDailyDeliveryError } from './daily-delivery-error';
 
@@ -674,6 +675,20 @@ async function backfillManualEvidenceBeforeEditorial(env: Env, date: string): Pr
     if (stats.scanned) console.log('[manual-lead-enrichment] backfill', JSON.stringify(stats));
   } catch (error) {
     console.warn('[manual-lead-enrichment] backfill before editorial build failed:',
+      String((error as Error)?.message || error).slice(0, 200));
+  }
+  // 封面与背景素材是两件独立的事：素材那一轮出故障时，封面这一轮照跑（各自一个 try）。
+  // 同样「失败绝不阻塞出片」——少一张封面是条目难看，少一期日报是事故。
+  try {
+    const cover = await backfillManualLeadCover(env, { date });
+    if (cover.scanned) {
+      console.log('[manual-lead-cover] backfill', JSON.stringify({
+        scanned: cover.scanned, set: cover.set, skipped: cover.skipped,
+        failed: cover.failed, remaining: cover.remaining,
+      }));
+    }
+  } catch (error) {
+    console.warn('[manual-lead-cover] backfill before editorial build failed:',
       String((error as Error)?.message || error).slice(0, 200));
   }
 }

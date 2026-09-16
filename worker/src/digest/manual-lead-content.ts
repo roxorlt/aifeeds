@@ -256,7 +256,11 @@ export interface ManualLeadContentHooks {
 /** 流水线里的一步：报哪个阶段、叫什么名字、给它多少时间。 */
 export interface ManualLeadContentStepDescriptor {
   stage: ManualLeadContentStage;
-  name: 'fetch-source' | 'analyze' | 'search' | 'generate';
+  /**
+   * `cover` 不在流水线里：它跑在入池那一步之后（`manual-lead-content-workflow.ts`），
+   * 名字放在这里是为了让两条路的 step 名字出自同一处，不各写各的字符串。
+   */
+  name: 'fetch-source' | 'analyze' | 'search' | 'generate' | 'cover';
   budgetMs: number;
 }
 
