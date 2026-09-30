@@ -2,6 +2,7 @@ import { defineConfig, loadEnv, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'node:path'
+import { assetCacheHeadersPlugin } from './scripts/asset-cache-headers'
 
 // 不要在这里手动注入 CF Web Analytics beacon —— ai-feeds.com 这个 zone
 // 已开启 Web Analytics zone-level auto-inject，CF 边缘按 UA 自动给所有子域
@@ -42,7 +43,7 @@ export default defineConfig(({ mode }) => {
   const sameOrigin = (process.env.VITE_API_SAME_ORIGIN ?? fileEnv.VITE_API_SAME_ORIGIN) === 'true'
 
   return {
-    plugins: [apiHtmlEnvPlugin(apiBase, sameOrigin), react(), tailwindcss()],
+    plugins: [apiHtmlEnvPlugin(apiBase, sameOrigin), react(), tailwindcss(), assetCacheHeadersPlugin()],
     resolve: {
       alias: {
         '@': path.resolve(__dirname, './src'),
