@@ -530,6 +530,7 @@ async function getCcMirrorStats(env: Env): Promise<Record<string, unknown>> {
   }
 
   return {
+    enabled: env.CC_MIRROR_ENABLED === "1",
     source_policy: sourcePolicy,
     review_status: fixedCounts(
       reviewRows.results ?? [],

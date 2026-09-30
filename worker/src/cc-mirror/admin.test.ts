@@ -493,6 +493,44 @@ describe("cc mirror admin authorization and routing", () => {
 });
 
 describe("cc mirror review list and stats", () => {
+  it.each([
+    [undefined, false],
+    ["0", false],
+    ["1", true],
+    ["do-not-emit-this-value", false],
+  ])("reports only the runtime enabled boolean for %s", async (value, enabled) => {
+    const { db, env } = setup();
+    env.CC_MIRROR_ENABLED = value;
+    const response = await handleCcMirrorAdmin(
+      authed("/api/admin/cc-mirror/stats"), env,
+    );
+    expect(response?.status).toBe(200);
+    expect(response?.headers.get("Cache-Control")).toBe("private, no-store");
+    const body = await json(response!);
+    expect(body.enabled).toBe(enabled);
+    expect(body).not.toHaveProperty("CC_MIRROR_ENABLED");
+    expect(JSON.stringify(body)).not.toContain("do-not-emit-this-value");
+    expect(env.CC_MIRROR_ENABLED).toBe(value);
+    expect(db.writes).toBe(0);
+  });
+
+  it.each(["basic", "access"])("does not expose or read the flag without %s authentication", async (mode) => {
+    const { db, env } = setup();
+    if (mode === "access") {
+      env.CF_ACCESS_AUD = "fixture-audience";
+      env.CF_ACCESS_TEAM_DOMAIN = "https://fixture.cloudflareaccess.com";
+    }
+    const flagRead = vi.fn(() => { throw new Error("flag must not be read before auth"); });
+    Object.defineProperty(env, "CC_MIRROR_ENABLED", { get: flagRead });
+    const response = await handleCcMirrorAdmin(
+      new Request("https://example.com/api/admin/cc-mirror/stats"), env,
+    );
+    expect(response?.status).toBe(401);
+    expect(await json(response!)).toEqual({ error: "unauthorized" });
+    expect(flagRead).not.toHaveBeenCalled();
+    expect(db.prepares).toBe(0);
+  });
+
   it("paginates reviews by strict item_id cursor and survives malformed flags", async () => {
     const { db, env } = setup();
     for (const id of ["x_list:001", "x_list:002", "x_list:003"]) {
@@ -613,6 +651,7 @@ describe("cc mirror review list and stats", () => {
     );
     expect(response?.status).toBe(200);
     expect(await json(response!)).toEqual({
+      enabled: false,
       source_policy: { allow: 1, manual: 1, deny: 1 },
       review_status: {
         pending: 0,
