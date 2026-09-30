@@ -5,7 +5,7 @@
  * 再用常规新闻那一套提示词写出标题与摘要：
  *
  * ```
- * 有链接：抓正文 → 读懂是什么新闻并拟检索词 → 搜索 → 素材合并 → 生成
+ * 有链接：抓指定链接正文 → 排除登录/验证墙 → 读懂 → 仅凭该正文生成
  * 无链接：owner 那句话即检索词 → 搜索 → 素材合并 → 生成
  * ```
  *
@@ -74,8 +74,8 @@ export interface ManualLeadContentMaterial {
  * 交给生成函数的素材正文上限。
  *
  * 常规新闻走 `selectEnrichExcerptForFeeds` 的 4000 —— 那是单篇文章的量。补录喂进去的是
- * 「owner 给的链接正文 + 搜索召回的报道」两份合起来，4000 会把第二份挤掉大半，模型只能
- * 看着半截素材写。本仓别处同类调用（`manual-news-leads-runtime.ts` 的评估、
+ * 长正文；指定链接不再混入搜索召回，但保留既有预算，避免截掉重要上下文。
+ * 本仓别处同类调用（`manual-news-leads-runtime.ts` 的评估、
  * `classify-translate.ts` 的正文翻译）用的是 8000–24000，这里取 12000 是同一量级。
  * 补录一天也就几条，宽裕一点换的是内容质量。
  */
@@ -229,7 +229,7 @@ export interface ManualLeadContentAdapters {
   /**
    * 读懂这是什么新闻，给出原标题与检索词。给不出回 `null`。
    *
-   * `material` 是抓回的正文；没有链接（或没抓到）时是 `null`，那一路只读 owner 那句话，
+   * `material` 是抓回的可用正文；没有链接时是 `null`，那一路只读 owner 那句话，
    * 把它压成几个关键词 —— 整句话直接拿去搜会 502（规格第 10.3 节）。
    */
   analyze(input: { clue: string; material: ManualEnrichmentMaterial | null }):
@@ -340,6 +340,37 @@ export function emptyManualLeadContentResult(detail: string): ManualLeadContentR
   };
 }
 
+/** 只识别明确的验证/登录入口；不同 URL 本身不是拒绝理由（允许正常跳转）。 */
+function sourceUrlWall(url: string): '验证' | '登录' | null {
+  try {
+    const path = decodeURIComponent(new URL(url).pathname).toLowerCase();
+    if (/^\/mp\/wappoc_appmsgcaptcha\/?$/.test(path)
+      || /^\/cdn-cgi\/(?:challenge-platform|l\/chk_captcha)(?:\/|$)/.test(path)
+      || /^\/(?:captcha|challenge|verify-human)\/?$/.test(path)) return '验证';
+    if (/^\/(?:(?:auth|account|accounts|user|users|oauth)\/)?(?:login|log-in|signin|sign-in)(?:\.(?:php|html))?\/?$/.test(path)) return '登录';
+  } catch { /* URL 安全性仍由现有抓取入口保证；这里不另建抓取或跳转策略。 */ }
+  return null;
+}
+
+/**
+ * 墙文本不能先被定为 report 再进入分析/生成。匹配页面开头的操作指令而不是正文中的
+ * captcha/login 关键词；只检查开头的墙指令或墙标题+表单，避免正文引用被误判。
+ */
+function sourceBodyWall(text: string): '验证' | '登录' | null {
+  const plain = text.trim().replace(/^#{1,6}\s*/, '');
+  const firstLine = plain.split(/\r?\n/, 1)[0].trim();
+  const body = plain.replace(/\s+/g, ' ').trim();
+  const opening = body.slice(0, 500);
+  // 指令必须占满首行，或紧跟明确的表单/验证操作；冒号引出的新闻标题不是墙。
+  const chineseInstruction = '(?:请(?:先)?(?:完成|进行|通过)(?:安全|人机|身份)?验证|请输入验证码)(?:后(?:即可)?继续访问)?';
+  const instruction = `(?:${chineseInstruction}|verify (?:that )?you are (?:a )?human(?: to continue)?)`;
+  if (new RegExp(`^${instruction}[。！.!]?$`, 'i').test(firstLine)
+    || new RegExp(`^${instruction}[。！.!]?\\s+(?:请输入验证码|请拖动滑块|提交|刷新验证码|complete the security check|click the checkbox)`, 'i').test(opening)) return '验证';
+  if (/^(?:(?:访问)?环境异常[，,。\s].*(?:验证|验证码)|(?:安全验证|人机验证|验证码)\s+请.*(?:验证|滑块|继续访问)|checking your browser\b|enable javascript and cookies to continue\b|just a moment[.\s…!]*(?:$|checking your browser|verify|enable javascript and cookies))/i.test(opening)) return '验证';
+  if (/^(?:请(?:先)?登录(?:后|以)(?:继续)?(?:阅读|访问|查看)|(?:sign in|log in|login) to (?:continue|read|view|access)\b|(?:sign in|log in|login)\s+(?:email(?: address)?|username)\s+password\b)/i.test(opening)) return '登录';
+  return null;
+}
+
 /** 让一步受一个时限约束。超时不是错误，是「这一步这次没拿到东西」。 */
 function withBudget<T>(work: Promise<T>, budgetMs: number): Promise<T | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -415,18 +446,26 @@ export async function runManualLeadContentPipeline(
         { stage: 'fetching_source', name: 'fetch-source', budgetMs: budgets.fetching_source },
         () => adapters.fetchSource(url, clue.date),
       );
-      if (source && String(source.text || '').trim()) collected.push(classifyManualLeadMaterial(source));
-      else source = null;
+      const wall = sourceUrlWall(url) || sourceUrlWall(String(source?.url || ''))
+        || sourceBodyWall(String(source?.text || ''));
+      const missing = wall
+        ? `指定链接返回${wall}页面，未取得可用正文素材`
+        : !source ? '指定链接未取到正文素材（抓取失败或超时）'
+          : !String(source.text || '').trim() ? '指定链接正文素材为空' : '';
+      if (missing) {
+        state.detail = `${missing}，未搜索替代报道，先按你写的那句话入池`;
+        return;
+      }
+      collected.push(classifyManualLeadMaterial(source!));
     }
 
-    // **有没有链接都走这一步**（规格第 10.3 节）：owner 那句整话直接拿去搜，长中文检索式
-    // 在 ScrapeBadger 上必 502，实测 9 字 200、21 字 502。这一步把它压成几个关键词。
+    // 有可用正文只提取原标题；纯文本入口才需要压缩检索词。URL 抓取失败已在上面返回。
     if (source || clueText) {
       const analysis = await run(
         { stage: 'analyzing', name: 'analyze', budgetMs: budgets.analyzing },
         () => adapters.analyze({ clue: clueText, material: source }),
       );
-      // 分析这一步只影响「拿什么去搜」。它挂了就退回那句话的前 12 个字，整轮照跑。
+      // 纯文本分析失败仍退回短检索词；URL 分析失败仍只使用已抓到的原文。
       if (analysis?.query?.trim()) query = analysis.query.trim();
       // 原标题只在真抓到正文时才作数：没有正文就没有「文章自己的标题」这回事，
       // 拿模型顺着那句话编的一个当标题，等于把 owner 的线索改写一遍再当成事实。
@@ -434,7 +473,7 @@ export async function runManualLeadContentPipeline(
     }
     query = manualLeadSearchQuery(query || manualLeadFallbackQuery(clueText));
 
-    if (query) {
+    if (!url && query) {
       const found = await run(
         { stage: 'searching', name: 'search', budgetMs: budgets.searching },
         () => adapters.search(query, clue.date),

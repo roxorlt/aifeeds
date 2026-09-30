@@ -132,14 +132,13 @@ describe('一步录入的内容加工 workflow', () => {
     expect(isManualLeadContentWorkflowParams({ kind: MANUAL_LEAD_CONTENT_WORKFLOW_KIND })).toBe(false);
   });
 
-  test('四个加工阶段各是一个 durable step，入池之后还有一步补封面', async () => {
+  test('指定链接的三个加工阶段各是一个 durable step，不安排搜索', async () => {
     const { calls, step } = recordingStep();
     await runManualLeadContentEntryWorkflow({} as never, PARAMS, step, { adapters: adapters() });
 
     expect(calls.map((call) => call.name)).toEqual([
       'manual-lead-content:fetch-source',
       'manual-lead-content:analyze',
-      'manual-lead-content:search',
       'manual-lead-content:generate',
       'manual-lead-content:pool',
       'manual-lead-content:cover',
@@ -191,29 +190,62 @@ describe('一步录入的内容加工 workflow', () => {
 
     const stageCalls = vi.mocked(setManualLeadContentStage).mock.calls;
     expect(stageCalls.map((call) => call[2].stage)).toEqual([
-      'fetching_source', 'analyzing', 'searching', 'drafting',
+      'fetching_source', 'analyzing', 'drafting',
     ]);
     for (const call of stageCalls) {
       expect(Number(call[2].deadlineAt)).toBeGreaterThan(Date.now());
     }
   });
 
-  test('一步彻底失败只作废这一步：后面的步骤照跑，入池照样发生', async () => {
+  test('指定链接抓取彻底失败直接回退入池，不运行分析、搜索或生成', async () => {
     const { seen, step } = failingStep('fetch-source');
     const deps = adapters();
     await runManualLeadContentEntryWorkflow({} as never, PARAMS, step, { adapters: deps });
 
-    // 抓正文那一步连重试都耗尽了，拟检索词、搜索与生成仍要跑 —— 一步失败不能连坐整轮。
+    // 仅停止取材与生成，既有 owner fallback 入池照常。
     expect(seen).toEqual([
       'manual-lead-content:fetch-source',
-      'manual-lead-content:analyze',
-      'manual-lead-content:search',
-      'manual-lead-content:generate',
       'manual-lead-content:pool',
       'manual-lead-content:cover',
     ]);
-    expect(deps.search).toHaveBeenCalled();
+    expect(deps.analyze).not.toHaveBeenCalled();
+    expect(deps.search).not.toHaveBeenCalled();
+    expect(deps.generate).not.toHaveBeenCalled();
     expect(poolManualLeadContentEntry).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(poolManualLeadContentEntry).mock.calls[0][2]).toMatchObject({
+      drafted: null, materialTier: 'none', materials: [], excerptZh: '',
+      detail: expect.stringContaining('指定链接未取到'),
+    });
+  });
+
+  test('微信验证墙传给入池的是 none 与具体原因，进度不预写 report', async () => {
+    const { step } = recordingStep();
+    const deps = adapters({ fetchSource: vi.fn(async () => material({
+      url: 'https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha', text: '环境异常，请完成验证',
+    })) });
+    await runManualLeadContentEntryWorkflow({} as never, PARAMS, step, { adapters: deps });
+    expect(vi.mocked(poolManualLeadContentEntry).mock.calls[0][2]).toMatchObject({
+      drafted: null, materialTier: 'none', materials: [], materialExcerpt: '', excerptZh: '',
+      detail: expect.stringContaining('指定链接返回验证页面'),
+    });
+    expect(vi.mocked(setManualLeadContentStage).mock.calls.map((call) => call[2])).toEqual([
+      { stage: 'fetching_source', deadlineAt: expect.any(Number) },
+    ]);
+    expect(deps.analyze).not.toHaveBeenCalled();
+    expect(deps.search).not.toHaveBeenCalled();
+    expect(deps.generate).not.toHaveBeenCalled();
+  });
+
+  test('纯文本 workflow 保留分析、搜索、生成与入池', async () => {
+    const { calls, step } = recordingStep();
+    const deps = adapters();
+    await runManualLeadContentEntryWorkflow({} as never, { ...PARAMS, input_url: '' }, step, { adapters: deps });
+    expect(calls.map((call) => call.name)).toEqual([
+      'manual-lead-content:analyze', 'manual-lead-content:search', 'manual-lead-content:generate',
+      'manual-lead-content:pool', 'manual-lead-content:cover',
+    ]);
+    expect(deps.fetchSource).not.toHaveBeenCalled();
+    expect(deps.search).toHaveBeenCalledWith('OpenAI Astra 企业模型', PARAMS.review_date);
   });
 
   test('生成那一步彻底失败时退回 owner 那句话入池，不带起草结果', async () => {
