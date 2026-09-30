@@ -194,14 +194,145 @@ function stageRecorder() {
 }
 
 describe('runManualLeadContentPipeline', () => {
-  test('有链接：抓正文 → 读懂并拟检索词 → 搜索 → 生成，阶段依次报出去', async () => {
+  test.each([
+    ['null', null, '未取到'],
+    ['empty', material({ text: ' \n ' }), '为空'],
+    ['微信验证跳转', material({ url: 'https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha?target_url=x', text: '访问环境异常，请完成验证后继续访问' }), '验证'],
+    ['login URL', material({ url: 'https://example.com/account/login?next=/news', text: 'Welcome' }), '登录'],
+    ['challenge URL', material({ url: 'https://example.com/cdn-cgi/challenge-platform/h/g', text: 'Just a moment...' }), '验证'],
+    ['captcha body', material({ text: '请完成安全验证\n请输入验证码后继续访问' }), '验证'],
+    ['login body', material({ text: '请先登录后继续阅读\n账号 密码 登录' }), '登录'],
+    ['English challenge', material({ text: 'Just a moment...\nChecking your browser before accessing the site.' }), '验证'],
+    ['English login', material({ text: 'Sign in to continue\nEmail Password' }), '登录'],
+    ['长验证墙', material({ text: `请完成安全验证\n请输入验证码后继续访问\n${'页脚帮助信息。'.repeat(400)}` }), '验证'],
+    ['验证标题', material({ text: '安全验证\n请拖动滑块完成验证后继续访问' }), '验证'],
+    ['login form', material({ text: 'Login\nEmail address\nPassword\nForgot password?' }), '登录'],
+    ['JS challenge', material({ text: 'Enable JavaScript and cookies to continue' }), '验证'],
+    ['challenge title', material({ text: 'Just a moment...' }), '验证'],
+    ['完整英文验证指令', material({ text: 'Verify you are human\nComplete the security check to continue.' }), '验证'],
+    ['完整中文验证码指令', material({ text: '请输入验证码\n提交 刷新验证码' }), '验证'],
+  ])('指定链接 %s：不分析、搜索或生成，不保留墙正文', async (_name, source, reason) => {
+    const deps = adapters({ fetchSource: vi.fn(async () => source as ManualEnrichmentMaterial | null) });
+    const recorder = stageRecorder();
+    const result = await runManualLeadContentPipeline(CLUE, deps, recorder.runStep);
+    expect(deps.analyze).not.toHaveBeenCalled();
+    expect(deps.search).not.toHaveBeenCalled();
+    expect(deps.generate).not.toHaveBeenCalled();
+    expect(recorder.stages).toEqual(['fetching_source']);
+    expect(result).toMatchObject({ drafted: null, materialTier: 'none', materials: [], materialExcerpt: '', excerptZh: '', aiCategory: '' });
+    expect(result.detail).toContain(reason);
+    expect(result.detail).toContain('指定链接');
+  });
+
+  // MSB-001-R1：集中覆盖本次中文指令规则的所有既有可选组合与完整访问后缀。
+  const chineseWallInstructions = [
+    ...['', '先'].flatMap((first) => ['完成', '进行', '通过'].flatMap((verb) =>
+      ['', '安全', '人机', '身份'].map((kind) => `请${first}${verb}${kind}验证`))),
+    '请输入验证码',
+  ];
+  test.each(chineseWallInstructions)('MSB-001-R1 完整中文墙指令及标题对照：%s', async (instruction) => {
+    const url = 'https://news.example.com/articles/captcha-study';
+    for (const suffix of ['', '后继续访问', '后即可继续访问']) {
+      for (const separator of ['\n', ' ']) {
+        const text = `${instruction}${suffix}${separator}请输入验证码${separator}提交 刷新验证码`;
+        const deps = adapters({ fetchSource: vi.fn(async () => material({ url, text })) });
+        const result = await runManualLeadContentPipeline({ ...CLUE, url }, deps, stageRecorder().runStep);
+        expect(deps.analyze, text).not.toHaveBeenCalled();
+        expect(deps.search, text).not.toHaveBeenCalled();
+        expect(deps.generate, text).not.toHaveBeenCalled();
+        expect(result, text).toMatchObject({
+          drafted: null, materialTier: 'none', materials: [], materialExcerpt: '', excerptZh: '',
+        });
+
+        const article = `${instruction}${suffix}：验证码设计研究\n研究者比较不同浏览器中的验证体验。`;
+        const articleDeps = adapters({ fetchSource: vi.fn(async () => material({ url, text: article })) });
+        const articleResult = await runManualLeadContentPipeline({ ...CLUE, url }, articleDeps, stageRecorder().runStep);
+        expect(articleResult.materialTier, article).toBe('report');
+        expect(articleDeps.generate, article).toHaveBeenCalledWith(expect.objectContaining({ excerpt: article }));
+        expect(articleDeps.search, article).not.toHaveBeenCalled();
+      }
+    }
+  });
+
+  test('9/29 AMD / World Labs 微信墙不能被 winzheng Atlas 发布事件替换', async () => {
+    const deps = adapters({
+      fetchSource: vi.fn(async () => material({
+        url: 'https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha', text: '环境异常，完成验证后继续访问',
+      })),
+      search: vi.fn(async () => material({ url: 'https://winzheng.com/atlas', text: 'Atlas 发布事件' })),
+    });
+    const result = await runManualLeadContentPipeline({
+      url: 'https://mp.weixin.qq.com/s/amd-world-labs', text: 'AMD 收购 World Labs', date: '2026-09-29',
+    }, deps, stageRecorder().runStep);
+    expect(deps.search).not.toHaveBeenCalled();
+    expect(deps.analyze).not.toHaveBeenCalled();
+    expect(deps.generate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ drafted: null, materialTier: 'none', materials: [], materialExcerpt: '', excerptZh: '' });
+  });
+
+  test.each([
+    'https://news.example.com/2026/amd-world-labs',
+    'https://news.example.com/articles/captcha-login-research?next=/login',
+  ])('正常跳转与文章讨论验证码/login 不误伤：%s', async (url) => {
+    const text = '研究报告：验证码与 login 功能的可用性。研究者讨论“请先登录后继续阅读”和“Verify you are human”等界面文案。';
+    const deps = adapters({ fetchSource: vi.fn(async () => material({ url, text })) });
+    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
+    expect(deps.generate).toHaveBeenCalledWith(expect.objectContaining({ excerpt: text }));
+    expect(deps.search).not.toHaveBeenCalled();
+    expect(result.materials).toHaveLength(1);
+    expect(result.drafted?.url).toBe(url);
+  });
+
+  test('用户链接本身是验证页时即使返回普通文本也不使用', async () => {
+    const deps = adapters();
+    const result = await runManualLeadContentPipeline({ ...CLUE, url: 'https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha' }, deps, stageRecorder().runStep);
+    expect(deps.analyze).not.toHaveBeenCalled();
+    expect(deps.generate).not.toHaveBeenCalled();
+    expect(deps.search).not.toHaveBeenCalled();
+    expect(result.materialTier).toBe('none');
+    expect(result.detail).toContain('验证');
+  });
+
+  test('验证码研究标题与 captcha 子路径不是验证入口', async () => {
+    const text = '验证码研究：登录功能的安全性\n本文分析 CAPTCHA 与 login 的可用性问题。';
+    const deps = adapters({ fetchSource: vi.fn(async () => material({ url: 'https://example.com/captcha/research', text })) });
+    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
+    expect(result.materialTier).toBe('report');
+    expect(deps.generate).toHaveBeenCalledWith(expect.objectContaining({ excerpt: text }));
+  });
+
+  test.each([
+    'Verify you are human: why CAPTCHA tests are getting harder\nThis article reports a study of CAPTCHA accessibility and user error rates.\nResearchers compared image and audio challenges across browsers.',
+    '请输入验证码：为什么验证码越来越难？\n本文报道验证码可用性研究，比较图像和音频挑战的用户错误率。',
+    '请完成安全验证：验证码设计研究\n研究者比较不同浏览器中的验证体验。',
+  ])('MSB-001：验证指令开头的报道标题不是墙：%s', async (text) => {
+    const url = 'https://news.example.com/articles/captcha-study';
+    const deps = adapters({ fetchSource: vi.fn(async () => material({ url, text })) });
+    const result = await runManualLeadContentPipeline({ ...CLUE, url }, deps, stageRecorder().runStep);
+    expect(result.materialTier).toBe('report');
+    expect(deps.analyze).toHaveBeenCalled();
+    expect(deps.generate).toHaveBeenCalledWith(expect.objectContaining({ excerpt: text }));
+    expect(deps.search).not.toHaveBeenCalled();
+  });
+
+  test('有正文时分析失败仍仅凭原文生成，不改走搜索', async () => {
+    const deps = adapters({ analyze: vi.fn(async () => { throw new Error('analysis unavailable'); }) });
+    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
+    expect(deps.search).not.toHaveBeenCalled();
+    expect(deps.generate).toHaveBeenCalledWith(expect.objectContaining({
+      title: CLUE.text, excerpt: 'OpenAI 今天发布 Astra，面向企业客户开放。',
+    }));
+    expect(result.materialTier).toBe('report');
+  });
+
+  test('有链接：抓正文 → 读懂 → 生成，不搜索替代素材', async () => {
     const deps = adapters();
     const recorder = stageRecorder();
     const result = await runManualLeadContentPipeline(CLUE, deps, recorder.runStep);
 
-    expect(recorder.stages).toEqual(['fetching_source', 'analyzing', 'searching', 'drafting']);
+    expect(recorder.stages).toEqual(['fetching_source', 'analyzing', 'drafting']);
     expect(deps.fetchSource).toHaveBeenCalledWith(CLUE.url, CLUE.date);
-    expect(deps.search).toHaveBeenCalledWith('OpenAI Astra 企业模型', CLUE.date);
+    expect(deps.search).not.toHaveBeenCalled();
     expect(result.drafted).toEqual({
       title: 'OpenAI 发布企业级模型 Astra',
       summary: 'OpenAI 发布 Astra，把企业级推理能力做成可直接采购的产品。',
@@ -215,7 +346,7 @@ describe('runManualLeadContentPipeline', () => {
     expect(result.materialExcerpt).toContain('面向企业客户开放');
   });
 
-  test('生成用的标题取抓回正文里的原标题，摘要素材含两份来源', async () => {
+  test('生成用的标题取抓回正文里的原标题，摘要只含指定来源', async () => {
     const deps = adapters();
     await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
     expect(deps.generate).toHaveBeenCalledWith(expect.objectContaining({
@@ -226,7 +357,7 @@ describe('runManualLeadContentPipeline', () => {
     }));
     const excerpt = String(vi.mocked(deps.generate).mock.calls[0][0].excerpt);
     expect(excerpt).toContain('OpenAI 今天发布 Astra');
-    expect(excerpt).toContain('路透社报道');
+    expect(excerpt).not.toContain('路透社报道');
   });
 
   // 规格第 10.3 节：owner 那句整话直接拿去搜，长中文检索式在 ScrapeBadger 上必 502
@@ -279,16 +410,17 @@ describe('runManualLeadContentPipeline', () => {
       fetchSource: vi.fn(async () => { throw new Error('gateway down'); }),
     });
     const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
-    // 抓取那一路挂了，分析改成只读 owner 那句话，搜索与生成照常。
-    expect(deps.analyze).toHaveBeenCalledWith({ clue: CLUE.text, material: null });
-    expect(deps.search).toHaveBeenCalledWith('OpenAI Astra 企业模型', CLUE.date);
-    expect(result.drafted).not.toBeNull();
-    expect(result.materialTier).toBe('report');
+    expect(deps.analyze).not.toHaveBeenCalled();
+    expect(deps.search).not.toHaveBeenCalled();
+    expect(deps.generate).not.toHaveBeenCalled();
+    expect(result.drafted).toBeNull();
+    expect(result.materialTier).toBe('none');
+    expect(result.detail).toContain('指定链接');
   });
 
   test('分析抛异常时退回那句话的前 12 个字符检索，不让这一步拖垮整轮', async () => {
     const deps = adapters({ analyze: vi.fn(async () => { throw new Error('llm down'); }) });
-    const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
+    const result = await runManualLeadContentPipeline({ ...CLUE, url: null }, deps, stageRecorder().runStep);
     expect(deps.search).toHaveBeenCalledWith(manualLeadFallbackQuery(CLUE.text), CLUE.date);
     expect(result.drafted).not.toBeNull();
   });
@@ -328,7 +460,7 @@ describe('runManualLeadContentPipeline', () => {
     expect(result.materialExcerpt).toContain('以下内容为 X 博主 @blogger 的发文，非媒体报道：');
   });
 
-  test('推文与媒体报道都取到时，媒体报道当主料，推文只作补充', async () => {
+  test('指定推文不被搜索桩中的媒体报道替换或混料', async () => {
     const deps = adapters({
       fetchSource: vi.fn(async () => material({
         text: '博主说 Astra 要来了。', url: 'https://x.com/blogger/status/7',
@@ -336,10 +468,10 @@ describe('runManualLeadContentPipeline', () => {
       })),
     });
     const result = await runManualLeadContentPipeline(CLUE, deps, stageRecorder().runStep);
-    expect(result.materialTier).toBe('report');
-    expect(result.drafted?.source).toBe('reuters.com');
-    expect(result.materialExcerpt.indexOf('路透社'))
-      .toBeLessThan(result.materialExcerpt.indexOf('以下内容为 X 博主'));
+    expect(result.materialTier).toBe('tweet');
+    expect(result.drafted?.source).toBe('X @blogger');
+    expect(result.materialExcerpt).not.toContain('路透社');
+    expect(deps.search).not.toHaveBeenCalled();
   });
 
   test('总预算到点就立刻回，不挂住调用方', async () => {
@@ -356,14 +488,15 @@ describe('runManualLeadContentPipeline', () => {
     expect(result.stoppedAt).toBe('fetching_source');
   });
 
-  test('单步预算到点只作废这一步，后面的步骤照跑', async () => {
+  test('指定链接抓取超时直接回退，不搜索或生成', async () => {
     const never = () => new Promise<never>(() => {});
     const deps = adapters({ fetchSource: vi.fn(never) });
     const result = await runManualLeadContentPipeline(
       CLUE, deps, stageRecorder().runStep, { stageBudgetMs: { fetching_source: 20 } },
     );
-    expect(deps.search).toHaveBeenCalled();
-    expect(result.drafted).not.toBeNull();
+    expect(deps.search).not.toHaveBeenCalled();
+    expect(deps.generate).not.toHaveBeenCalled();
+    expect(result.drafted).toBeNull();
   });
 
   test('阶段回调自己抛异常也伤不到整轮', async () => {
