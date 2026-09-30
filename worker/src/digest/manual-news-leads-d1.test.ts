@@ -6602,10 +6602,9 @@ describe('一步录入端到端：真链接 → 真加工 → 真入池', () => 
     expect(extra.excerpt_zh).toBe(DRAFT_EXCERPT);
     expect(extra.ai_category).toBe('model-release');
     expect(extra.manual_evidence_text).toBe(DRAFT_EXCERPT);
-    // 抓正文与搜索是两次请求，两次都带审核日期。
+    // 指定链接只抓该 URL 正文，不请求搜索或混入替代报道。
     expect(gatewayBodies).toEqual([
       { url: 'https://openai.com/index/astra/', date: '2026-08-28' },
-      { query: 'OpenAI Astra 企业模型', date: '2026-08-28' },
     ]);
     expect(leadRowOf(state, leadId)).toMatchObject({
       status: 'needs_review', confirmed_at: 100,
@@ -6682,13 +6681,17 @@ describe('一步录入端到端：真链接 → 真加工 → 真入池', () => 
     });
   });
 
-  // 规格第 9 节第 6 条：断网 / 搜索全挂。这是整份规格最不能破的那一条。
-  test('取材与生成全挂：照样入池，标题退回 owner 那句话，卡片写明只能依据那句话', async () => {
+  // 指定链接抓取失败：即使搜索桩能返回素材，也只能回退 owner 线索，不能搜索替代。
+  test('指定链接取材失败：不搜索，照样按 owner 那句话入池并写明缺失原因', async () => {
+    const gatewayBodies: Record<string, unknown>[] = [];
     const { state, response, leadId } = await submitOnce({
       text: ASSERTED_STATEMENT, url: 'https://openai.com/index/astra/',
-    }, { source: null, search: null, llmDown: true });
+    }, { source: null, llmDown: true, gatewayBodies });
 
     expect(response.status).toBe(202);
+    expect(gatewayBodies).toEqual([
+      { url: 'https://openai.com/index/astra/', date: '2026-08-28' },
+    ]);
     const itemId = `blog:manual:${leadId}`;
     expect(state.db.sqlite.prepare('SELECT title FROM items WHERE id = ?').get(itemId))
       .toMatchObject({ title: ASSERTED_STATEMENT });
@@ -6696,7 +6699,8 @@ describe('一步录入端到端：真链接 → 真加工 → 真入池', () => 
     expect(row).toMatchObject({
       confirmed_at: 100, content_stage: 'done', content_material_tier: 'none',
     });
-    expect(String(row.content_stage_detail)).toContain('未取到任何公开素材');
+    expect(String(row.content_stage_detail)).toContain('指定链接未取到正文素材');
+    expect(String(row.content_stage_detail)).toContain('未搜索替代报道');
     await expect(authorizeFormalNewsSet(state.env, '2026-08-28', [itemId], 'e2e-fallback-gate'))
       .resolves.toMatchObject({ allowed_ids: [itemId] });
   });
