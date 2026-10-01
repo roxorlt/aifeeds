@@ -117,7 +117,10 @@ function renderGh(row: RenderRow, ex: Rec, apiBase: string): string {
     const repo = ghRepoName(row.id);
     const branch = s(ex.default_branch) || 'main';
     const rewritten = rewriteReadmeImageUrls(readme, owner, repo, branch, apiBase);
-    const { html, truncated } = markdownToSafeHtml(rewritten, { maxChars: GH_README_MAX_CHARS });
+    const { html, truncated } = markdownToSafeHtml(rewritten, {
+      maxChars: GH_README_MAX_CHARS,
+      resolveHref: readmeLinkResolver(owner, repo, branch, s(ex.readme_path) || 'README.md'),
+    });
     const safe = addLazy(demoteHeadings(html));
     if (safe) parts.push(`<h2>README</h2>\n<div class="item-body">${safe}</div>`);
     if (truncated && row.url) {
@@ -491,6 +494,17 @@ function ghRepoName(itemId: string): string {
   const sid = idx >= 0 ? itemId.slice(idx + 1) : itemId;
   const slash = sid.lastIndexOf('/');
   return slash >= 0 ? sid.slice(slash + 1) : sid;
+}
+
+// Ordinary links resolve at the README directory; traversal cannot escape the repo prefix.
+function readmeLinkResolver(owner: string, repo: string, branch: string, readmePath: string) {
+  const root = `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/blob/${encodeURIComponent(branch)}`;
+  const base = new URL(`/${readmePath.replace(/^\/+/, '')}`, 'https://readme.invalid');
+  return (href: string): string => {
+    if (href.startsWith('#') || /^(?:https?:|\/\/)/i.test(href)) return href;
+    const resolved = new URL(href, base);
+    return `${root}${resolved.pathname}${resolved.search}${resolved.hash}`;
+  };
 }
 
 // README markdown 图片 URL → 绝对地址（相对→raw.githubusercontent，/r/→apiBase，http(s)/data 透传）。

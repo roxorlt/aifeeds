@@ -645,6 +645,55 @@ describe('append-only daily release state machine', () => {
     expect(summaries).toEqual([]);
   });
 
+  test('summary reads are bounded concurrent, ordered and honor limit; late withdrawal stays hidden', async () => {
+    let reading = false;
+    let graphReads = 0;
+    const fixture = releaseDb({ beforeExecute(sql) {
+      if (reading && sql.includes('SELECT * FROM append_only_publications WHERE publication_id=?') && ++graphReads === 2) {
+        fixture.sqlite.prepare("DELETE FROM daily_release_heads WHERE date='2026-08-10'").run();
+      }
+    } });
+    const { DB } = fixture;
+    const r2 = r2Bucket();
+    for (let day = 1; day <= 10; day++) {
+      const date = `2026-08-${String(day).padStart(2, '0')}`;
+      const bytes = new TextEncoder().encode(`<html>${date}</html>`);
+      const page = await reserveAppendOnlyPublication({ DB } as never, {
+        publication_date: date, publication_type: 'page', business_revision_id: 'a'.repeat(64),
+        objects: [{ object_role: 'html', mime: 'text/html; charset=utf-8', bytes }],
+        metadata: { title: date }, release_binding: { video_mode: 'none' },
+      });
+      await materializeAppendOnlyPublication({ DB, READMES: r2.bucket } as never, page.reservation, { html: bytes });
+      await promoteDailyRelease({ DB, READMES: r2.bucket } as never, page.reservation.publication_id);
+    }
+    let active = 0;
+    let peak = 0;
+    const delay = async (fn: () => Promise<unknown>) => {
+      active++; peak = Math.max(peak, active);
+      try { await new Promise(resolve => setTimeout(resolve, 1)); return await fn(); }
+      finally { active--; }
+    };
+    const delayedDB = { prepare(sql: string) {
+      let original = DB.prepare(sql);
+      const statement = {
+        bind(...values: unknown[]) { original = original.bind(...values); return statement; },
+        first() { return delay(() => original.first()); },
+        all() { return delay(() => original.all()); },
+      };
+      return statement;
+    } } as unknown as D1Database;
+    const dates = Array.from({ length: 10 }, (_, i) => `2026-08-${String(10 - i).padStart(2, '0')}`);
+    expect((await listAuthorizedDailyReleaseSummaries({ DB: delayedDB })).map(s => s.date)).toEqual(dates);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(8);
+    expect(active).toBe(0);
+    expect((await listAuthorizedDailyReleaseSummaries({ DB }, 2)).map(s => s.date)).toEqual(dates.slice(0, 2));
+    expect(await listAuthorizedDailyReleaseSummaries({ DB }, 0)).toEqual([]);
+    reading = true;
+    expect((await listAuthorizedDailyReleaseSummaries({ DB })).map(s => s.date)).toEqual(dates.slice(1));
+    expect(graphReads).toBe(10);
+  });
+
   test('compatibility projection joins the current formal guard in the write that mutates daily_pages', async () => {
     let sqlite!: DatabaseSync;
     let mutateAtProjection = false;
