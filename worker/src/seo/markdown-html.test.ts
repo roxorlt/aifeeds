@@ -97,6 +97,22 @@ describe('markdownToSafeHtml — 正常 markdown 渲染', () => {
   });
 });
 
+describe('markdownToSafeHtml — link resolver safety', () => {
+  test('does not pass unsafe original schemes to the resolver', () => {
+    let calls = 0;
+    const { html } = markdownToSafeHtml('<a href="&#106;avascript:alert(1)">bad</a>', {
+      resolveHref: () => { calls++; return 'https://example.com'; },
+    });
+    expect(calls).toBe(0);
+    expect(html).not.toContain('href=');
+  });
+  test('rejects an unsafe resolver result and leaves default relative links unchanged', () => {
+    expect(markdownToSafeHtml('[doc](docs/a.md)', { resolveHref: () => 'javascript:alert(1)' }).html)
+      .not.toContain('href=');
+    expect(markdownToSafeHtml('[doc](docs/a.md)').html).toContain('href="docs/a.md"');
+  });
+});
+
 describe('markdownToSafeHtml — 净化 XSS 向量', () => {
   test('script 标签 + 内容整体剥除', () => {
     const { html } = markdownToSafeHtml('前\n\n<script>alert(1)</script>\n\n后');

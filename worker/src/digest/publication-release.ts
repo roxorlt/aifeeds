@@ -1111,6 +1111,19 @@ export async function projectAuthorizedDailyPageCompatibility(
   }
 }
 
+/** Bound outbound D1 reads and preserve order without starting one task per release. */
+async function mapReleaseReads<T, R>(rows: T[], read: (row: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(rows.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(8, rows.length) }, async () => {
+    while (next < rows.length) {
+      const index = next++;
+      results[index] = await read(rows[index]);
+    }
+  }));
+  return results;
+}
+
 export async function listAuthorizedDailyReleaseSummaries(
   env: PublicationReleaseEnv,
   limit?: number,
@@ -1119,27 +1132,37 @@ export async function listAuthorizedDailyReleaseSummaries(
   const result = await env.DB.prepare(
     `SELECT * FROM daily_release_heads ORDER BY date DESC${boundedLimit === null ? '' : ' LIMIT ?'}`,
   ).bind(...(boundedLimit === null ? [] : [boundedLimit])).all<ReleaseHeadRow>();
-  const summaries: AuthorizedDailyReleaseSummary[] = [];
-  for (const head of result.results || []) {
+  const prepared = await mapReleaseReads(result.results || [], async (head) => {
     try {
-      if (!await completeHead(env.DB, head)) continue;
+      if (!await completeHead(env.DB, head)) return null;
       const page = await loadPublicationGraph(env.DB, head.page_publication_id);
       const metadata = publicationMetadata(page.publication);
       const video = head.video_publication_id
         ? videoRowFromGraph(head, await loadPublicationGraph(env.DB, head.video_publication_id))
         : null;
-      await finalOutwardGuard(env, head, page.publication);
-      summaries.push({
+      const summary: AuthorizedDailyReleaseSummary = {
         date: head.date,
         release_generation: Number(head.release_generation),
         promoted_at_ms: Number(head.promoted_at_ms),
         title: typeof metadata.title === 'string' ? metadata.title : `AI 日报 ${head.date}`,
         item_count: Number(metadata.item_count || 0),
         video,
-      });
+      };
+      return { head, page: page.publication, summary };
     } catch {
-      // One stale/unauthorized release must not reveal itself through archive or sitemap projection.
+      // A stale release must never reveal itself through the projection.
+      return null;
     }
-  }
-  return summaries;
+  });
+  // Finish ALL graph reads before outward guards, including cross-release withdrawal races.
+  const guarded = await mapReleaseReads(prepared, async (entry) => {
+    if (!entry) return null;
+    try {
+      await finalOutwardGuard(env, entry.head, entry.page);
+      return entry.summary;
+    } catch {
+      return null;
+    }
+  });
+  return guarded.filter((summary): summary is AuthorizedDailyReleaseSummary => summary !== null);
 }

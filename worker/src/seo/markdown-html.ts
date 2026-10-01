@@ -64,7 +64,7 @@ const ATTR_ALLOW: Record<string, Set<string>> = {
 
 export function markdownToSafeHtml(
   md: string,
-  opts?: { maxChars?: number },
+  opts?: { maxChars?: number; resolveHref?: (href: string) => string },
 ): { html: string; truncated: boolean } {
   if (typeof md !== 'string' || md.length === 0) {
     return { html: '', truncated: false };
@@ -86,7 +86,7 @@ export function markdownToSafeHtml(
     return { html: `<p>${escapeText(text)}</p>`, truncated };
   }
 
-  return { html: sanitizeHtml(rawHtml).trim(), truncated };
+  return { html: sanitizeHtml(rawHtml, opts?.resolveHref).trim(), truncated };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -125,7 +125,7 @@ function truncateMarkdown(
 // <(/?)(tagname)(attrs)> —— attrs 字符类显式排除 > " ' 后再交替引号串，无二义 → 无灾难回溯。
 const TAG_RE = /^<(\/?)([a-zA-Z][a-zA-Z0-9:_-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/;
 
-function sanitizeHtml(html: string): string {
+function sanitizeHtml(html: string, resolveHref?: (href: string) => string): string {
   const out: string[] = [];
   const n = html.length;
   let i = 0;
@@ -184,7 +184,7 @@ function sanitizeHtml(html: string): string {
       if (isClose) {
         if (!VOID_TAGS.has(tag)) out.push(`</${tag}>`);
       } else {
-        const safeAttrs = sanitizeAttrs(tag, attrStr);
+        const safeAttrs = sanitizeAttrs(tag, attrStr, resolveHref);
         if (tag === 'img' && !safeAttrs.includes('src=')) {
           // img 无合法 src（相对 / data: / 缺失）→ 整个 img 丢弃（无意义且防残留）
         } else {
@@ -210,7 +210,7 @@ function sanitizeHtml(html: string): string {
 const ATTR_RE =
   /([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
 
-function sanitizeAttrs(tag: string, attrStr: string): string {
+function sanitizeAttrs(tag: string, attrStr: string, resolveHref?: (href: string) => string): string {
   const allow = ATTR_ALLOW[tag];
   if (!allow) return ''; // 该标签不放行任何属性
   const kept: string[] = [];
@@ -228,7 +228,9 @@ function sanitizeAttrs(tag: string, attrStr: string): string {
 
     if ((tag === 'a' && name === 'href') || (tag === 'img' && name === 'src')) {
       const allowRelative = tag === 'a'; // img 仅 http(s)；a 允许相对 / 锚点
-      const url = sanitizeUrl(rawValue, allowRelative);
+      let url = sanitizeUrl(rawValue, allowRelative);
+      // Reject the original scheme before rewriting; validate rewritten destinations too.
+      if (url && tag === 'a' && resolveHref) url = sanitizeUrl(resolveHref(url), true);
       if (url) kept.push(`${name}="${escapeAttr(url)}"`);
       continue;
     }

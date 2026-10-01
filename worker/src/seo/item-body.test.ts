@@ -96,6 +96,39 @@ describe('renderItemBody — gh（全文 README）', () => {
   });
 });
 
+describe('GitHub README relative links', () => {
+  const render = (md: string, extra: Record<string, string> = {}) => body('gh', {
+    id: 'github:acme/tool', url: 'https://github.com/acme/tool',
+    extra: JSON.stringify({ readme_translated: md, default_branch: 'main', ...extra }),
+  });
+  test('resolves ordinary, reference and raw HTML links', () => {
+    const html = render('[doc](docs/configuration.md) [ref][r]\n\n[r]: ./README.zh.md\n\n<a href="docs/install.md">install</a>');
+    for (const path of ['docs/configuration.md', 'README.zh.md', 'docs/install.md']) {
+      expect(html).toContain(`href="https://github.com/acme/tool/blob/main/${path}"`);
+    }
+  });
+  test('nested README directory, root paths, query and encoded branch', () => {
+    const html = render('[parent](../guide.md?x=1&y=2#intro) [root](/LICENSE) [same](?plain=1)', {
+      readme_path: 'docs/README.md', default_branch: 'release/v2',
+    });
+    expect(html).toContain('href="https://github.com/acme/tool/blob/release%2Fv2/guide.md?x=1&amp;y=2#intro"');
+    expect(html).toContain('href="https://github.com/acme/tool/blob/release%2Fv2/LICENSE"');
+    expect(html).toContain('href="https://github.com/acme/tool/blob/release%2Fv2/docs/README.md?plain=1"');
+  });
+  test('clamps traversal at repo root and encodes spaces', () => {
+    expect(render('<a href="../../../other repo/file.md">doc</a>', { readme_path: 'docs/README.md' }))
+      .toContain('href="https://github.com/acme/tool/blob/main/other%20repo/file.md"');
+  });
+  test('preserves fragments/external links and rejects unsafe schemes before resolving', () => {
+    const html = render('[section](#install) [site](https://example.com/a) <a href="//example.com/a">external</a> <a href="javascript:alert(1)">bad</a> <a href="&#106;avascript:alert(2)">entity</a> <a href="jav&#9;ascript:alert(3)">ctrl</a>');
+    expect(html).toContain('href="#install"');
+    expect(html).toContain('href="https://example.com/a"');
+    expect(html).not.toMatch(/javascript:|alert\(/);
+    expect(html).not.toContain('blob/main/javascript');
+    expect(render('`[doc](docs/a.md)`')).toContain('[doc](docs/a.md)');
+  });
+});
+
 describe('renderItemBody — hf（deep_analysis 全文）', () => {
   test('渲染 abstract 中译 + deep_analysis 各维', () => {
     const html = body('hf-paper', {
